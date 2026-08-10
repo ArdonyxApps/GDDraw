@@ -1,0 +1,29 @@
+# Godot 4+ generated cache
+.godot/
+
+# Godot-generated imports and export configuration
+.import/
+*.import
+export.cfg
+export_presets.cfg
+
+# Imported translations generated from CSV files
+*.translation
+
+# Mono-generated files
+.mono/
+data_*/
+mono_crash.*.json
+
+# GDDraw-generated user content
+/gddraw/
+
+# Local Godot development and test content
+/local_test/
+
+# Local Godot AI/MCP editor integration
+/addons/godot_ai/
+/addons/godot-ai/
+
+# Local release archives
+releases/*.zip

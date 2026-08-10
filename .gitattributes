@@ -1,0 +1,2 @@
+# Normalize text files and keep repository line endings consistent.
+* text=auto eol=lf

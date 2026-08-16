@@ -1,459 +1,334 @@
 # GDDraw Feature Backlog
 
-This document tracks post-0.1.0 work, known limitations, and completed stabilization milestones for GDDraw.
+This document records shipped milestones, the planned `0.2.0` development
+scope, known limitations, and work being considered for later releases.
 
-## Current Strengths
+## 0.2.0 Planned Work
 
-- Bottom-panel Godot editor plugin with a compact drawing workspace.
-- 2D canvas mode for direct texture/sprite painting.
-- 3D texture painting mode for selected `MeshInstance3D` and supported single-material CSG albedo textures.
-- Split mode showing the 2D texture canvas and 3D preview side by side.
-- Shared image buffer between 2D and 3D views.
-- Brush, eraser, paint bucket, line, rectangle, ellipse, eyedropper, pan, selection, lasso selection, copy, cut, paste, flip, undo, redo, clear, save, load, and Sprite2D creation.
-- Brush size, color, square/circle brush heads, touch-pixels mode, and pixel-perfect mode.
-- UV overlay on the 2D texture canvas and optional UV wire overlay on the 3D preview.
-- 3D orbit, pan, zoom, transparent grid-line stage, and selected mesh preview.
-- Flat unshaded 3D texture preview material with nearest filtering, mipmap-free live images, and highest-detail mesh LOD to keep painted pixels stable at every camera distance.
-- 3D brush footprint preview that reflects brush size and brush head.
-- 3D texture-session eraser restores pixels from the original loaded texture instead of erasing to transparent.
-- Shared/mirrored UV warning without blocking painting.
-- Non-destructive preview flow: original imported mesh and material are not destructively modified for preview.
-- Editable 3D surface targets centralize source identity, generated mesh snapshots, transforms, material discovery, and undoable assignment for meshes and CSG without replacing CSG scene nodes.
+The `0.2.0` theme is workflow depth: expand creation tools, improve 3D visual
+feedback, and make common Godot asset-creation tasks faster without attempting
+a major architectural rewrite.
 
-## Known Limitations
+### Toolbox
 
-- Split View 2D-to-3D hover preview is partially working but does not reliably select the visible surface for complex meshes.
-  - The release build uses a subtle blue point marker plus the normal linked-view surface highlight; diagnostic console logging remains disabled.
-  - Canvas signal emission, normalized UV coordinates, indexed/non-indexed triangle lookup, hit transforms, highlighting, and cleanup have been verified.
-  - Known reproduction: on a complex character texture, hovering some overlapping UV regions can highlight a hidden surface instead of the visible outer surface. Selecting the nearest overlapping UV candidate did not eliminate this behavior.
-  - Simple planes, cubes, and synthetic overlapping shells work, so the remaining issue is specific to ambiguous/complex UV-to-visible-surface selection rather than basic signal or rendering failure.
-  - Defer deeper work until this feature is prioritized; a robust solution may require cached UV triangle data plus an actual camera-visibility/occlusion test.
-- 3D brush visibility can still vary by texture/model colors. It is more accurate now, but may need stronger contrast controls.
-- Touch-pixels behavior should be validated on dense UV seams, mirrored UVs, and tiny islands to ensure it paints exactly the intended texture footprint.
-- Split mode layout can crowd controls on narrow docks, especially with the settings panel open.
-- 3D-to-2D hover marker can be difficult to see on very large canvases or visually busy UV maps.
-- The 2D zoom ceiling follows the drawable viewport so pixel inspection remains detailed and bounded across dock and Split View layouts.
+#### Text Tool
 
-## Planned Core Work
+- [x] Add a text tool that creates a temporary editable text box.
+- [x] Allow text entry, movement, and box resizing before rasterization.
+- [x] Add font size, foreground color, alignment, and wrapping controls.
+- [x] Commit by clicking outside, switching tools, `Ctrl+Enter`, or the explicit command.
+- [x] Cancel with `Escape` without changing pixels or history.
+- [x] Record committed text as one undoable image operation.
+- [x] Keep the first version focused; defer rich text, curved text, and advanced
+  effects while supporting selection-style draft rotation.
 
-### Recommended Next Stabilization Slice
+#### Paint Bucket Fill Styles
 
-- [x] Make the 3D texture-session lifecycle explicit and independent from view layout.
-  - [x] Entering 3D, Split Horizontal, or Split Vertical never detects or loads a mesh.
-  - [x] Show a no-session 3D state with **Use Selected 3D Surface** and mesh/CSG drag/drop instructions.
-  - [x] Route selected meshes and mesh drops through a read-only picker listing every material/surface slot.
-  - [x] Accept Scene-tree mesh nodes and parents directly over both the empty 3D pane and active 3D viewport.
-  - [x] Enable safe `StandardMaterial3D.albedo_texture` choices, including readable non-file textures recoverable through Save As; explain unsupported and missing materials.
-  - [x] Keep missing-texture creation behind a separate explicit confirmation; the picker never creates or assigns resources.
-  - [x] Show persistent `Editing mesh · Material slot · texture · Clean/Unsaved` identity plus **Stop Editing**, separate from transient status.
-  - [x] Snapshot the independent 2D image, undo/redo history, zoom/pan, selection mask, and floating-selection state before the first session.
-  - [x] Restore that workspace after clean exit or successful Save/Discard, while Cancel and failed saves preserve the complete live session.
-  - [x] Preserve one snapshot across in-session mesh replacement and clear it after exit so repeated sessions cannot leak state.
-  - [x] Support **Save As** from File and the unsaved Stop Editing prompt, assigning the successful new PNG through editor undo/redo before continuing.
-  - [x] Put newly created and Save As textures on a duplicated per-instance Surface Material Override rather than mutating embedded mesh materials.
-  - [x] Admit `CSGBox3D`, `CSGSphere3D`, `CSGCylinder3D`, `CSGMesh3D`, and other material-bearing CSG primitives through selected-node, parent-resolution, and drag/drop workflows.
-  - [x] Validate generated CSG triangles/UVs, reject unsupported or multi-material generated results explicitly, and refresh or pause the preview when source geometry changes.
-  - [x] Keep missing CSG materials and textures behind explicit confirmation, with file/assignment failure cleanup and editor undo/redo for successful scene assignments.
-- [x] Protect active 3D texture sessions from accidental canvas resizing.
-  - [x] Disable canvas width, height, aspect-lock, keep-pixels, and resize controls while an imported texture session is active.
-  - [x] Explain the restriction in the control tooltip/status message and reject indirect resize commands without changing the canvas or history.
-  - Later, add an explicit confirmed resize workflow if resizing 3D textures proves necessary.
-- [x] Protect unsaved active 3D texture sessions during replacement.
-  - [x] Compare the live RGBA8 canvas with the last successfully loaded/saved RGBA8 baseline, so exact undo back to that image becomes clean and redo becomes unsaved.
-  - [x] Keep the saved baseline separate from the original loaded image used by the 3D eraser restore behavior.
-  - [x] Show `mesh · texture · clean/unsaved` in the compact status bar.
-  - [x] Gate selected-mesh loads, mesh/image drops, and opened images behind Save / Discard / Cancel when the active session is unsaved.
-  - [x] Continue after Save only when the texture write succeeds; canceled or failed saves preserve the current session, pixels, history, and dirty state.
-  - [x] Stage replacement mesh sessions before committing them, so a failed replacement load does not clear the current session.
-  - [x] Keep 2D, 3D, and Split view changes session-preserving and history-free.
-- [x] Protect the independent 2D document when starting a 3D texture session.
-  - [x] Track the current PNG path and last successfully loaded/saved RGBA8 baseline; exact undo to the baseline is clean.
-  - [x] Prompt only for unsaved pixel differences, after either selected-mesh or drag/drop picker confirmation and before replacing the canvas.
-  - [x] Show an aspect-preserving thumbnail and pixel dimensions of the unsaved 2D image in the entry prompt.
-  - [x] Save to the existing PNG when available, otherwise use Save As, and continue only after a successful write.
-  - [x] Support Continue Without Saving while preserving the complete in-memory image, history, selection/floating selection, view, and dirty state for restoration.
-  - [x] Make Cancel atomic, including the pending picker mesh/material choice.
-  - [x] Expose a red, session-only **File > Stop Editing 3D Texture…** action routed through the existing Stop Editing save/discard/cancel handler.
-- [x] Compact the bottom context bar.
-  - [x] Replace the permanently visible 3D session identity with a dynamic tooltip on **Stop Editing**.
-  - [x] Move **Stop Editing** immediately left of the 2D/3D/Split View selector.
-  - [x] Remove the interim transient-status label and partial activity-history popup rather than presenting an incomplete action log as authoritative history.
+- [x] Add Solid, Dither, Pattern, and Custom fill styles to the 2D paint
+  bucket without changing the existing region-discovery algorithms.
+- [x] Include checkerboard, horizontal/vertical/diagonal line, dot, and ordered
+  Bayer 25/50/75 percent presets with editable dither and pattern geometry.
+- [x] Provide a bounded, staged Fill Settings overlay with Preferences-style
+  options, a checkerboard-backed 64 × 64 live preview, Cancel, and Use.
+- [x] Keep configuration changes pixel- and history-neutral; preserve the most
+  recent settings for every fill tab while the GDDraw dock remains open.
+- [x] Define exact foreground/background RGBA behavior for Solid, Dither, and
+  Pattern fills, including Clicked Color and Restyle Previous Fill targeting.
+- [x] Add Custom Image sources from project/external image selection, drag and
+  drop, GDDraw copied/cut selections, the system clipboard, and clipboard image
+  paths, with thumbnail, filename, paste, and clear actions.
+- [x] Support Original RGBA, Alpha Mask, and thresholded Two-Color Mask custom
+  color modes while preserving transparent-source no-paint behavior.
+- [x] Support independent X/Y repetition, independent or aspect-locked scale,
+  horizontal/vertical spacing, rotation, X/Y offsets, and Nearest or Bilinear
+  source sampling.
+- [x] Anchor Dither, Pattern, and Custom rendering to absolute canvas
+  coordinates so separately filled neighboring regions align seamlessly.
+- [x] Preserve tolerance, Contiguous/Global/Replace Color behavior, selections,
+  alpha lock, clipping, compositing, Restyle Previous Fill, one-entry history,
+  and no-op-safe history.
+- [x] Keep styled fills scoped to the 2D Paint Bucket; 3D UV Paint Bucket
+  behavior remains solid and other drawing/shape tools remain unchanged.
+
+#### Shape Origin Modes
+
+- [x] Replace the legacy shape-origin checkbox with an **Origin** mode.
+- [x] Provide **Corner to Corner** for the default endpoint behavior.
+- [x] Provide **From Start Point** for the center-at-initial-click
+  behavior.
+- [x] Add **From Canvas Center** so the shape remains centered on the canvas.
+- [x] Keep Shift constraints and preview/commit geometry consistent across all
+  origin modes.
+
+### 3D Painting And Preview
+
+#### Preview Depth And Readability
+
+- [x] Add a neutral preview light so white or flat albedo textures retain
+  visible surface depth while painting.
+- [x] Keep the light isolated to GDDraw's private preview scene.
+- [x] Provide a simple light enable/intensity control if the fixed default is
+  not sufficient.
+- [x] Preserve a color-accurate unshaded option.
+- [x] Evaluate horizon haze/ground fade; retain the transparent grid stage
+  because it improves orientation without obscuring texture colors.
+- [x] Defer exact duplication of the main editor viewport environment.
+
+#### Shape Tools On 3D Surfaces
+
+- [x] Map the initial and current 3D shape surface hits into deterministic texture-pixel coordinates.
+- [x] Preview 3D shape results nondestructively in both the 2D texture and private 3D live texture.
+- [x] Commit rasterized 3D shape results to the shared 2D image on a compatible release.
+- [x] Implement Line, Rectangle, and Ellipse by delegating preview and commit rasterization to their 2D paths with one-entry/no-op-safe history.
+- [x] Break or reject a shape when its endpoints cross incompatible material
+  surfaces, disconnected UV islands, or ambiguous seams.
+- [x] Add Rectangle and Ellipse support after Line behavior is reliable.
+
+### Godot Creation Options
+
+- [x] Expand textured CSG creation beyond `CSGBox3D`.
+- [x] Add `CSGSphere3D` and `CSGCylinder3D` creation.
+- [x] Evaluate `CSGTorus3D`; keep it deferred because generated seam triangles
+  wrap across both UV axes and produce unsafe interpolation/paint hits.
+- [x] Add creation options for assigning the current image, selecting the new
+  node, and enabling collision.
+- [x] Prefer the CSG node's native collision support where applicable.
+- [x] Keep the complete node/material/texture creation flow undoable.
+
+### Plugin And Release Options
+
+- [x] Standardize lazily created project asset defaults under
+  `res://gddraw/images`, `res://gddraw/brushes`, and `res://gddraw/fonts` while
+  keeping preferences in project-scoped editor metadata and temporary update
+  staging reserved at `user://gddraw/updates`. Existing configured paths remain
+  authoritative, missing folders are not created by initialization or scans,
+  and `res://addons/GDDraw` remains an immutable package boundary.
+- [x] Add a lightweight stable-release notification with a red **Help** badge
+  and an **Update Available** Help-menu entry.
+- [x] Show the installed and latest available versions in a dock-confined
+  confirmation overlay.
+- [x] Open the validated GitHub Release page only after confirmation.
+- [x] Keep automatic checks notification-only; never download or install without
+  explicit user actions.
+- [x] Add explicitly confirmed, cancellable release-asset download and isolated
+  staging beneath `user://gddraw/updates`.
+- [x] Validate the GitHub-provided SHA-256 digest, exact ZIP root, every archive
+  path, required plugin files, and agreement among release tag, asset name,
+  `PLUGIN_VERSION`, and `plugin.cfg`.
+- [x] Add explicit **Install and Restart**, verified package backups, a
+  transaction descriptor, two-rename replacement, automatic rollback, startup
+  recovery, and activation confirmation after restart.
+- [ ] Add maintainer code signing in addition to GitHub release metadata and
+  TLS transport integrity.
+- [ ] Add alternate release channels or branch-based update artifacts.
+- [ ] Add unattended/background installation.
+- [ ] Add cross-project or global plugin management.
+
+### 0.2.0 Validation
+
+- [x] Add focused tests for text commit/cancel/history behavior.
+- [x] Add deterministic Solid, Dither, Pattern, and Custom Image Fill tests,
+  including settings UI, source workflows, transforms, region modes,
+  compositing, selection/alpha-lock behavior, and history contracts.
+- [x] Cover every shape-origin mode in preview and committed output.
+- [x] Test preview lighting against white, black, and saturated textures.
+- [x] Test 3D lines on simple, connected, seamed, mirrored/overlapping, disconnected, and multi-surface UV layouts.
+- [x] Validate every supported CSG type with and without collision.
+
+## 0.1.0 Completion Notes
+
+Version `0.1.0-alpha` established the core GDDraw workflow as a functional
+Godot 4.7 editor plugin.
+
+### 2D Drawing And Editing
+
+- [x] Create, open, edit, save, and save-as RGBA8 PNG documents.
+- [x] Brush and eraser tools with square/circle heads, size, opacity,
+  hardness, alpha lock, touch-pixels behavior, and pixel-perfect behavior.
+- [x] Contiguous and global paint-bucket modes with deterministic tolerance.
+- [x] Line, rectangle, and ellipse tools with fill options, Shift constraints,
+  start-point-origin drawing, accurate previews, and no-op-safe history.
+- [x] Eyedropper and selection-aware Replace Color workflows.
+- [x] Rectangular and lasso selection with copy, cut, paste, delete, duplicate,
+  move, flip, 90-degree rotation, keyboard nudging, and explicit commit/cancel.
+- [x] Crop to selection, trim transparent bounds, and exact crop rectangles.
+- [x] Image scaling with nearest-neighbor and premultiplied-alpha bilinear
+  interpolation, optional aspect preservation, and undo/redo.
+- [x] Mirror drawing across horizontal, vertical, or both axes.
+- [x] Configurable grid, snapping, transparent checkerboard colors, and
+  preview-only neighboring tiles for repeatable textures.
+- [x] Compact brush presets and deduplicated recent brush sizes.
+- [x] Equality-based clean/unsaved document tracking with protected file and
+  session transitions.
 
 ### 3D Texture Painting
 
-- [x] Prevent 3D strokes from bridging unrelated visible surfaces or UV islands.
-  - [x] Continue interpolated strokes only on the same triangle or an edge-adjacent triangle with locally continuous UVs.
-  - [x] Break continuity when the pointer ray misses, changes material surfaces, jumps to a nonadjacent triangle, or crosses a large UV seam.
-  - [x] Stamp the first valid hit after a break without starting another history entry.
-- Finish 2D-to-3D hover preview when its remaining complex-mesh ambiguity is worth the implementation and runtime cost.
-- Focused hover diagnostics remain available behind disabled debug constants:
-  - Canvas hover and normalized UV flow.
-  - UV lookup hit/miss.
-  - Candidate and accepted triangle counts.
-  - Selected surface/triangle and facing state.
-  - Dedicated marker visibility and cleanup.
-- Improve 3D brush footprint painting across UV seams and islands.
-- Add a clear mode distinction between:
-  - Paint hovered triangle only.
-  - Paint full UV texture footprint.
-  - Paint visible surface footprint, if feasible later.
-- Add optional seam bleed/padding around painted UV pixels to reduce visible texture seams.
-- Add a 3D paint cursor contrast mode:
-  - Light ring.
-  - Dark ring.
-  - Two-tone ring.
-  - Color follows brush.
-- Add a way to frame/reset the 3D preview camera to the mesh.
-- Add a 3D view orientation helper or small axis gizmo.
-- Add an optional grid visibility toggle for the 3D preview.
-- [x] Add material slot selection for meshes with multiple materials.
-- Add texture channel selection:
-  - [x] Albedo/base color first through the explicit session picker.
-  - Normal, roughness, emission later if safe.
-- Support more texture source cases:
-  - `StandardMaterial3D.albedo_texture`.
-  - Common `ShaderMaterial` texture uniforms.
-  - Material override and surface override paths.
-- [x] Audit the proposed "Save Texture" / "Apply" distinction for active 3D sessions.
-  - The canvas already drives a live, flat `ImageTexture` on GDDraw's private preview material in 3D and Split views. There is therefore no unapplied preview state to commit.
-  - **Save Texture** writes the current RGBA8 canvas to the active texture resource path and advances the clean baseline only after a successful write.
-  - The edited scene's source material is not continuously overwritten by painting; only explicit material/texture creation or assignment uses editor undo/redo.
-  - Do not add an **Apply** command unless a future workflow introduces a distinct destination or a deferred material-assignment state.
-- [x] Add dirty-state warnings when switching sessions or loading another image before saving.
-- Add visual warning when shared/mirrored UVs are under the brush.
-- Add an "isolate UV island" or "highlight hovered UV island" mode.
+- [x] Paint albedo textures on supported `MeshInstance3D` surfaces and
+  material-bearing, single-material CSG geometry with usable triangle UVs.
+- [x] Select material slots through a read-only surface picker.
+- [x] Start sessions from the selected Scene-tree node, a supported parent, or
+  scene-tree drag and drop.
+- [x] Create missing materials/textures only after explicit confirmation.
+- [x] Use duplicated per-instance surface overrides for newly created or
+  reassigned textures instead of mutating embedded mesh materials.
+- [x] Save active textures and use Save As for readable non-file textures,
+  with successful assignments recorded through Godot editor undo/redo.
+- [x] Restore erased pixels from the originally loaded texture rather than
+  forcing transparent pixels.
+- [x] Prevent interpolated strokes from bridging unrelated visible surfaces,
+  material surfaces, nonadjacent triangles, or large UV seams.
+- [x] Show a brush footprint that reflects the active size and brush head.
+- [x] Detect and warn about shared or mirrored UV conditions.
+- [x] Lock canvas resizing and scaling while an imported 3D texture session is
+  active.
+- [x] Preserve the current session when a replacement load, save, or picker
+  operation is canceled or fails.
+- [x] Frame the active 3D surface with the `F` shortcut and support reset/zoom
+  controls in the preview.
 
-### Split View Workflow
+### Session And Split-View Workflow
 
-- [x] Preserve independent normalized horizontal and vertical split ratios plus orientation between sessions, with both layouts initially 50/50.
-- [x] Add one compact View dropdown at the right side of Tool Options:
-  - [x] 2D only.
-  - [x] 3D only.
-  - [x] Split horizontal.
-  - [x] Split vertical for tall docks.
-- [x] Keep canvas navigation controls contextual:
-  - [x] Pan and Grid live in the top-right of the 2D canvas.
-  - [x] Each canvas owns its bottom-right zoom/readout/reset controls.
-- [x] Show independent 2D zoom and 3D camera-distance readouts.
-- [x] Keep 2D and 3D hover previews synchronized both ways when linked:
-  - [x] A 3D hit shows the brush point and an unobtrusive outer boundary around the connected UV island in 2D.
-  - [x] A 2D UV hover outlines the corresponding connected surface island in 3D without covering the texture.
-  - The documented complex-mesh 2D-to-3D visibility ambiguity still applies when UV shells overlap.
-- [x] Keep full UV topology exclusive to the UV toggle, which controls both the 2D UV overlay and 3D wire overlay together.
-- [x] Cache triangle-to-UV-island connectivity once per preview mesh rather than rescanning the mesh on every hover.
-- [x] Add a persistent linked-view toggle in the compact status controls and View menu:
-  - [x] On synchronizes hover/island correspondence.
-  - [x] Off clears linked previews and lets each pane behave independently.
+- [x] Keep the 3D texture-session lifecycle independent from 2D/3D/Split view
+  layout changes.
+- [x] Preserve and restore the independent 2D document, history, selection,
+  floating pixels, zoom, and pan around 3D sessions.
+- [x] Protect unsaved 2D and 3D work with Save/Discard/Cancel transitions.
+- [x] Provide 2D-only, 3D-only, Split Horizontal, and Split Vertical layouts.
+- [x] Preserve independent split ratios and orientation.
+- [x] Provide independent 2D zoom and 3D camera-distance controls/readouts.
+- [x] Synchronize linked hover and UV-island previews in both directions.
+- [x] Cache triangle and UV-island connectivity for the active preview mesh.
+- [x] Provide a persistent linked-view toggle and a shared 2D/3D UV-overlay
+  toggle.
+- [x] Retain the private model, paint cache, and editable texture across editor
+  scene-tab changes or source-scene closure; disable Scene Transform Link while
+  its live source node is unavailable.
 
-### 2D Painting
+### Godot Editor Integration
 
-The first painting milestone is complete; remaining enhancements are tracked below.
+- [x] Create a `Sprite2D` from the current saved image.
+- [x] Create a textured `CSGBox3D` from the current image.
+- [x] Assign created or saved textures through editor undo/redo.
+- [x] Provide native File, Edit, Image, Select, Tool, View, Godot, and Help
+  menus with contextual availability and synchronized checks.
+- [x] Provide compact icon-based drawing and navigation controls with tooltips
+  and consistent selected states.
+- [x] Provide native-themed Preferences, Controls, Known Limitations, and About
+  surfaces.
+- [x] Follow Godot-style 3D navigation: middle-drag orbit, Shift+middle-drag
+  pan, right-mouse freelook, WASD/QE movement, and wheel zoom/speed control.
 
-- [x] Complete first 2D painting milestone:
-  - [x] Brush and eraser opacity through the native color picker's alpha channel.
-  - [x] Optional single-stroke overlap buildup, disabled when consistent per-stroke opacity is desired.
-  - [x] Alpha lock for brush, eraser, fill, line, rectangle, and ellipse painting.
-  - [x] Deterministic RGBA8 fill tolerance using maximum per-channel difference.
-  - [x] Contiguous and global fill modes with no-op history protection.
-- [x] Add crop tools:
-  - [x] Crop to clipped rectangular selections and occupied lasso-mask bounds without masking pixels inside the crop result.
-  - [x] Trim transparent bounds using nonzero-alpha pixels, including exact 1x1 results.
-  - [x] Add an exact crop-rectangle dialog with a non-destructive canvas preview and Apply/Cancel workflow.
-  - [x] Preserve RGBA8 pixels and exact dimensions through one-entry undo/redo, with no-op history protection.
-  - [x] Clear stale selection state, synchronize canvas-size controls/signals, and reject all crop commands during active 3D texture sessions.
-  - [x] Cover crop geometry, pixels, selection cleanup, preview parity, history, and 3D/Split restrictions with focused synthetic-image tests.
-- [x] Add image scaling/resampling options:
-  - [x] Add a focused Image > Scale Image dialog with exact 1x1 through 4096x4096 target sizes, Apply/Cancel, and nearest-neighbor as the default.
-  - [x] Keep nearest-neighbor and premultiplied-alpha bilinear resampling explicit, deterministic, RGBA8, and separate from canvas resizing/cropping.
-  - [x] Preserve the source aspect ratio when requested with synchronized, non-recursive, deterministically rounded and clamped dimensions.
-  - [x] Resolve floating pixels into the single scale history entry, clear stale selection/crop state after success, and synchronize dimensions, textures, and signals.
-  - [x] Preserve exact pixels and dimensions through one-entry undo/redo while protecting invalid, unchanged, and canceled operations from history.
-  - [x] Disable and reject scaling during active imported 3D texture sessions in 3D and Split modes.
-  - [x] Cover dimensions, RGBA8 pixels, interpolation/alpha edges, 1x1 boundaries, aspect behavior, cancellation, floating selections, history, signals, and 3D restrictions with synthetic-image tests.
-- [x] Add exact clockwise/counterclockwise 90-degree rectangular, lasso-mask, and floating selection transforms.
-- [x] Add shape modifiers:
-  - [x] Hold Shift for constrained lines/squares/circles, including live preview updates when Shift changes during a drag.
-  - [x] Add a From center option for lines, rectangles, and ellipses.
-  - [x] Share modifier geometry between previews and committed pixels while preserving opacity, alpha lock, fill modes, selection behavior, and no-op history protection.
-  - [x] Apply the brush no-overlap setting across each complete shape so repeated stamps and joined outline edges do not compound alpha.
-  - [x] Render shape previews from the same raster result so preview RGBA, opacity, and no-overlap behavior match committed pixels.
-  - [x] Cover constrained and center-origin line/rectangle/ellipse raster bounds, symmetry, opacity, alpha lock, undo/redo snapshots, and no-op commits with focused synthetic-image tests.
-- [x] Add compact built-in brush presets with automatic Custom transitions.
-- [x] Add bounded, deduplicated recent brush sizes.
-- [x] Add optional brush opacity.
-- [x] Add deterministic brush hardness/softness while keeping pixel-perfect heads hard-edged.
-- [x] Add alpha lock.
-- [x] Add fill tolerance.
-- [x] Add contiguous vs global fill mode.
-- [x] Add selection-aware, mirror-independent Replace Color mode using RGBA8 tolerance.
-- Add dither/pattern fill modes later if they fit the tool.
-- [x] Add mirror drawing:
-  - [x] Add Off, Horizontal (top-to-bottom), Vertical (left-to-right), and Both modes with exact pixel-center symmetry.
-  - [x] Share deterministic mirrored-coordinate deduplication across brush, eraser, shape rasterization/previews, and contiguous fill seeds.
-  - [x] Preserve opacity/overlap, alpha lock, brush behavior, shape modifiers/fill, selection masks, clipping, and one-entry no-op-safe history.
-  - [x] Keep global fill single-pass and 3D/Split UV surface strokes explicitly unmirrored.
-  - [x] Add a compact contextual mode selector synchronized with View-menu commands and status text.
-  - [x] Cover even/odd and degenerate dimensions, center axes, painting tools, fills, preview parity, selection masks, history, resize/load state, and UV regressions with synthetic-image tests.
-- [x] Add preview-only neighboring tile repetitions for repeatable textures.
-- [x] Add persistent transparent checkerboard color customization without pixel/history changes.
+### Documentation And Stabilization
 
-### Selection And Editing
+- [x] Document installation, 2D drawing, 3D painting, Split View, controls,
+  safe texture handling, and current limitations.
+- [x] Add focused synthetic-image tests for crop, scaling, shapes, mirroring,
+  selection transforms, history, and active-session restrictions.
+- [x] Add release-ready promotional screenshots and Asset Store copy.
 
-- [x] Refine rectangular and lasso selection outlines and zoom-stable handles.
-- [x] Add better selection affordances for small zoom levels.
-- [x] Add arrow-key selection nudging with Shift for 10-pixel steps and held-key history grouping.
-- [x] Add duplicate selection as a cancelable movable floating copy.
-- [x] Add exact clockwise/counterclockwise 90-degree selection rotation.
-- [x] Add visible transform Commit/Cancel controls while a floating selection is active.
-- [x] Improve lasso selection-mask previews without modifying selected pixels.
-- Add select by color / magic wand later.
+## Additional Work After 0.2.0
 
-## UI And Usability Polish
+These items remain useful but are not committed to the `0.2.0` scope.
 
-### Toolbar And Controls
+### 2D Drawing And Selection
 
-- [x] Add a native top-level menu bar for common commands:
-  - [x] File.
-  - [x] Edit.
-  - [x] Select.
-  - [x] View.
-  - [x] Godot.
-  - [x] Help.
-- [x] Synchronize menu checks for 2D/3D/Split mode, grid visibility, and UV overlay visibility.
-- [x] Synchronize menu availability for history, clipboard, selection, UV, mesh, zoom, and active texture-session commands.
-- [x] Add compact native Controls, Known Limitations, and About dialogs.
-- [x] Move document, history, mode, preferences, and secondary selection commands out of the always-visible toolbar into menus.
-- [x] Keep painting tools, contextual tool options, and frequently used navigation/3D context actions available as quick controls.
-- [x] Use flat native menu-bar buttons so idle menu headings blend into the editor background.
-- File menu candidates:
-  - [x] New canvas.
-  - [x] Open/load image.
-  - [x] Save.
-  - Save as. Deferred until GDDraw tracks the current 2D document path; the disabled menu item explains this.
-  - [x] Save active 3D texture.
-  - Save texture as new resource.
-  - Recent files/textures.
-- Edit menu candidates:
-  - [x] Undo.
-  - [x] Redo.
-  - [x] Cut.
-  - [x] Copy.
-  - [x] Paste.
-  - [x] Clear.
-  - [x] Preferences/settings.
-- Selection menu candidates:
-  - [x] Select all.
-  - [x] Deselect.
-  - [x] Delete selection.
-  - [x] Flip horizontal.
-  - [x] Flip vertical.
-  - [x] Rotate selection 90 degrees in either direction.
-  - [x] Crop to selection.
-- View menu candidates:
-  - [x] 2D mode.
-  - [x] 3D mode.
-  - [x] Split mode.
-  - [x] Zoom in.
-  - [x] Zoom out.
-  - Zoom to fit.
-  - [x] Reset view.
-  - [x] Toggle grid.
-  - [x] Toggle UV overlay.
-  - Toggle the 3D grid.
-  - Frame 3D mesh.
-- Help menu candidates:
-  - [x] Controls reference.
-  - 3D texture painting quick start.
-  - [x] Known limitations.
-  - [x] About GDDraw.
-  - Add a lightweight update-available notice near Help after 0.1.0; first pass should notify/open the release page, not auto-replace plugin files.
-- [x] Complete the first icon-control polish pass:
-  - [x] Replace Resize text with the Lucide Scaling icon.
-  - [x] Replace Use Selected 3D Surface text with the Lucide MousePointer2 icon.
-  - [x] Replace the UV checkbox/text with a Lucide Network icon toggle.
-  - [x] Replace Browse text with the Lucide FolderOpen icon.
-  - [x] Replace the generic Shapes icon with the Lucide Shapes icon.
-  - [x] Replace the generic Reset View icon with the Lucide RotateCcw icon.
-  - [x] Add descriptive tooltips to the converted icon-only controls.
-- [x] Audit every icon-only control for a clear tooltip and consistent active state.
-- [x] Differentiate the 3D preview from the editor chrome with a brighter neutral background.
-- Separate global file actions, drawing tools, view tools, and 3D-session actions more clearly.
-- Improve transient status messaging so it reflects the active mode without obscuring action feedback.
-- [x] Show active mesh/texture identity in the status bar.
-- [x] Add equality-based clean/unsaved indicator.
-- [x] Add a clear active 3D texture-session indicator through the compact identity label.
-- Disable irrelevant controls by mode:
-  - [x] Hide `Use Selected 3D Surface` outside 3D/Split.
-  - [x] Hide UV toggle until UV data exists.
-  - [x] Disable canvas resize when editing an imported texture unless explicitly allowed.
-- Consider moving canvas size controls out of the main top row when editing a 3D texture to avoid accidental texture resizing.
-- Add confirmation when resizing an active 3D texture-session canvas.
-- [x] Keep the contextual toolbar compact by moving brush presets, recent sizes, alpha lock, brush head, touch-pixels, mirror mode, and canvas resizing into native menus/dialogs.
-- Group settings into tabs:
-  - Brush.
-  - Grid/View.
-  - Defaults.
-  - 3D Paint.
-  - Files.
-- [x] Present Preferences as a native-themed surface covering the full dock workspace beneath the menu bar, with a clear close action and Escape support.
-- Make the settings panel responsive:
-  - Two columns when wide.
-  - Single column when narrow.
-  - Scroll if the dock is short.
+- [ ] Add select-by-color or magic-wand selection.
+- [ ] Consider named presets and optional dock-session/project persistence for
+  Custom Image Fill configurations after the transient workflow has matured.
+- [ ] Add an explicitly confirmed resize workflow for active 3D textures.
+- [x] Add installed-font discovery, custom font-directory selection, and
+  selection-style text transforms.
+- [ ] Consider layer support while preserving a simple single-canvas workflow.
+- [ ] Add tablet pressure if the plugin grows beyond mouse-first input.
 
-### Navigation And Controls
+### 3D Painting
 
-- [x] Standardize the primary 3D mouse navigation controls with Godot's default editor conventions:
-  - [x] Middle drag orbits.
-  - [x] Shift+Middle drag pans.
-  - [x] Right drag captures the pointer for freelook; `WASD` flies in camera space and `Q`/`E` moves vertically.
-  - [x] Shift/Alt temporarily speeds/slows flight, and the wheel adjusts flight speed while freelooking.
-  - [x] Mouse wheel zooms outside freelook and `F` frames the mesh.
-- Decide and document any additional navigation beyond the primary scheme:
-  - 2D canvas pan.
-  - 2D canvas zoom.
-  - 3D orbit.
-  - 3D pan.
-  - 3D zoom.
-  - Frame/focus selected content.
-- [x] Match the primary Godot viewport mouse shortcuts and frame shortcut.
-- [x] Keep left-drag painting separate from middle/right-button navigation gestures.
-- [x] Update the Help > Controls reference with the 3D bindings.
-- Consider a navigation preset setting:
-  - Godot-style.
-  - Art-tool style.
-  - Custom later.
-- Keep controls consistent between 2D-only, 3D-only, and Split modes.
-- Show temporary status hints for navigation actions:
-  - Orbit.
-  - Pan.
-  - Zoom.
-  - Painting.
-- Add keyboard shortcut mapping support later if the plugin grows beyond fixed defaults.
+- [ ] Resolve complex-mesh 2D-to-3D hover ambiguity with visibility or
+  occlusion-aware UV candidate selection.
+- [ ] Improve texture-footprint painting across dense seams and tiny islands.
+- [ ] Add paint-scope modes for hovered triangle, UV footprint, and a possible
+  visible-surface footprint.
+- [ ] Add optional UV seam bleed/padding.
+- [ ] Add configurable light, dark, two-tone, and brush-color cursor contrast.
+- [ ] Add UV-island isolation or explicit hovered-island highlighting.
+- [ ] Add normal, roughness, and emission channel editing where safe.
+- [ ] Support common `ShaderMaterial` texture uniforms.
+- [ ] Add perspective/orthographic preview switching and optional turntable
+  controls.
 
-### Canvas View Polish
+### Godot Workflow Integration
 
-- Add zoom-to-fit button.
-- Add reset pan button.
-- Add frame selected UV island later.
-- Make the 2D canvas background less dominant in large empty areas.
-- Improve checkerboard contrast options.
-- Add optional UV overlay opacity/color settings.
-- Add UV overlay labels or island highlighting later.
-- Make 3D-to-2D hover marker more visible on busy textures:
-  - Two-tone outline.
-  - Inverted color.
-  - Pulsing outline.
-  - Optional crosshair.
-- Make 2D brush preview respect square/circle/touch-pixels behavior visibly.
+- [ ] Add **Edit in GDDraw** for selected `Texture2D` resources.
+- [ ] Add **Paint Texture in GDDraw** for selected `MeshInstance3D` nodes.
+- [ ] Accept mesh, texture, and material resources dragged from the FileSystem.
+- [ ] Add resource save/reimport feedback and warnings for imported paths that
+  may be overwritten.
+- [ ] Add **Save As New Texture** and duplicate-material-and-texture workflows.
+- [ ] Improve inherited and packed-scene material handling.
+- [ ] Add optional auto-save of the active texture on project save.
 
-### 3D Preview Polish
+### File And Asset Workflow
 
-- Add dedicated 3D toolbar overlay:
-  - Frame mesh.
-  - Reset camera.
-  - Toggle grid.
-  - Toggle UV wire.
-  - Toggle brush cursor contrast.
-- Add left/right mouse guidance through tooltips or status hints.
-- Add optional turntable reset.
-- Add camera projection toggle:
-  - Perspective.
-  - Orthographic.
-- Add lighting/background controls only if flat preview is not enough for certain workflows.
-- Keep paint preview flat/unshaded by default so color stays accurate.
+- [ ] Add recent files, textures, meshes, and sessions.
+- [ ] Add default save-name templates.
+- [ ] Add WebP and opaque JPEG export where appropriate.
+- [ ] Add common new-texture size and background presets.
+- [ ] Add backup-before-save and show-in-FileSystem conveniences.
 
-## Godot Workflow Integration
+### UI And Navigation
 
-- Add context action: "Edit in GDDraw" for selected `Texture2D` resources.
-- Add context action: "Paint Texture in GDDraw" for selected `MeshInstance3D`.
-- Support dragging:
-  - MeshInstance3D from scene tree.
-  - Mesh resource from filesystem.
-  - Texture resource from filesystem.
-  - Material resource from filesystem.
-- Add resource save/reimport feedback after saving textures.
-- Add optional auto-save active texture on project save.
-- Add undo/redo integration for material/texture assignment.
-- Add safer handling for imported texture paths and `.import` resources.
-- Add warning when editing a generated/imported texture path that may be overwritten by reimport.
-- Add "Save As New Texture" for non-destructive material iteration.
-- Add "Duplicate material and texture for editing" workflow.
-- Add support for packed scenes with inherited mesh/material setup.
-- Add clear messaging when selected mesh has:
-  - No mesh.
-  - No UVs.
-  - No editable material.
-  - Multiple material slots.
-  - Shared/mirrored UVs.
+- [ ] Improve narrow-dock and short-dock responsiveness.
+- [ ] Separate global file actions, drawing tools, view tools, and session
+  actions more clearly.
+- [ ] Add zoom-to-fit and explicit reset-pan controls.
+- [ ] Add an optional 3D grid toggle and compact orientation helper.
+- [ ] Add UV overlay color/opacity settings and stronger linked-hover markers.
+- [ ] Add remappable keyboard shortcuts if fixed defaults become limiting.
+- [ ] Consider Godot-style and art-tool navigation presets.
 
-## File And Asset Workflow
+### Performance And Robustness
 
-- Add recent files/textures.
-- Add recent meshes or sessions.
-- Add default save naming templates.
-- Add export options:
-  - PNG.
-  - WebP.
-  - JPEG for opaque textures.
-- Add import size presets for new 3D textures:
-  - 256.
-  - 512.
-  - 1024.
-  - 2048.
-  - 4096.
-- Add "create texture" options:
-  - Transparent.
-  - White.
-  - Black.
-  - Current color.
-  - Checker/template.
-- Add backup-before-save option.
-- Add "open texture folder" or "show in FileSystem" convenience action.
+- [ ] Profile 2048px and 4096px textures in 3D and Split View.
+- [ ] Batch full-texture updates during strokes if profiling shows a need.
+- [ ] Add guardrails for extreme texture and brush sizes.
+- [ ] Expand tests around UV lookup, brush footprint coverage, eraser restore,
+  3D stroke history, and degenerate triangles.
+- [ ] Keep plugin reloads clean and verify editor logs after UI/script changes.
 
-## Performance And Robustness
+### Distribution
 
-- Avoid updating the full 3D texture every mouse-motion event if it becomes slow on large textures.
-- Batch texture updates during strokes when useful.
-- Profile 2048 and 4096 textures in Split mode.
-- Add guardrails for huge brush sizes on huge textures.
-- Cache UV lookup data for active mesh instead of scanning arrays repeatedly.
-- Cache UV island/triangle data for hover preview.
-- Add tests or script checks around:
-  - UV barycentric lookup.
-  - Brush footprint coverage.
-  - Eraser restore behavior.
-  - Undo/redo after 3D strokes.
-- Keep plugin reload clean with editor logs checked after UI/script changes.
-- Add fallbacks for meshes without UVs or with degenerate UV triangles.
+- [ ] Publish a workflow video closer to `1.0`, after the primary interface and
+  workflows have stabilized.
+- [x] Add a staged updater with download integrity, rollback, and editor restart;
+  keep each download and installation explicitly confirmed.
+- [ ] Define any future Asset Store interaction or global plugin-manager policy.
 
-## Documentation And Onboarding
+## Known Limitations
 
-- [x] Update README to describe:
-  - 2D mode.
-  - 3D mode.
-  - Split mode.
-  - Texture session saving.
-  - Restore eraser behavior.
-  - Shared UV warning.
-- [x] Add a small "Quick Start: Paint a 3D Surface Texture" guide.
-- [x] Add a "Known Limitations" section.
-- Add a screenshot gallery once UI settles.
-- [x] Document controls:
-  - 2D pan/zoom.
-  - 3D orbit/pan/zoom.
-  - Brush/fill/eraser behavior.
-- [x] Document safe texture workflow:
-  - Duplicate texture/material if needed.
-  - Save texture.
-  - Reimport considerations.
+- Split View 2D-to-3D hover can select a hidden surface when complex meshes
+  contain overlapping UV shells. Simple planes, cubes, and synthetic overlap
+  cases work; the remaining ambiguity requires visibility-aware selection.
+- 3D brush visibility varies with model and texture colors.
+- Dense seams, mirrored UVs, tiny islands, and complex overlap need further
+  touch-pixels and footprint validation.
+- Split layouts and Preferences can crowd narrow bottom panels.
+- The 3D-to-2D hover marker can be difficult to see on large or visually busy
+  textures.
+- 3D painting currently targets supported albedo textures on
+  `StandardMaterial3D` surfaces with usable triangle UVs.
+- Shader materials, additional texture channels, and multi-material generated
+  CSG results are not currently editable.
+- Active imported 3D texture sessions intentionally lock canvas resizing and
+  image scaling.
 
 ## Open Design Questions
 
-- Should GDDraw remain a single-canvas tool, or eventually support layers?
-- Should 3D painting support surface-space brush strokes, or stay UV-texture based?
-- Should a future explicit workflow allow resizing active 3D textures? Version 0.1.0 keeps the canvas size locked.
-- Should Split mode become the default once a 3D session is active?
-- Should UV overlay be shown on the 3D mesh, the 2D canvas, or both by default?
-- How much material support is useful before the UI becomes too complex?
-- Should GDDraw support tablet pressure later, or stay mouse-first?
+- Should GDDraw eventually support layers or remain a focused single-canvas
+  tool?
+- Should advanced 3D painting remain UV-texture based or gain a separate
+  surface-space stroke system?
+- Should Split View become the default after a 3D session starts?
+- How much material and texture-channel support is useful before the session
+  picker becomes too complex?
+- What guarantees would be required before a self-updater is safer than an
+  update notification and release-page link?

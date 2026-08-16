@@ -55,7 +55,37 @@ class MeshDropViewport:
 		return false
 
 
+class ImageDropTarget:
+	extends PanelContainer
+
+	signal image_data_dropped(data: Variant)
+
+	func _can_drop_data(_at_position: Vector2, data: Variant) -> bool:
+		return _might_contain_image(data)
+
+	func _drop_data(_at_position: Vector2, data: Variant) -> void:
+		image_data_dropped.emit(data)
+
+	func _might_contain_image(data: Variant) -> bool:
+		if data is Texture2D:
+			return true
+		if data is String:
+			return data.strip_edges().get_extension().to_lower() in ["png", "jpg", "jpeg", "webp", "bmp", "tga", "svg"]
+		if data is Resource:
+			return data.resource_path.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp", "bmp", "tga", "svg"]
+		if data is PackedStringArray or data is Array:
+			for item in data:
+				if _might_contain_image(item):
+					return true
+		if data is Dictionary:
+			for key in ["files", "paths", "path", "file", "resource_path", "resource", "nodes"]:
+				if data.has(key) and _might_contain_image(data[key]):
+					return true
+		return false
+
+
 const ICON_DIR := "res://addons/GDDraw/icons"
+enum IconState { NORMAL, SELECTED, DISABLED }
 const CANVAS_SCRIPT_PATH := "res://addons/GDDraw/gddraw_canvas.gd"
 const HISTORY_SCRIPT_PATH := "res://addons/GDDraw/gddraw_history.gd"
 const PNG_IO_SCRIPT_PATH := "res://addons/GDDraw/gddraw_png_io.gd"
@@ -63,13 +93,22 @@ const SHORTCUTS_SCRIPT_PATH := "res://addons/GDDraw/gddraw_shortcuts.gd"
 const TEXTURE_3D_SESSION_SCRIPT_PATH := "res://addons/GDDraw/gddraw_3d_texture_session.gd"
 const MESH_PAINT_CACHE_SCRIPT_PATH := "res://addons/GDDraw/gddraw_mesh_paint_cache.gd"
 const SPRITE_CREATOR_SCRIPT_PATH := "res://addons/GDDraw/editor_integration/gddraw_sprite_creator.gd"
+const UPDATE_CHECKER_SCRIPT_PATH := "res://addons/GDDraw/gddraw_update_checker.gd"
+const UPDATER_SCRIPT_PATH := "res://addons/GDDraw/gddraw_updater.gd"
+const GDDrawUpdater := preload("res://addons/GDDraw/gddraw_updater.gd")
+const PLUGIN_SCRIPT_PATH := "res://addons/GDDraw/GDDraw.gd"
+const StoragePaths := preload("res://addons/GDDraw/gddraw_storage_paths.gd")
 const TOOL_BUTTON_SIZE := Vector2(28, 28)
 const TOOL_ICON_MAX_WIDTH := 18
+const COMPACT_ROTATION_BUTTON_SIZE := Vector2(20, 14)
+const COMPACT_ROTATION_ICON_MAX_WIDTH := 12
 const TOOLBAR_SEPARATION := 2
 const TOOL_BUTTON_PANEL_COLOR := Color("#292929")
-const TOOL_BUTTON_HOVER_COLOR := Color(0.18, 0.18, 0.18, 1.0)
+const TOOL_BUTTON_HOVER_COLOR := Color("#383838")
 const TOOL_BUTTON_SELECTED_COLOR := Color("#424242")
 const TOOL_BUTTON_SELECTED_HOVER_COLOR := Color("#424242")
+const ICON_AUTHORED_COLOR := Color.WHITE
+const ICON_DISABLED_FALLBACK_COLOR := Color(1.0, 1.0, 1.0, 0.4)
 const TOOL_BUTTON_CORNER_RADIUS := 4
 const DESTRUCTIVE_BUTTON_COLOR := Color("#B8323C")
 const DESTRUCTIVE_BUTTON_HOVER_COLOR := Color("#D04751")
@@ -79,18 +118,45 @@ const EMPTY_RECENT_SWATCH_COLOR := Color("#D6D8DA")
 const PAINT_3D_BACKGROUND_COLOR := Color("#383C42")
 const PAINT_3D_STAGE_MIN_SIZE := 8.0
 const PAINT_3D_STAGE_PADDING := 1.8
-const PAINT_3D_STAGE_GRID_LINES := 24
+const PAINT_3D_STAGE_GRID_LINES := 8
+const PAINT_3D_STAGE_GRID_EXTENT_MULTIPLIER := 6
+const PAINT_3D_TRANSFORM_POLL_INTERVAL := 0.05
 const PAINT_3D_PREVIEW_LOD_BIAS := 128.0
 const PAINT_3D_BRUSH_PREVIEW_SEGMENTS := 48
+const PAINT_3D_PREVIEW_LIGHT_MIN := 0.0
+const PAINT_3D_PREVIEW_LIGHT_MAX := 4.0
+const PAINT_3D_PREVIEW_LIGHT_DEFAULT := 1.35
+const PAINT_3D_PREVIEW_AMBIENT_ENERGY := 0.35
+const PAINT_3D_PREVIEW_LIGHT_DEFAULT_ROTATION := Vector3(-45.0, 35.0, 0.0)
+const PAINT_3D_GIZMO_RADIUS_PIXELS := 72.0
+const PAINT_3D_GIZMO_HIT_PIXELS := 9.0
+const PAINT_3D_GIZMO_SEGMENTS := 64
+const PAINT_3D_GIZMO_RING_WIDTH_PIXELS := 2.6
+const PAINT_3D_GIZMO_ARROW_LENGTH := 1.35
+const PAINT_3D_GIZMO_ARROW_SHAFT_START := 0.16
+const PAINT_3D_GIZMO_ARROW_HEAD_START := 1.08
+const PAINT_3D_GIZMO_ARROW_SHAFT_RADIUS := 0.024
+const PAINT_3D_GIZMO_ARROW_HEAD_RADIUS := 0.085
+const PAINT_3D_GIZMO_ARROW_SIDES := 8
+const PAINT_3D_GIZMO_SNAP_RADIANS := PI / 12.0
+const GIZMO_CONTROL_NONE := 0
+const GIZMO_CONTROL_ROTATION := 1
+const GIZMO_CONTROL_TRANSLATION := 2
+const PAINT_3D_GIZMO_AXIS_COLORS := [
+	Color(0.96, 0.22, 0.22, 0.64),
+	Color(0.25, 0.9, 0.35, 0.64),
+	Color(0.25, 0.48, 1.0, 0.64),
+]
 const PAINT_3D_BLOCK_SHARED_UV_PAINT := false
 const SHOW_2D_TO_3D_HOVER_MARKER := true
 const DEBUG_2D_TO_3D_HOVER_DIAGNOSTICS := false
 const DEBUG_MESH_PAINT_PERFORMANCE := false
 const HOVER_2D_TO_3D_MARKER_COLOR := Color(0.35, 0.75, 1.0, 0.92)
-const PAINT_3D_INITIAL_YAW := 0.65
+const PAINT_3D_INITIAL_YAW := PI * 0.5
 const PAINT_3D_INITIAL_PITCH := 0.35
 const SETTINGS_SECTION := "GDDraw"
 const DEFAULT_CANVAS_SIZE_KEY := "default_canvas_size"
+const DEFAULT_FONT_DIRECTORY_KEY := "default_font_directory"
 const CHECKER_LIGHT_KEY := "checker_light"
 const CHECKER_DARK_KEY := "checker_dark"
 const DEFAULT_CHECKER_LIGHT_COLOR := Color(0.68, 0.68, 0.68, 1.0)
@@ -98,13 +164,30 @@ const DEFAULT_CHECKER_DARK_COLOR := Color(0.48, 0.48, 0.48, 1.0)
 const CUSTOM_BRUSH_PRESETS_KEY := "custom_brush_presets"
 const BRUSH_PRESET_SAVE_ID := 900
 const CUSTOM_BRUSH_PRESET_ID_BASE := 1000
+const FILL_CUSTOM_PRESET_ID := 1000
+const FILL_SETTINGS_PREVIEW_IMAGE_SIZE := 64
+const FILL_SETTINGS_PREVIEW_DISPLAY_SIZE := 176
 const CANVAS_RESIZE_DIALOG_SIZE := Vector2i(420, 300)
 const CROP_RECTANGLE_DIALOG_SIZE := Vector2i(420, 320)
 const SCALE_IMAGE_DIALOG_SIZE := Vector2i(420, 340)
+const TEXT_FONT_DEFAULT_ID := 0
+const TEXT_FONT_LOAD_ID := 100
+const TEXT_FONT_CUSTOM_ID := 101
+const TEXT_FONT_CUSTOM_ID_BASE := 1000
+const TEXT_FONT_SYSTEM_ID_BASE := 100000
+const DEFAULT_FONT_DIRECTORY := StoragePaths.DEFAULT_FONT_DIR
+const DEFAULT_BRUSH_DIRECTORY := StoragePaths.DEFAULT_BRUSH_DIR
+const UPDATE_STAGING_DIRECTORY := StoragePaths.UPDATE_STAGING_DIR
+const FONT_PICKER_MAX_SIZE := Vector2i(460, 420)
 const SPLIT_HORIZONTAL_RATIO_KEY := "split_horizontal_ratio_v2"
 const SPLIT_VERTICAL_RATIO_KEY := "split_vertical_ratio_v2"
 const SPLIT_VERTICAL_KEY := "split_vertical"
 const LINKED_VIEW_KEY := "linked_view"
+const PREVIEW_LIGHT_ENABLED_KEY := "preview_light_enabled"
+const PREVIEW_LIGHT_INTENSITY_KEY := "preview_light_intensity"
+const PREVIEW_LIGHT_CAMERA_LINKED_KEY := "preview_light_camera_linked"
+const PREVIEW_TRANSFORM_GIZMO_VISIBLE_KEY := "preview_transform_gizmo_visible"
+const PREVIEW_3D_GRID_VISIBLE_KEY := "preview_3d_grid_visible"
 const SNAP_TO_GRID_KEY := "snap_to_grid"
 const RECENT_BRUSH_SIZE_LIMIT := 6
 const DEFAULT_CANVAS_SIZE := Vector2i(128, 128)
@@ -164,7 +247,8 @@ enum MenuCommand {
 	VIEW_MODE_SPLIT,
 	VIEW_MODE_SPLIT_HORIZONTAL,
 	VIEW_MODE_SPLIT_VERTICAL,
-	VIEW_GRID,
+	VIEW_GRID_2D,
+	VIEW_GRID_3D,
 	VIEW_SNAP_TO_GRID,
 	VIEW_UV_OVERLAY,
 	VIEW_LINKED,
@@ -182,6 +266,8 @@ enum MenuCommand {
 	HELP_CONTROLS,
 	HELP_KNOWN_LIMITATIONS,
 	HELP_ABOUT,
+	HELP_CHECK_UPDATES,
+	HELP_UPDATE_AVAILABLE,
 }
 enum SessionTransition {
 	NONE,
@@ -199,16 +285,6 @@ enum TextureSaveStage {
 	SAVE_AS_WRITTEN,
 	WAITING_IMPORTED_TEXTURE,
 }
-enum PreviewOrientationCommand {
-	X_POSITIVE_90,
-	X_NEGATIVE_90,
-	Y_POSITIVE_90,
-	Y_NEGATIVE_90,
-	Z_POSITIVE_90,
-	Z_NEGATIVE_90,
-	RESET,
-	USE_SCENE_ORIENTATION,
-}
 var _plugin: EditorPlugin
 var _menu_bar_background: PanelContainer
 var _menu_bar: MenuBar
@@ -224,6 +300,20 @@ var _godot_menu: PopupMenu
 var _help_menu: PopupMenu
 var _help_dialog: AcceptDialog
 var _help_content: VBoxContainer
+var _help_update_badge: PanelContainer
+var _update_available_overlay: PanelContainer
+var _update_overlay_title: Label
+var _update_overlay_message: Label
+var _update_installed_version_label: Label
+var _update_latest_version_label: Label
+var _update_open_release_button: Button
+var _update_retry_button: Button
+var _update_later_button: Button
+var _update_download_button: Button
+var _update_install_button: Button
+var _update_cancel_button: Button
+var _update_progress: ProgressBar
+var _update_progress_label: Label
 var _workspace_region: Control
 var _workspace_content: VBoxContainer
 var _canvas_region: Control
@@ -236,20 +326,48 @@ var _paint_3d_view: SubViewportContainer
 var _paint_3d_viewport: SubViewport
 var _paint_3d_root: Node3D
 var _paint_3d_camera: Camera3D
+var _paint_3d_preview_light: DirectionalLight3D
 var _paint_3d_mesh: MeshInstance3D
 var _paint_3d_wire_mesh: MeshInstance3D
 var _paint_3d_brush_preview: MeshInstance3D
 var _paint_3d_hover_debug_marker: MeshInstance3D
 var _paint_3d_hover_triangle: MeshInstance3D
+var _paint_3d_rotation_gizmo: Node3D
+var _paint_3d_gizmo_rings: Array[MeshInstance3D] = []
+var _paint_3d_gizmo_materials: Array[StandardMaterial3D] = []
+var _paint_3d_gizmo_translation_axes: Array[MeshInstance3D] = []
+var _paint_3d_gizmo_translation_materials: Array[StandardMaterial3D] = []
+var _paint_3d_model_center := Vector3.ZERO
+var _paint_3d_gizmo_visible := false
+var _paint_3d_gizmo_hover_control := GIZMO_CONTROL_NONE
+var _paint_3d_gizmo_hover_axis := -1
+var _paint_3d_gizmo_active_control := GIZMO_CONTROL_NONE
+var _paint_3d_gizmo_active_axis := -1
+var _paint_3d_gizmo_dragging := false
+var _paint_3d_gizmo_drag_start_adjustment := Transform3D.IDENTITY
+var _paint_3d_gizmo_drag_start_vector := Vector3.ZERO
+var _paint_3d_gizmo_drag_center := Vector3.ZERO
+var _paint_3d_gizmo_drag_axis_world := Vector3.ZERO
+var _paint_3d_gizmo_drag_axis_preview_local := Vector3.ZERO
+var _paint_3d_gizmo_drag_start_axis_parameter := 0.0
+var _paint_3d_gizmo_drag_use_screen_fallback := false
+var _paint_3d_gizmo_drag_screen_axis := Vector2.RIGHT
+var _paint_3d_gizmo_drag_world_per_pixel := 1.0
+var _paint_3d_gizmo_drag_start_mouse := Vector2.ZERO
+var _paint_3d_gizmo_drag_fallback_tangent := Vector2.ZERO
+var _paint_3d_gizmo_drag_fallback_radius := 1.0
 var _paint_3d_stage_root: Node3D
 var _paint_3d_stage_floor: MeshInstance3D
 var _paint_3d_stage_grid: MeshInstance3D
+var _preview_3d_grid_visible := true
 var _paint_3d_texture: ImageTexture
 var _paint_3d_material: StandardMaterial3D
 var _paint_3d_target := Vector3.ZERO
 var _paint_3d_distance := 4.0
 var _paint_3d_yaw := 0.65
 var _paint_3d_pitch := -0.35
+var _paint_3d_camera_basis_override := Basis.IDENTITY
+var _paint_3d_camera_basis_override_active := false
 var _paint_3d_orbiting := false
 var _paint_3d_panning := false
 var _paint_3d_freelooking := false
@@ -257,11 +375,13 @@ var _paint_3d_freelook_speed_multiplier := 1.0
 var _paint_3d_previous_mouse_mode := Input.MOUSE_MODE_VISIBLE
 var _paint_3d_drawing := false
 var _paint_3d_last_stroke_hit: Dictionary = {}
+var _paint_3d_surface_shape_state: Dictionary = {}
 var _paint_3d_triangle_cache: Dictionary = {}
 var _paint_3d_island_cache: Dictionary = {}
 var _paint_3d_mesh_cache
 var _paint_3d_observed_mesh: Mesh
 var _paint_3d_geometry_dirty := false
+var _paint_3d_source_available := false
 var _paint_3d_pending_motion := false
 var _paint_3d_pending_motion_position := Vector2.ZERO
 var _paint_3d_pending_2d_hover := false
@@ -273,9 +393,11 @@ var _paint_3d_last_uv_overlap_warning := ""
 var _paint_3d_hover_debug_state := ""
 var _paint_3d_last_2d_hover_pixel := Vector2i(-1, -1)
 var _paint_3d_last_mouse_position := Vector2.ZERO
+var _icon_buttons: Array[Button] = []
 var _brush_button: Button
 var _fill_button: Button
 var _shape_button: Button
+var _text_button: Button
 var _line_button: Button
 var _rectangle_button: Button
 var _ellipse_button: Button
@@ -303,10 +425,62 @@ var _tool_stroke_overlap: CheckBox
 var _fill_tolerance_label: Label
 var _fill_tolerance: SpinBox
 var _fill_mode: OptionButton
+var _fill_style: OptionButton
+var _fill_settings_button: Button
+var _fill_settings_overlay: PanelContainer
+var _fill_settings_tabs: TabContainer
+var _fill_settings_preview: TextureRect
+var _fill_settings_preview_size_label: Label
+var _fill_settings_foreground: ColorPickerButton
+var _fill_settings_background: ColorPickerButton
+var _fill_settings_target: OptionButton
+var _dither_settings_preset: OptionButton
+var _dither_settings_matrix: OptionButton
+var _dither_settings_density: SpinBox
+var _dither_settings_scale: SpinBox
+var _pattern_settings_preset: OptionButton
+var _pattern_settings_kind: OptionButton
+var _pattern_settings_angle: SpinBox
+var _pattern_settings_thickness: SpinBox
+var _pattern_settings_gap: SpinBox
+var _pattern_settings_cell_width: SpinBox
+var _pattern_settings_cell_height: SpinBox
+var _pattern_settings_dot_size: SpinBox
+var _pattern_settings_thickness_row: Control
+var _pattern_settings_gap_row: Control
+var _pattern_settings_cell_width_row: Control
+var _pattern_settings_cell_height_row: Control
+var _pattern_settings_dot_size_row: Control
+var _custom_fill_source_button: Button
+var _custom_fill_paste_button: Button
+var _custom_fill_clear_button: Button
+var _custom_fill_drop_target: ImageDropTarget
+var _custom_fill_thumbnail: TextureRect
+var _custom_fill_filename: Label
+var _custom_fill_color_mode: OptionButton
+var _custom_fill_repeat_x: CheckBox
+var _custom_fill_repeat_y: CheckBox
+var _custom_fill_scale_x: SpinBox
+var _custom_fill_scale_y: SpinBox
+var _custom_fill_lock_aspect: CheckBox
+var _custom_fill_spacing_x: SpinBox
+var _custom_fill_spacing_y: SpinBox
+var _custom_fill_rotation: SpinBox
+var _custom_fill_offset_x: SpinBox
+var _custom_fill_offset_y: SpinBox
+var _custom_fill_filtering: OptionButton
+var _custom_fill_threshold: SpinBox
+var _custom_fill_threshold_row: Control
+var _custom_fill_staged_image: Image
+var _custom_fill_staged_name := ""
+var _custom_fill_aspect_ratio := 1.0
+var _custom_fill_image_dialog: FileDialog
+var _syncing_fill_settings := false
+var _fill_settings_style := GDDrawCanvasControl.FillStyle.SOLID
 var _mirror_mode: OptionButton
 var _mirror_options: HBoxContainer
 var _shape_fill_mode: OptionButton
-var _shape_from_center: CheckBox
+var _shape_origin_mode: OptionButton
 var _canvas_width: SpinBox
 var _canvas_height: SpinBox
 var _resize_link_button: Button
@@ -315,7 +489,17 @@ var _resize_canvas_button: Button
 var _load_selected_mesh_button: Button
 var _uv_overlay_toggle: Button
 var _preview_orientation_button: Button
-var _preview_orientation_menu: PopupMenu
+var _preview_orientation_reset_button: Button
+var _preview_scene_orientation_button: Button
+var _preview_3d_grid_button: Button
+var _preview_orientation_controls: VBoxContainer
+var _preview_light_controls_row: HBoxContainer
+var _preview_transform_controls_row: HBoxContainer
+var _preview_grid_controls_row: HBoxContainer
+var _preview_light_toggle: Button
+var _preview_light_intensity: SpinBox
+var _preview_light_link_toggle: Button
+var _preview_light_reset_button: Button
 var _settings_overlay: PanelContainer
 var _settings_panel: VBoxContainer
 var _brush_mode_selector: OptionButton
@@ -339,9 +523,11 @@ var _zoom_3d_in_button: Button
 var _zoom_3d_out_button: Button
 var _zoom_in_button: Button
 var _zoom_out_button: Button
-var _color_label: Label
-var _color_picker: ColorPickerButton
-var _paint_color_separator: Control
+var _color_set: HBoxContainer
+var _foreground_color_picker: ColorPickerButton
+var _swap_colors_button: Button
+var _background_color_picker: ColorPickerButton
+var _color_set_separator: Control
 var _paint_size_separator: Control
 var _fill_end_separator: Control
 var _brush_size_label: Label
@@ -357,8 +543,22 @@ var _session_picker_reason_label: Label
 var _recent_colors_row: HBoxContainer
 var _brush_options: HBoxContainer
 var _shape_options: HBoxContainer
+var _text_options: HBoxContainer
+var _text_font_selector: OptionButton
+var _text_font_size: SpinBox
+var _text_alignment_buttons: Array[Button] = []
+var _text_wrap_button: Button
+var _text_rotate_left_button: Button
+var _text_rotate_amount: SpinBox
+var _text_rotate_right_button: Button
+var _text_commit_button: Button
+var _text_cancel_button: Button
+var _text_font_dialog: FileDialog
+var _text_custom_font_path := ""
+var _text_font_sources: Dictionary = {}
+var _text_font_selected_id := TEXT_FONT_DEFAULT_ID
 var _shape_tool_separator: Control
-var _shape_end_separator: Control
+var _shape_origin_separator: Control
 var _selection_options: HBoxContainer
 var _selection_action_separator: Control
 var _selection_flip_horizontal_button: Button
@@ -376,6 +576,9 @@ var _selection_cancel_button: Button
 var _eyedropper_options: HBoxContainer
 var _view_controls_separator: Control
 var _view_link_separator: Control
+var _tool_options_corner_icon: TextureRect
+var _tool_options_vertical_separator: VSeparator
+var _tool_options_horizontal_separator: HSeparator
 var _recent_colors: Array[Color] = []
 var _recent_brush_sizes: Array[int] = []
 var _custom_brush_presets: Array[Dictionary] = []
@@ -387,7 +590,17 @@ var _brush_preset_dialog: ConfirmationDialog
 var _brush_preset_name: LineEdit
 var _save_location: LineEdit
 var _save_location_dialog: FileDialog
+var _font_location: LineEdit
+var _font_location_dialog: FileDialog
 var _drop_replace_dialog: ConfirmationDialog
+var _create_textured_csg_overlay: PanelContainer
+var _create_textured_csg_shape: OptionButton
+var _create_textured_csg_assign_image: CheckBox
+var _create_textured_csg_select_node: CheckBox
+var _create_textured_csg_enable_collision: CheckBox
+var _create_textured_csg_validation: Label
+var _create_textured_csg_create_button: Button
+var _create_textured_csg_cancel_button: Button
 var _create_3d_texture_dialog: ConfirmationDialog
 var _save_3d_texture_dialog: ConfirmationDialog
 var _session_replace_dialog: ConfirmationDialog
@@ -413,19 +626,29 @@ var _png_io
 var _shortcuts
 var _texture_3d_session
 var _sprite_creator
+var _update_checker
+var _updater
+var _latest_available_version := ""
+var _latest_release_url := ""
+var _latest_release_descriptor: Dictionary = {}
+var _update_retry_mode := "check"
+var _release_url_opener := Callable()
 var _canvas_mode := CANVAS_MODE_2D
 var _canvas_mode_3d := false
 var _split_vertical := false
 var _split_horizontal_ratio := 0.5
 var _split_vertical_ratio := 0.5
 var _linked_view_enabled := true
+var _preview_light_enabled := true
+var _preview_light_intensity_value := PAINT_3D_PREVIEW_LIGHT_DEFAULT
+var _preview_light_camera_linked := true
 var _current_2d_zoom_percent := 100
 var _resize_aspect_ratio := 1.0
 var _syncing_canvas_dimensions := false
 var _syncing_default_canvas_size := false
 var _active_shape_tool := GDDrawCanvasControl.ToolMode.RECTANGLE
 var _active_selection_tool := GDDrawCanvasControl.ToolMode.SELECT
-var _color_picker_has_pending_recent_color := false
+var _foreground_color_picker_has_pending_recent_color := false
 var _pending_drop_image_path := ""
 var _pending_drop_image: Image
 var _pending_drop_label := ""
@@ -452,6 +675,7 @@ var _pending_session_image: Image
 var _pending_session_label := ""
 var _pending_session_mesh: Node3D
 var _active_target_refresh_elapsed := 0.0
+var _active_target_transform_refresh_elapsed := 0.0
 var _editor_selection: EditorSelection
 var _ui_built := false
 var _crop_workflow_active := false
@@ -488,6 +712,7 @@ func initialize() -> void:
 	add_theme_constant_override("separation", 8)
 	_build_ui()
 	_set_2d_document_baseline("", _canvas.get_image_copy())
+	call_deferred("_recover_update_transaction")
 
 
 func _load_split_view_preferences() -> void:
@@ -498,6 +723,15 @@ func _load_split_view_preferences() -> void:
 	_split_vertical_ratio = clampf(float(editor_settings.get_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_RATIO_KEY, 0.5)), 0.2, 0.8)
 	_split_vertical = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_KEY, false))
 	_linked_view_enabled = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, LINKED_VIEW_KEY, true))
+	_preview_light_enabled = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, PREVIEW_LIGHT_ENABLED_KEY, true))
+	_preview_light_intensity_value = _clamp_preview_light_intensity(float(editor_settings.get_project_metadata(
+		SETTINGS_SECTION,
+		PREVIEW_LIGHT_INTENSITY_KEY,
+		PAINT_3D_PREVIEW_LIGHT_DEFAULT
+	)))
+	_preview_light_camera_linked = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, PREVIEW_LIGHT_CAMERA_LINKED_KEY, true))
+	_paint_3d_gizmo_visible = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, PREVIEW_TRANSFORM_GIZMO_VISIBLE_KEY, false))
+	_preview_3d_grid_visible = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, PREVIEW_3D_GRID_VISIBLE_KEY, true))
 
 
 func _save_split_view_preferences() -> void:
@@ -510,20 +744,48 @@ func _save_split_view_preferences() -> void:
 	editor_settings.set_project_metadata(SETTINGS_SECTION, LINKED_VIEW_KEY, _linked_view_enabled)
 
 
+func _save_preview_light_preferences() -> void:
+	var editor_settings := _get_editor_settings()
+	if not editor_settings:
+		return
+	editor_settings.set_project_metadata(SETTINGS_SECTION, PREVIEW_LIGHT_ENABLED_KEY, _preview_light_enabled)
+	editor_settings.set_project_metadata(SETTINGS_SECTION, PREVIEW_LIGHT_INTENSITY_KEY, _preview_light_intensity_value)
+	editor_settings.set_project_metadata(SETTINGS_SECTION, PREVIEW_LIGHT_CAMERA_LINKED_KEY, _preview_light_camera_linked)
+
+
+func _save_preview_transform_gizmo_preference() -> void:
+	var editor_settings := _get_editor_settings()
+	if editor_settings:
+		editor_settings.set_project_metadata(SETTINGS_SECTION, PREVIEW_TRANSFORM_GIZMO_VISIBLE_KEY, _paint_3d_gizmo_visible)
+
+
+func _save_preview_3d_grid_preference() -> void:
+	var editor_settings := _get_editor_settings()
+	if editor_settings:
+		editor_settings.set_project_metadata(SETTINGS_SECTION, PREVIEW_3D_GRID_VISIBLE_KEY, _preview_3d_grid_visible)
+
+
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
 		queue_redraw()
+		call_deferred("_reposition_help_update_badge")
 		_resize_3d_paint_viewport()
 		if _canvas_mode == CANVAS_MODE_SPLIT:
 			call_deferred("_apply_split_ratio")
 	elif what == NOTIFICATION_EXIT_TREE:
+		_cancel_3d_rotation_gizmo_drag(false)
 		_stop_3d_freelook()
 
 
 func _process(delta: float) -> void:
+	_refresh_icon_button_states()
 	_advance_3d_texture_save_workflow()
 	_process_pending_3d_pointer_motion()
 	_process_pending_2d_hover()
+	_active_target_transform_refresh_elapsed += delta
+	if _active_target_transform_refresh_elapsed >= PAINT_3D_TRANSFORM_POLL_INTERVAL:
+		_active_target_transform_refresh_elapsed = 0.0
+		_poll_active_3d_target_transform()
 	_active_target_refresh_elapsed += delta
 	if _active_target_refresh_elapsed >= 0.5:
 		_active_target_refresh_elapsed = 0.0
@@ -548,7 +810,10 @@ func _input(event: InputEvent) -> void:
 		return
 
 	if action == GDDrawShortcutMap.ACTION_COPY:
-		_copy_selection()
+		if _canvas and _canvas.has_text_draft():
+			_copy_text_draft_contextual()
+		else:
+			_copy_selection()
 	elif action == GDDrawShortcutMap.ACTION_CUT:
 		_cut_selection()
 	elif action == GDDrawShortcutMap.ACTION_PASTE:
@@ -560,6 +825,12 @@ func _input(event: InputEvent) -> void:
 			_cancel_scale_image()
 		elif _crop_workflow_active:
 			_cancel_crop_rectangle()
+		elif _update_available_overlay and _update_available_overlay.visible:
+			_close_update_available_overlay()
+		elif _create_textured_csg_overlay and _create_textured_csg_overlay.visible:
+			_close_create_textured_csg_overlay()
+		elif _fill_settings_overlay and _fill_settings_overlay.visible:
+			_on_fill_settings_cancel_pressed()
 		elif _settings_overlay and _settings_overlay.visible:
 			_close_preferences()
 		else:
@@ -587,6 +858,25 @@ func _ensure_helpers() -> void:
 		_texture_3d_session = _make_script_instance(TEXTURE_3D_SESSION_SCRIPT_PATH, RefCounted.new())
 	if not _sprite_creator:
 		_sprite_creator = _make_script_instance(SPRITE_CREATOR_SCRIPT_PATH, RefCounted.new())
+	if not _update_checker:
+		var checker_script = load(UPDATE_CHECKER_SCRIPT_PATH)
+		if checker_script and checker_script.has_method("new"):
+			_update_checker = checker_script.call("new")
+			if _update_checker:
+				_update_checker.name = "GDDraw Update Checker"
+				add_child(_update_checker)
+				_update_checker.check_completed.connect(_on_update_check_completed)
+	if not _updater:
+		var updater_script = load(UPDATER_SCRIPT_PATH)
+		if updater_script and updater_script.has_method("new"):
+			_updater = updater_script.call("new")
+			if _updater:
+				_updater.name = "GDDraw Updater"
+				add_child(_updater)
+				_updater.state_changed.connect(_on_updater_state_changed)
+				_updater.progress_changed.connect(_on_updater_progress_changed)
+				if _plugin:
+					_updater.set_editor_interface(_plugin.get_editor_interface())
 
 
 func _make_script_instance(script_path: String, fallback: Object) -> Object:
@@ -612,14 +902,19 @@ func _build_ui() -> void:
 	_build_tool_rail(body)
 	_build_canvas_region(body)
 	_build_settings_menu()
+	_build_update_available_overlay()
 	_build_status_bar()
 
 	_build_open_dialog()
+	_build_custom_fill_image_dialog()
+	_build_text_font_dialog()
 	_build_save_dialog()
 	_build_save_3d_as_dialog()
 	_build_brush_preset_dialog()
 	_build_save_location_dialog()
+	_build_font_location_dialog()
 	_build_drop_replace_dialog()
+	_build_create_textured_csg_dialog()
 	_build_3d_session_picker()
 	_build_create_3d_texture_dialog()
 	_build_save_3d_texture_dialog()
@@ -638,6 +933,8 @@ func _build_ui() -> void:
 	_select_tool(GDDrawCanvasControl.ToolMode.BRUSH)
 	_record_recent_color(Color.BLACK)
 	call_deferred("_connect_window_file_drop")
+	if Engine.is_editor_hint() and _plugin:
+		call_deferred("_check_for_updates", true)
 
 
 func _build_workspace() -> void:
@@ -743,7 +1040,8 @@ func _build_menu_bar() -> void:
 	_view_menu.add_radio_check_item("Split Horizontal", MenuCommand.VIEW_MODE_SPLIT_HORIZONTAL)
 	_view_menu.add_radio_check_item("Split Vertical", MenuCommand.VIEW_MODE_SPLIT_VERTICAL)
 	_view_menu.add_separator()
-	_view_menu.add_check_item("Show Grid", MenuCommand.VIEW_GRID)
+	_view_menu.add_check_item("Show 2D Grid", MenuCommand.VIEW_GRID_2D)
+	_view_menu.add_check_item("Show 3D Grid", MenuCommand.VIEW_GRID_3D)
 	_view_menu.add_check_item("Snap to Grid", MenuCommand.VIEW_SNAP_TO_GRID)
 	_view_menu.add_check_item("Show UV Overlay", MenuCommand.VIEW_UV_OVERLAY)
 	_view_menu.add_check_item("Link Split Hover", MenuCommand.VIEW_LINKED)
@@ -760,18 +1058,17 @@ func _build_menu_bar() -> void:
 
 	_godot_menu = _add_menu("Godot")
 	_godot_menu.add_item("Create Sprite2D", MenuCommand.FILE_CREATE_SPRITE)
-	_godot_menu.add_item("Create CSGBox3D", MenuCommand.GODOT_CREATE_CSG_BOX)
+	_godot_menu.add_item("Create Textured CSG3D…", MenuCommand.GODOT_CREATE_CSG_BOX)
 	_godot_menu.add_separator()
 	_godot_menu.add_item("Use Selected Mesh", MenuCommand.GODOT_USE_SELECTED_MESH)
 	_godot_menu.add_item("Save Active Texture", MenuCommand.GODOT_SAVE_ACTIVE_TEXTURE)
 
 	_help_menu = _add_menu("Help")
-	_help_menu.add_item("Controls", MenuCommand.HELP_CONTROLS)
-	_help_menu.add_item("Known Limitations", MenuCommand.HELP_KNOWN_LIMITATIONS)
-	_help_menu.add_separator()
-	_help_menu.add_item("About GDDraw", MenuCommand.HELP_ABOUT)
+	_populate_help_menu()
+	_build_help_update_badge()
 	_sync_menu_state()
 	call_deferred("_match_menu_bar_to_popup_background")
+	call_deferred("_reposition_help_update_badge")
 
 
 func _match_menu_bar_to_popup_background() -> void:
@@ -795,6 +1092,79 @@ func _add_menu(title: String) -> PopupMenu:
 	return popup
 
 
+func _populate_help_menu(show_update := false) -> void:
+	if not _help_menu:
+		return
+	_help_menu.clear()
+	if show_update and not _latest_available_version.is_empty():
+		_help_menu.add_icon_item(
+			_make_update_warning_icon(),
+			"Update Available - v%s..." % _latest_available_version,
+			MenuCommand.HELP_UPDATE_AVAILABLE
+		)
+		_help_menu.set_item_tooltip(0, "Open details for GDDraw v%s" % _latest_available_version)
+		_help_menu.add_separator()
+	_help_menu.add_item("Check for Updates...", MenuCommand.HELP_CHECK_UPDATES)
+	_help_menu.add_separator()
+	_help_menu.add_item("Controls", MenuCommand.HELP_CONTROLS)
+	_help_menu.add_item("Known Limitations", MenuCommand.HELP_KNOWN_LIMITATIONS)
+	_help_menu.add_separator()
+	_help_menu.add_item("About GDDraw", MenuCommand.HELP_ABOUT)
+
+
+func _build_help_update_badge() -> void:
+	if _help_update_badge or not _menu_bar:
+		return
+	_menu_bar_background.clip_contents = true
+	_help_update_badge = PanelContainer.new()
+	_help_update_badge.name = "Help Update Badge"
+	_help_update_badge.visible = false
+	_help_update_badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_help_update_badge.custom_minimum_size = Vector2(14.0, 14.0)
+	var badge_style := StyleBoxFlat.new()
+	badge_style.bg_color = Color("#D93643")
+	badge_style.set_corner_radius_all(20)
+	_help_update_badge.add_theme_stylebox_override("panel", badge_style)
+	var badge_label := Label.new()
+	badge_label.name = "Badge Label"
+	badge_label.text = "!"
+	badge_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	badge_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	badge_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	badge_label.add_theme_color_override("font_color", Color.WHITE)
+	badge_label.add_theme_font_size_override("font_size", 10)
+	_help_update_badge.add_child(badge_label)
+	_menu_bar.add_child(_help_update_badge)
+	_menu_bar.move_child(_help_update_badge, _menu_bar.get_child_count() - 1)
+
+
+func _reposition_help_update_badge() -> void:
+	if not _help_update_badge or not _menu_bar or not _help_update_badge.visible:
+		return
+	var badge_size := Vector2(14.0, 14.0)
+	_help_update_badge.size = badge_size
+	var menus_width := _menu_bar.get_combined_minimum_size().x
+	if menus_width <= 0.0:
+		_set_help_menu_update_fallback(true)
+		return
+	_set_help_menu_update_fallback(false)
+	_help_update_badge.position = Vector2(
+		clampf(menus_width - 8.0, 0.0, maxf(0.0, _menu_bar_background.size.x - badge_size.x)),
+		maxf(0.0, (_menu_bar_background.size.y - badge_size.y) * 0.5 - 4.0)
+	)
+
+
+func _set_help_menu_update_fallback(enabled: bool) -> void:
+	if not _menu_bar or not _help_menu:
+		return
+	for menu_index in range(_menu_bar.get_menu_count()):
+		if _menu_bar.get_menu_popup(menu_index) == _help_menu:
+			_menu_bar.set_menu_title(menu_index, "Help (!)" if enabled else "Help")
+			if _help_update_badge:
+				_help_update_badge.visible = not enabled and not _latest_available_version.is_empty()
+			return
+
+
 func _on_menu_command(command_id: int) -> void:
 	match command_id:
 		MenuCommand.FILE_NEW:
@@ -810,7 +1180,7 @@ func _on_menu_command(command_id: int) -> void:
 		MenuCommand.FILE_CREATE_SPRITE:
 			_create_sprite()
 		MenuCommand.GODOT_CREATE_CSG_BOX:
-			_create_csg_box()
+			_show_create_textured_csg_dialog()
 		MenuCommand.EDIT_UNDO:
 			_undo()
 		MenuCommand.EDIT_REDO:
@@ -818,7 +1188,10 @@ func _on_menu_command(command_id: int) -> void:
 		MenuCommand.EDIT_CUT:
 			_cut_selection()
 		MenuCommand.EDIT_COPY:
-			_copy_selection()
+			if _canvas and _canvas.has_text_draft():
+				_copy_text_draft_contextual()
+			else:
+				_copy_selection()
 		MenuCommand.EDIT_PASTE:
 			_paste_selection()
 		MenuCommand.EDIT_CLEAR:
@@ -886,8 +1259,10 @@ func _on_menu_command(command_id: int) -> void:
 			_set_split_layout(false)
 		MenuCommand.VIEW_MODE_SPLIT_VERTICAL:
 			_set_split_layout(true)
-		MenuCommand.VIEW_GRID:
+		MenuCommand.VIEW_GRID_2D:
 			_on_grid_button_toggled(not _canvas.show_grid)
+		MenuCommand.VIEW_GRID_3D:
+			_set_3d_preview_grid_visible(not _preview_3d_grid_visible, true)
 		MenuCommand.VIEW_SNAP_TO_GRID:
 			_on_snap_to_grid_toggled(not _canvas.snap_to_grid)
 		MenuCommand.VIEW_UV_OVERLAY:
@@ -915,14 +1290,20 @@ func _on_menu_command(command_id: int) -> void:
 			_load_selected_3d_mesh_texture()
 		MenuCommand.GODOT_SAVE_ACTIVE_TEXTURE:
 			_save_3d_texture()
+		MenuCommand.HELP_CHECK_UPDATES:
+			_check_for_updates(false)
+		MenuCommand.HELP_UPDATE_AVAILABLE:
+			_show_update_available_overlay()
 		MenuCommand.HELP_CONTROLS:
 			_show_help_dialog(
 				"GDDraw Controls",
 				"Tools and 2D canvas:\n"
 				+ "• Use the left rail for Brush, Eraser, Fill, Shape, Eyedropper, Selection, Lasso, and Pan.\n"
 				+ "• Left drag uses the active tool. Mouse wheel zooms. Middle drag pans.\n"
+				+ "• Shape Origin supports Corner to Corner, From Start Point, and From Canvas Center; hold Shift to constrain angles, squares, and circles.\n"
 				+ "• Ctrl+Z/Y undo and redo. Ctrl+S saves. Ctrl+Shift+S opens Save As.\n"
 				+ "• Ctrl+A/X/C/V select all, cut, copy, and paste.\n"
+				+ "• While editing text, Ctrl+C copies highlighted characters; with none highlighted, it copies the rendered text box as an image selection.\n"
 				+ "• Ctrl+D duplicates the selection. Enter commits a floating selection.\n"
 				+ "• Arrow keys nudge a selection. Shift+Arrow nudges 10 pixels.\n"
 				+ "• Delete removes a selection. Escape deselects or cancels the active transform.\n\n"
@@ -957,9 +1338,9 @@ func _on_menu_command(command_id: int) -> void:
 		MenuCommand.HELP_ABOUT:
 			_show_help_dialog(
 				"About GDDraw",
-				"GDDraw 0.1.0\n\n"
+				"GDDraw v%s\n\n" % _get_installed_plugin_version()
 				+ "Overview:\n"
-				+ "GDDraw is a Godot 4.7+ editor plugin for quick pixel-art and texture-painting work inside the editor.\n\n"
+				+ "GDDraw is a Godot 4.4+ editor plugin for quick pixel-art and texture-painting work inside the editor.\n\n"
 				+ "Use it for:\n"
 				+ "Use it to sketch prototype sprites, make small PNG edits, block out texture ideas, and paint albedo textures directly on supported 3D meshes or CSG surfaces. It is built for fast iteration without leaving Godot, with save prompts around the places where scene or texture data can change."
 			)
@@ -1022,7 +1403,8 @@ func _sync_menu_state() -> void:
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MODE_3D, _canvas_mode == CANVAS_MODE_3D)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MODE_SPLIT_HORIZONTAL, _canvas_mode == CANVAS_MODE_SPLIT and not _split_vertical)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MODE_SPLIT_VERTICAL, _canvas_mode == CANVAS_MODE_SPLIT and _split_vertical)
-	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_GRID, _canvas.show_grid)
+	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_GRID_2D, _canvas.show_grid)
+	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_GRID_3D, _preview_3d_grid_visible)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_SNAP_TO_GRID, _canvas.snap_to_grid)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_UV_OVERLAY, _canvas.uv_overlay_visible)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_LINKED, _linked_view_enabled)
@@ -1043,13 +1425,11 @@ func _sync_menu_state() -> void:
 		if _canvas_has_visible_pixels
 		else "Draw or load visible pixels before creating a Sprite2D."
 	)
-	_set_menu_item_disabled(_godot_menu, MenuCommand.GODOT_CREATE_CSG_BOX, not _canvas_has_visible_pixels)
+	_set_menu_item_disabled(_godot_menu, MenuCommand.GODOT_CREATE_CSG_BOX, false)
 	_set_menu_item_tooltip(
 		_godot_menu,
 		MenuCommand.GODOT_CREATE_CSG_BOX,
-		"Create a CSGBox3D with a PNG albedo texture from the current canvas."
-		if _canvas_has_visible_pixels
-		else "Draw or load visible pixels before creating a CSGBox3D."
+		"Create a Box, Sphere, or Cylinder, optionally textured from the current canvas."
 	)
 	_set_menu_item_disabled(_godot_menu, MenuCommand.GODOT_USE_SELECTED_MESH, not _canvas_mode_3d)
 	_set_menu_item_disabled(_godot_menu, MenuCommand.GODOT_SAVE_ACTIVE_TEXTURE, not has_active_texture)
@@ -1103,10 +1483,15 @@ func _exit_tree() -> void:
 
 func _build_tool_rail(parent: Container) -> void:
 	var tool_rail := VBoxContainer.new()
+	tool_rail.name = "Tool Rail"
 	tool_rail.custom_minimum_size.x = 30
 	tool_rail.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tool_rail.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
 	parent.add_child(tool_rail)
+	_tool_options_horizontal_separator = HSeparator.new()
+	_tool_options_horizontal_separator.name = "Tool Rail Top Divider"
+	_tool_options_horizontal_separator.custom_minimum_size.y = 6
+	tool_rail.add_child(_tool_options_horizontal_separator)
 
 	_brush_button = _make_icon_button("pencil_0.svg", "Brush", true)
 	_brush_button.button_pressed = true
@@ -1126,6 +1511,10 @@ func _build_tool_rail(parent: Container) -> void:
 	_shape_button.toggled.connect(_on_shape_toggled)
 	tool_rail.add_child(_shape_button)
 
+	_text_button = _make_icon_button("type-outline_0.svg", "Text box", true, "type-outline_1.svg")
+	_text_button.toggled.connect(_on_text_toggled)
+	tool_rail.add_child(_text_button)
+
 	_eyedropper_button = _make_icon_button("pipette_0.svg", "Eyedropper", true)
 	_eyedropper_button.toggled.connect(_on_eyedropper_toggled)
 	tool_rail.add_child(_eyedropper_button)
@@ -1144,28 +1533,55 @@ func _build_options_bar() -> void:
 	options_bar.add_theme_constant_override("separation", 6)
 	_workspace_content.add_child(options_bar)
 
-	var options_label := Label.new()
-	options_label.text = "Tool Options:"
-	options_bar.add_child(options_label)
+	var options_corner := Control.new()
+	options_corner.name = "Tool Options Corner"
+	options_corner.custom_minimum_size = Vector2(30, TOOL_BUTTON_SIZE.y)
+	options_bar.add_child(options_corner)
+	var options_corner_icon_host := CenterContainer.new()
+	options_corner_icon_host.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	options_corner.add_child(options_corner_icon_host)
+	_tool_options_corner_icon = _make_static_icon("toolbox_2.svg", "Tool options")
+	options_corner_icon_host.add_child(_tool_options_corner_icon)
+	_tool_options_vertical_separator = VSeparator.new()
+	_tool_options_vertical_separator.name = "Tool Options Vertical Divider"
+	_tool_options_vertical_separator.custom_minimum_size.x = 6
+	options_bar.add_child(_tool_options_vertical_separator)
 
 	_brush_options = HBoxContainer.new()
 	_brush_options.add_theme_constant_override("separation", 6)
 	options_bar.add_child(_brush_options)
 
-	_color_label = Label.new()
-	_color_label.text = "Color"
-	_brush_options.add_child(_color_label)
+	_color_set = HBoxContainer.new()
+	_color_set.name = "Shared Color Set"
+	_color_set.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
+	_brush_options.add_child(_color_set)
 
-	_color_picker = ColorPickerButton.new()
-	_color_picker.color = Color.BLACK
-	_color_picker.edit_alpha = true
-	_color_picker.custom_minimum_size = Vector2(36, 28)
-	_color_picker.tooltip_text = "Paint color and opacity"
-	_color_picker.color_changed.connect(_on_color_changed)
-	_color_picker.popup_closed.connect(_on_color_picker_popup_closed)
-	_brush_options.add_child(_color_picker)
+	_foreground_color_picker = ColorPickerButton.new()
+	_foreground_color_picker.name = "Foreground Color Picker"
+	_foreground_color_picker.color = Color.BLACK
+	_foreground_color_picker.edit_alpha = true
+	_foreground_color_picker.custom_minimum_size = Vector2(32, 28)
+	_foreground_color_picker.tooltip_text = "Foreground color"
+	_foreground_color_picker.color_changed.connect(_on_foreground_color_changed)
+	_foreground_color_picker.popup_closed.connect(_on_foreground_color_picker_popup_closed)
+	_color_set.add_child(_foreground_color_picker)
 
-	_paint_color_separator = _add_tool_options_separator(_brush_options, "Paint Color Separator")
+	_swap_colors_button = _make_icon_button("arrow-right-left_0.svg", "Swap foreground and background colors")
+	_swap_colors_button.name = "Swap Colors Button"
+	_apply_flat_icon_button_style(_swap_colors_button)
+	_swap_colors_button.pressed.connect(_on_swap_colors_pressed)
+	_color_set.add_child(_swap_colors_button)
+
+	_background_color_picker = ColorPickerButton.new()
+	_background_color_picker.name = "Background Color Picker"
+	_background_color_picker.color = Color.WHITE
+	_background_color_picker.edit_alpha = true
+	_background_color_picker.custom_minimum_size = Vector2(32, 28)
+	_background_color_picker.tooltip_text = "Background color"
+	_background_color_picker.color_changed.connect(_on_background_color_changed)
+	_color_set.add_child(_background_color_picker)
+
+	_color_set_separator = _add_tool_options_separator(_brush_options, "Color Set Separator")
 
 	_brush_preset = OptionButton.new()
 	for preset_name in ["Pencil 1", "Pixel 4", "Ink 12", "Soft 24", "Custom"]:
@@ -1279,7 +1695,7 @@ func _build_options_bar() -> void:
 	_tool_stroke_overlap.visible = false
 
 	_fill_tolerance_label = Label.new()
-	_fill_tolerance_label.text = "Tolerance"
+	_fill_tolerance_label.text = "Tol"
 	_brush_options.add_child(_fill_tolerance_label)
 
 	_fill_tolerance = SpinBox.new()
@@ -1305,6 +1721,179 @@ func _build_options_bar() -> void:
 	_fill_mode.item_selected.connect(_on_fill_mode_selected)
 	_brush_options.add_child(_fill_mode)
 
+	_fill_style = OptionButton.new()
+	_fill_style.name = "Fill Style"
+	_fill_style.add_item("Solid", GDDrawCanvasControl.FillStyle.SOLID)
+	_fill_style.add_item("Dither", GDDrawCanvasControl.FillStyle.DITHER)
+	_fill_style.add_item("Pattern", GDDrawCanvasControl.FillStyle.PATTERN)
+	_fill_style.add_item("Custom", GDDrawCanvasControl.FillStyle.CUSTOM)
+	_fill_style.selected = 0
+	_fill_style.custom_minimum_size.x = 72
+	_fill_style.fit_to_longest_item = false
+	_fill_style.item_selected.connect(_on_fill_style_selected)
+	_brush_options.add_child(_fill_style)
+
+	_fill_settings_button = _make_icon_button("settings_0.svg", "Open Fill Settings")
+	_fill_settings_button.name = "Fill Settings Button"
+	_fill_settings_button.custom_minimum_size = Vector2(34, 28)
+	_fill_settings_button.pressed.connect(_on_fill_settings_button_pressed)
+	_brush_options.add_child(_fill_settings_button)
+
+	_fill_settings_overlay = PanelContainer.new()
+	_fill_settings_overlay.name = "Fill Settings Overlay"
+	_fill_settings_overlay.visible = false
+	_fill_settings_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_fill_settings_overlay.clip_contents = true
+	_fill_settings_overlay.anchor_left = 0.0
+	_fill_settings_overlay.anchor_top = 0.0
+	_fill_settings_overlay.anchor_right = 1.0
+	_fill_settings_overlay.anchor_bottom = 1.0
+	_fill_settings_overlay.offset_left = 0.0
+	_fill_settings_overlay.offset_top = 0.0
+	_fill_settings_overlay.offset_right = 0.0
+	_fill_settings_overlay.offset_bottom = 0.0
+	var fill_settings_background := StyleBoxFlat.new()
+	fill_settings_background.bg_color = _get_preferences_background_color()
+	_fill_settings_overlay.add_theme_stylebox_override("panel", fill_settings_background)
+	var fill_settings_host: Control = _workspace_region if _workspace_region else self
+	fill_settings_host.add_child(_fill_settings_overlay)
+	var settings_scroll := ScrollContainer.new()
+	settings_scroll.name = "Fill Settings Scroll"
+	settings_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	settings_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	settings_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	settings_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_fill_settings_overlay.add_child(settings_scroll)
+	var settings_margin := MarginContainer.new()
+	settings_margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	settings_margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	settings_margin.add_theme_constant_override("margin_left", 12)
+	settings_margin.add_theme_constant_override("margin_top", 12)
+	settings_margin.add_theme_constant_override("margin_right", 12)
+	settings_margin.add_theme_constant_override("margin_bottom", 12)
+	settings_scroll.add_child(settings_margin)
+	var settings_root := VBoxContainer.new()
+	settings_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	settings_root.add_theme_constant_override("separation", 10)
+	settings_margin.add_child(settings_root)
+
+	var settings_header := HBoxContainer.new()
+	settings_header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	settings_root.add_child(settings_header)
+	var settings_title := Label.new()
+	settings_title.text = "Fill Settings"
+	settings_title.add_theme_font_size_override("font_size", 16)
+	settings_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	settings_header.add_child(settings_title)
+	var settings_close := Button.new()
+	settings_close.text = "Close"
+	settings_close.tooltip_text = "Close Fill Settings without using staged changes"
+	_apply_preferences_close_button_style(settings_close)
+	settings_close.pressed.connect(_on_fill_settings_cancel_pressed)
+	settings_header.add_child(settings_close)
+	settings_root.add_child(HSeparator.new())
+
+	var shared_section := PanelContainer.new()
+	shared_section.add_theme_stylebox_override("panel", _make_preferences_section_style())
+	settings_root.add_child(shared_section)
+	var shared_content := VBoxContainer.new()
+	shared_content.add_theme_constant_override("separation", 8)
+	shared_section.add_child(shared_content)
+	var shared_title := Label.new()
+	shared_title.text = "Fill colors and target"
+	shared_title.add_theme_color_override("font_color", Color("#D8D8D8"))
+	shared_title.add_theme_font_size_override("font_size", 14)
+	shared_content.add_child(shared_title)
+	shared_content.add_child(HSeparator.new())
+	var settings_colors := HBoxContainer.new()
+	settings_colors.add_theme_constant_override("separation", 6)
+	shared_content.add_child(settings_colors)
+	var settings_colors_label := Label.new()
+	settings_colors_label.text = "Colors"
+	settings_colors.add_child(settings_colors_label)
+	_fill_settings_foreground = ColorPickerButton.new()
+	_fill_settings_foreground.custom_minimum_size = Vector2(44, 28)
+	_fill_settings_foreground.edit_alpha = true
+	_fill_settings_foreground.tooltip_text = "Foreground color for this fill configuration"
+	_fill_settings_foreground.color_changed.connect(_on_fill_settings_value_changed)
+	settings_colors.add_child(_fill_settings_foreground)
+	var settings_swap := _make_icon_button("arrow-right-left_0.svg", "Swap staged foreground and background colors")
+	settings_swap.name = "Fill Settings Swap Colors Button"
+	_apply_flat_icon_button_style(settings_swap)
+	settings_swap.pressed.connect(_on_fill_settings_swap_pressed)
+	settings_colors.add_child(settings_swap)
+	_fill_settings_background = ColorPickerButton.new()
+	_fill_settings_background.custom_minimum_size = Vector2(44, 28)
+	_fill_settings_background.edit_alpha = true
+	_fill_settings_background.tooltip_text = "Background color for dither and pattern fills"
+	_fill_settings_background.color_changed.connect(_on_fill_settings_value_changed)
+	settings_colors.add_child(_fill_settings_background)
+
+	_fill_settings_target = OptionButton.new()
+	_fill_settings_target.add_item("Clicked Color", GDDrawCanvasControl.FillTargetMode.CLICKED_COLOR)
+	_fill_settings_target.add_item("Restyle Previous Fill", GDDrawCanvasControl.FillTargetMode.PREVIOUS_FILL_COLORS)
+	_fill_settings_target.tooltip_text = "Choose normal color matching or treat the previous foreground/background pair as one connected source region"
+	_fill_settings_target.item_selected.connect(_on_fill_settings_value_changed)
+	shared_content.add_child(_make_fill_setting_row("Target", _fill_settings_target))
+
+	var settings_content := HBoxContainer.new()
+	settings_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	settings_content.add_theme_constant_override("separation", 14)
+	settings_root.add_child(settings_content)
+	_fill_settings_tabs = TabContainer.new()
+	_fill_settings_tabs.custom_minimum_size = Vector2(330, 300)
+	_fill_settings_tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_fill_settings_tabs.tab_changed.connect(_on_fill_settings_tab_changed)
+	settings_content.add_child(_fill_settings_tabs)
+	_build_fill_settings_tabs()
+
+	var preview_panel := PanelContainer.new()
+	preview_panel.custom_minimum_size.x = 260
+	preview_panel.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	preview_panel.add_theme_stylebox_override("panel", _make_preferences_section_style())
+	settings_content.add_child(preview_panel)
+	var preview_column := VBoxContainer.new()
+	preview_column.custom_minimum_size.x = 180
+	preview_column.add_theme_constant_override("separation", 6)
+	preview_panel.add_child(preview_column)
+	var preview_label := Label.new()
+	preview_label.text = "Live Preview"
+	preview_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	preview_column.add_child(preview_label)
+	_fill_settings_preview = TextureRect.new()
+	_fill_settings_preview.name = "Fill Settings Live Preview"
+	_fill_settings_preview.custom_minimum_size = Vector2(FILL_SETTINGS_PREVIEW_DISPLAY_SIZE, FILL_SETTINGS_PREVIEW_DISPLAY_SIZE)
+	# The preview card may expand with the dock, but the pixel preview itself must
+	# remain square instead of inheriting the column's wider horizontal bounds.
+	_fill_settings_preview.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_fill_settings_preview.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_fill_settings_preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_fill_settings_preview.stretch_mode = TextureRect.STRETCH_SCALE
+	_fill_settings_preview.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	preview_column.add_child(_fill_settings_preview)
+	_fill_settings_preview_size_label = Label.new()
+	_fill_settings_preview_size_label.text = "Anchored to canvas pixels • %d × %d px" % [FILL_SETTINGS_PREVIEW_IMAGE_SIZE, FILL_SETTINGS_PREVIEW_IMAGE_SIZE]
+	_fill_settings_preview_size_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_fill_settings_preview_size_label.tooltip_text = "The preview currently renders a fixed %d × %d canvas-pixel area" % [FILL_SETTINGS_PREVIEW_IMAGE_SIZE, FILL_SETTINGS_PREVIEW_IMAGE_SIZE]
+	preview_column.add_child(_fill_settings_preview_size_label)
+
+	var settings_actions := HBoxContainer.new()
+	settings_actions.alignment = BoxContainer.ALIGNMENT_END
+	settings_actions.add_theme_constant_override("separation", 6)
+	settings_root.add_child(settings_actions)
+	var cancel_settings := Button.new()
+	cancel_settings.text = "Cancel"
+	_apply_preferences_close_button_style(cancel_settings)
+	cancel_settings.pressed.connect(_on_fill_settings_cancel_pressed)
+	settings_actions.add_child(cancel_settings)
+	var use_settings := Button.new()
+	use_settings.text = "Use"
+	_apply_preferences_small_button_style(use_settings)
+	use_settings.tooltip_text = "Use these settings for future Paint Bucket fills without changing the image"
+	use_settings.pressed.connect(_on_fill_settings_use_pressed)
+	settings_actions.add_child(use_settings)
+	_update_fill_settings_button()
+
 	_shape_options = HBoxContainer.new()
 	_shape_options.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
 	options_bar.add_child(_shape_options)
@@ -1326,23 +1915,120 @@ func _build_options_bar() -> void:
 	_shape_tool_separator = _add_tool_options_separator(_shape_options, "Shape Tool Separator")
 
 	_shape_fill_mode = OptionButton.new()
-	_shape_fill_mode.add_item("No fill", 0)
-	_shape_fill_mode.add_item("Fill", 1)
+	_shape_fill_mode.add_item("No fill", GDDrawCanvasControl.ShapeFillMode.NONE)
+	_shape_fill_mode.add_item("Background fill", GDDrawCanvasControl.ShapeFillMode.BACKGROUND)
+	_shape_fill_mode.add_item("Foreground fill", GDDrawCanvasControl.ShapeFillMode.FOREGROUND)
 	_shape_fill_mode.selected = 0
-	_shape_fill_mode.custom_minimum_size.x = 96
-	_shape_fill_mode.tooltip_text = "Shape fill mode"
+	_shape_fill_mode.custom_minimum_size.x = 124
+	_shape_fill_mode.fit_to_longest_item = false
+	_update_shape_fill_tooltip(GDDrawCanvasControl.ShapeFillMode.NONE)
 	_shape_fill_mode.item_selected.connect(_on_shape_fill_mode_selected)
 	_shape_options.add_child(_shape_fill_mode)
 
-	_shape_end_separator = _add_tool_options_separator(_shape_options, "Shape Center Separator")
-	_shape_end_separator.visible = false
+	_shape_origin_separator = _add_tool_options_separator(_shape_options, "Shape Origin Separator")
+	_shape_origin_separator.visible = false
 
-	_shape_from_center = CheckBox.new()
-	_shape_from_center.text = "From center"
-	_shape_from_center.button_pressed = false
-	_shape_from_center.tooltip_text = "Use the first point as the center and draw outward symmetrically"
-	_shape_from_center.toggled.connect(_on_shape_from_center_toggled)
-	_shape_options.add_child(_shape_from_center)
+	_shape_origin_mode = OptionButton.new()
+	_shape_origin_mode.add_item("Corner to Corner", GDDrawCanvasControl.ShapeOriginMode.CORNER_TO_CORNER)
+	_shape_origin_mode.add_item("From Start Point", GDDrawCanvasControl.ShapeOriginMode.FROM_START_POINT)
+	_shape_origin_mode.add_item("From Canvas Center", GDDrawCanvasControl.ShapeOriginMode.FROM_CANVAS_CENTER)
+	_shape_origin_mode.selected = 0
+	_shape_origin_mode.custom_minimum_size.x = 148
+	_update_shape_origin_tooltip(GDDrawCanvasControl.ShapeOriginMode.CORNER_TO_CORNER)
+	_shape_origin_mode.item_selected.connect(_on_shape_origin_mode_selected)
+	_shape_options.add_child(_shape_origin_mode)
+
+	_text_options = HBoxContainer.new()
+	_text_options.name = "Text Options"
+	_text_options.add_theme_constant_override("separation", 6)
+	options_bar.add_child(_text_options)
+
+	var text_font_icon := _make_static_icon("type_0.svg", "Font")
+	text_font_icon.name = "Text Font Icon"
+	_text_options.add_child(text_font_icon)
+
+	_text_font_selector = OptionButton.new()
+	_text_font_selector.custom_minimum_size.x = 168
+	_text_font_selector.fit_to_longest_item = false
+	_text_font_selector.tooltip_text = "Choose a custom font or any font family installed on this computer"
+	_text_font_selector.item_selected.connect(_on_text_font_selected)
+	var text_font_popup := _text_font_selector.get_popup()
+	text_font_popup.allow_search = true
+	text_font_popup.max_size = FONT_PICKER_MAX_SIZE
+	text_font_popup.about_to_popup.connect(_refresh_text_font_selector)
+	_refresh_text_font_selector()
+	_text_options.add_child(_text_font_selector)
+
+	var text_size_icon := _make_static_icon("a-large-small_0.svg", "Font size")
+	text_size_icon.name = "Text Font Size Icon"
+	_text_options.add_child(text_size_icon)
+
+	_text_font_size = SpinBox.new()
+	_text_font_size.min_value = 1
+	_text_font_size.max_value = 512
+	_text_font_size.step = 1
+	_text_font_size.value = 16
+	_text_font_size.suffix = " px"
+	_text_font_size.custom_minimum_size.x = 82
+	_text_font_size.tooltip_text = "Text font size in image pixels"
+	_text_font_size.value_changed.connect(_on_text_font_size_changed)
+	_text_font_size.get_line_edit().text_submitted.connect(_on_text_option_text_submitted)
+	_text_options.add_child(_text_font_size)
+
+
+	_add_tool_options_separator(_text_options, "Text Alignment Separator")
+	var alignment_group := ButtonGroup.new()
+	var alignment_definitions := [
+		["text-align-start_0.svg", "Align text to the start of the text box", GDDrawCanvasControl.TextAlignment.LEFT],
+		["text-align-center_0.svg", "Center text within the text box", GDDrawCanvasControl.TextAlignment.CENTER],
+		["text-align-end_0.svg", "Align text to the end of the text box", GDDrawCanvasControl.TextAlignment.RIGHT],
+	]
+	for definition in alignment_definitions:
+		var alignment_button := _make_icon_button(str(definition[0]), str(definition[1]), true)
+		alignment_button.name = "Text Alignment %s" % str(definition[2])
+		alignment_button.button_group = alignment_group
+		alignment_button.set_pressed_no_signal(int(definition[2]) == GDDrawCanvasControl.TextAlignment.LEFT)
+		_update_toggle_button_icon(alignment_button)
+		alignment_button.toggled.connect(_on_text_alignment_toggled.bind(int(definition[2])))
+		_text_alignment_buttons.append(alignment_button)
+		_text_options.add_child(alignment_button)
+
+	_text_wrap_button = _make_icon_button(
+		"text-wrap_0.svg",
+		"Wrap words to the text-box width; disable to preserve only manual line breaks",
+		true
+	)
+	_text_wrap_button.name = "Text Word Wrap"
+	_text_wrap_button.set_pressed_no_signal(true)
+	_update_toggle_button_icon(_text_wrap_button)
+	_text_wrap_button.toggled.connect(_on_text_wrap_toggled)
+	_text_options.add_child(_text_wrap_button)
+
+	_add_tool_options_separator(_text_options, "Text Rotate Separator")
+	var text_rotation_controls := _make_compact_rotation_controls(
+		"Text Rotation Controls",
+		"Rotate text counterclockwise by the angle field",
+		"Rotate text clockwise by the angle field",
+		"Text rotation amount in degrees"
+	)
+	_text_rotate_left_button = text_rotation_controls["left_button"] as Button
+	_text_rotate_right_button = text_rotation_controls["right_button"] as Button
+	_text_rotate_amount = text_rotation_controls["amount"] as SpinBox
+	_text_rotate_left_button.pressed.connect(_rotate_text_by_amount.bind(false))
+	_text_rotate_amount.get_line_edit().text_submitted.connect(_on_text_option_text_submitted)
+	_text_rotate_right_button.pressed.connect(_rotate_text_by_amount.bind(true))
+	_text_options.add_child(text_rotation_controls["control"] as Control)
+	_add_tool_options_separator(_text_options, "Text Commit Separator")
+
+	_text_commit_button = _make_icon_button("check_0.svg", "Rasterize this text as one undoable operation (Ctrl+Enter)")
+	_text_commit_button.name = "Commit Text"
+	_text_commit_button.pressed.connect(_commit_text_draft)
+	_text_options.add_child(_text_commit_button)
+
+	_text_cancel_button = _make_icon_button("x_0.svg", "Discard the uncommitted text box (Escape)")
+	_text_cancel_button.name = "Cancel Text"
+	_text_cancel_button.pressed.connect(_cancel_text_draft)
+	_text_options.add_child(_text_cancel_button)
 
 	_selection_options = HBoxContainer.new()
 	_selection_options.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
@@ -1366,13 +2052,9 @@ func _build_options_bar() -> void:
 	_selection_flip_vertical_button.pressed.connect(_flip_selection_vertical)
 	_selection_options.add_child(_selection_flip_vertical_button)
 
-	_selection_crop_button = Button.new()
-	_selection_crop_button.text = "Crop"
-	_selection_crop_button.tooltip_text = "Crop the canvas to the occupied selection bounds"
-	_selection_crop_button.focus_mode = Control.FOCUS_NONE
-	_selection_crop_button.custom_minimum_size = Vector2(48, TOOL_BUTTON_SIZE.y)
+	_selection_crop_button = _make_icon_button("crop_0.svg", "Crop the canvas to the occupied selection bounds")
+	_selection_crop_button.name = "Crop Selection"
 	_selection_crop_button.pressed.connect(_crop_to_selection)
-	_apply_icon_button_style(_selection_crop_button)
 	_selection_options.add_child(_selection_crop_button)
 
 	_add_tool_options_separator(_selection_options, "Selection Clipboard Separator")
@@ -1390,23 +2072,18 @@ func _build_options_bar() -> void:
 	_selection_options.add_child(_selection_cut_button)
 
 	_add_tool_options_separator(_selection_options, "Selection Rotate Separator")
-
-	_selection_rotate_left_button = _make_icon_button("rotate-ccw_0.svg", "Rotate selection counterclockwise by the angle field")
+	var selection_rotation_controls := _make_compact_rotation_controls(
+		"Selection Rotation Controls",
+		"Rotate selection counterclockwise by the angle field",
+		"Rotate selection clockwise by the angle field",
+		"Selection rotation amount in degrees"
+	)
+	_selection_rotate_left_button = selection_rotation_controls["left_button"] as Button
+	_selection_rotate_right_button = selection_rotation_controls["right_button"] as Button
+	_selection_rotate_amount = selection_rotation_controls["amount"] as SpinBox
 	_selection_rotate_left_button.pressed.connect(_rotate_selection_by_amount.bind(false))
-	_selection_options.add_child(_selection_rotate_left_button)
-
-	_selection_rotate_amount = SpinBox.new()
-	_selection_rotate_amount.min_value = 1
-	_selection_rotate_amount.max_value = 359
-	_selection_rotate_amount.step = 1
-	_selection_rotate_amount.value = 90
-	_selection_rotate_amount.custom_minimum_size.x = 62
-	_selection_rotate_amount.tooltip_text = "Selection rotation amount in degrees"
-	_selection_options.add_child(_selection_rotate_amount)
-
-	_selection_rotate_right_button = _make_icon_button("rotate-cw_0.svg", "Rotate selection clockwise by the angle field")
 	_selection_rotate_right_button.pressed.connect(_rotate_selection_by_amount.bind(true))
-	_selection_options.add_child(_selection_rotate_right_button)
+	_selection_options.add_child(selection_rotation_controls["control"] as Control)
 
 	_selection_commit_separator = _add_tool_options_separator(_selection_options, "Selection Commit Separator")
 
@@ -1534,6 +2211,9 @@ func _build_canvas_region(parent: Container) -> void:
 	_canvas.image_drop_requested.connect(_on_canvas_image_drop_requested)
 	_canvas.image_changed.connect(_on_canvas_image_changed)
 	_canvas.hover_uv_changed.connect(_on_canvas_hover_uv_changed)
+	_canvas.text_draft_started.connect(_on_text_draft_started)
+	_canvas.text_draft_finished.connect(_on_text_draft_finished)
+	_canvas.text_draft_copied.connect(_on_text_draft_copied)
 	_canvas.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_canvas_2d_host.add_child(_canvas)
 
@@ -1574,8 +2254,9 @@ func _create_3d_paint_view() -> SubViewportContainer:
 	world.environment.background_mode = Environment.BG_COLOR
 	world.environment.background_color = PAINT_3D_BACKGROUND_COLOR
 	world.environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	world.environment.ambient_light_color = Color(0.5, 0.5, 0.5)
-	world.environment.ambient_light_energy = 0.9
+	world.environment.ambient_light_color = Color.WHITE
+	world.environment.ambient_light_energy = PAINT_3D_PREVIEW_AMBIENT_ENERGY
+	world.environment.fog_enabled = false
 
 	_paint_3d_root = Node3D.new()
 	_paint_3d_viewport.add_child(_paint_3d_root)
@@ -1587,10 +2268,15 @@ func _create_3d_paint_view() -> SubViewportContainer:
 	_paint_3d_camera.far = 500.0
 	_paint_3d_root.add_child(_paint_3d_camera)
 
-	var light := DirectionalLight3D.new()
-	light.light_energy = 1.35
-	light.rotation_degrees = Vector3(-45, 35, 0)
-	_paint_3d_root.add_child(light)
+	_paint_3d_preview_light = DirectionalLight3D.new()
+	_paint_3d_preview_light.name = "Neutral Preview Light"
+	_paint_3d_preview_light.light_color = Color.WHITE
+	_paint_3d_preview_light.light_energy = _clamp_preview_light_intensity(_preview_light_intensity_value)
+	_paint_3d_preview_light.shadow_enabled = false
+	_paint_3d_preview_light.rotation_degrees = PAINT_3D_PREVIEW_LIGHT_DEFAULT_ROTATION
+	_paint_3d_preview_light.visible = _preview_light_enabled
+	_paint_3d_root.add_child(_paint_3d_preview_light)
+	_create_3d_rotation_gizmo()
 	return view
 
 
@@ -1605,7 +2291,7 @@ func _create_3d_paint_stage() -> void:
 	floor_mesh.size = Vector2(PAINT_3D_STAGE_MIN_SIZE, PAINT_3D_STAGE_MIN_SIZE)
 	_paint_3d_stage_floor.mesh = floor_mesh
 	_paint_3d_stage_floor.material_override = _make_3d_stage_floor_material()
-	_paint_3d_stage_floor.visible = false
+	_paint_3d_stage_floor.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_paint_3d_stage_root.add_child(_paint_3d_stage_floor)
 
 	_paint_3d_stage_grid = MeshInstance3D.new()
@@ -1613,23 +2299,278 @@ func _create_3d_paint_stage() -> void:
 	_paint_3d_stage_grid.material_override = _make_3d_stage_grid_material()
 	_paint_3d_stage_root.add_child(_paint_3d_stage_grid)
 	_update_3d_paint_stage(AABB(), PAINT_3D_STAGE_MIN_SIZE)
+	_apply_3d_preview_grid_state()
 
 
 func _make_3d_stage_floor_material() -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.2, 0.205, 0.21, 1.0)
+	material.albedo_color = Color(0.2, 0.205, 0.21, 0.0)
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.roughness = 1.0
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return material
 
 
-func _make_3d_stage_grid_material() -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.vertex_color_use_as_albedo = true
-	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	material.no_depth_test = false
+func _make_3d_stage_grid_material() -> ShaderMaterial:
+	var material := ShaderMaterial.new()
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+render_mode unshaded, cull_disabled, fog_disabled;
+
+uniform float camera_fade_near = 6.0;
+uniform float camera_fade_far = 20.0;
+uniform float edge_fade_near = 3.0;
+uniform float edge_fade_far = 4.0;
+varying vec3 grid_world_position;
+varying vec3 grid_local_position;
+
+void vertex() {
+	grid_local_position = VERTEX;
+	grid_world_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+void fragment() {
+	float camera_distance = distance(grid_world_position, CAMERA_POSITION_WORLD);
+	float camera_alpha = 1.0 - smoothstep(camera_fade_near, camera_fade_far, camera_distance);
+	float edge_alpha = 1.0 - smoothstep(edge_fade_near, edge_fade_far, length(grid_local_position.xz));
+	ALBEDO = COLOR.rgb;
+	ALPHA = COLOR.a * min(camera_alpha, edge_alpha);
+}
+"""
+	material.shader = shader
+	_configure_3d_stage_grid_fade(material, PAINT_3D_STAGE_MIN_SIZE)
 	return material
+
+
+func _configure_3d_stage_grid_fade(material: ShaderMaterial, stage_size: float) -> void:
+	material.set_shader_parameter("camera_fade_near", stage_size * 0.8)
+	material.set_shader_parameter("camera_fade_far", stage_size * 2.5)
+	material.set_shader_parameter("edge_fade_near", stage_size * 0.35)
+	material.set_shader_parameter("edge_fade_far", stage_size * 0.5)
+
+
+func _create_3d_rotation_gizmo() -> void:
+	if _paint_3d_rotation_gizmo or not _paint_3d_root:
+		return
+	_paint_3d_rotation_gizmo = Node3D.new()
+	_paint_3d_rotation_gizmo.name = "Preview Rotation Gizmo"
+	_paint_3d_rotation_gizmo.visible = false
+	_paint_3d_root.add_child(_paint_3d_rotation_gizmo)
+	_paint_3d_gizmo_rings.clear()
+	_paint_3d_gizmo_materials.clear()
+	_paint_3d_gizmo_translation_axes.clear()
+	_paint_3d_gizmo_translation_materials.clear()
+	for axis_index in range(3):
+		var ring := MeshInstance3D.new()
+		ring.name = ["X Rotation Ring", "Y Rotation Ring", "Z Rotation Ring"][axis_index]
+		ring.mesh = _make_3d_rotation_gizmo_ring_mesh(axis_index)
+		var material := _make_3d_rotation_gizmo_material(PAINT_3D_GIZMO_AXIS_COLORS[axis_index])
+		ring.material_override = material
+		_paint_3d_rotation_gizmo.add_child(ring)
+		_paint_3d_gizmo_rings.push_back(ring)
+		_paint_3d_gizmo_materials.push_back(material)
+		var arrow := MeshInstance3D.new()
+		arrow.name = ["X Translation Handle", "Y Translation Handle", "Z Translation Handle"][axis_index]
+		arrow.mesh = _make_3d_translation_gizmo_mesh(axis_index)
+		var arrow_material := _make_3d_rotation_gizmo_material(PAINT_3D_GIZMO_AXIS_COLORS[axis_index])
+		arrow_material.resource_name = "GDDraw Preview Translation Handle"
+		arrow.material_override = arrow_material
+		_paint_3d_rotation_gizmo.add_child(arrow)
+		_paint_3d_gizmo_translation_axes.push_back(arrow)
+		_paint_3d_gizmo_translation_materials.push_back(arrow_material)
+
+
+func _make_3d_rotation_gizmo_ring_mesh(axis_index: int) -> ImmediateMesh:
+	var mesh := ImmediateMesh.new()
+	var tube_radius := PAINT_3D_GIZMO_RING_WIDTH_PIXELS / PAINT_3D_GIZMO_RADIUS_PIXELS * 0.5
+	var ring_axis := _get_3d_gizmo_axis(axis_index)
+	var tube_sides := 6
+	mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	for segment in range(PAINT_3D_GIZMO_SEGMENTS):
+		var angle_a := TAU * float(segment) / float(PAINT_3D_GIZMO_SEGMENTS)
+		var angle_b := TAU * float(segment + 1) / float(PAINT_3D_GIZMO_SEGMENTS)
+		var center_a := _get_3d_gizmo_ring_point(axis_index, angle_a)
+		var center_b := _get_3d_gizmo_ring_point(axis_index, angle_b)
+		for tube_side in range(tube_sides):
+			var tube_angle_a := TAU * float(tube_side) / float(tube_sides)
+			var tube_angle_b := TAU * float(tube_side + 1) / float(tube_sides)
+			var offset_aa := (ring_axis * cos(tube_angle_a) + center_a * sin(tube_angle_a)) * tube_radius
+			var offset_ab := (ring_axis * cos(tube_angle_b) + center_a * sin(tube_angle_b)) * tube_radius
+			var offset_ba := (ring_axis * cos(tube_angle_a) + center_b * sin(tube_angle_a)) * tube_radius
+			var offset_bb := (ring_axis * cos(tube_angle_b) + center_b * sin(tube_angle_b)) * tube_radius
+			mesh.surface_add_vertex(center_a + offset_aa)
+			mesh.surface_add_vertex(center_a + offset_ab)
+			mesh.surface_add_vertex(center_b + offset_bb)
+			mesh.surface_add_vertex(center_a + offset_aa)
+			mesh.surface_add_vertex(center_b + offset_bb)
+			mesh.surface_add_vertex(center_b + offset_ba)
+	mesh.surface_end()
+	return mesh
+
+
+func _make_3d_translation_gizmo_mesh(axis_index: int) -> ImmediateMesh:
+	var mesh := ImmediateMesh.new()
+	var axis := _get_3d_gizmo_axis(axis_index)
+	var radial_a := axis.cross(Vector3.UP)
+	if radial_a.length_squared() <= 0.000001:
+		radial_a = axis.cross(Vector3.RIGHT)
+	radial_a = radial_a.normalized()
+	var radial_b := axis.cross(radial_a).normalized()
+	mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	for side in range(PAINT_3D_GIZMO_ARROW_SIDES):
+		var angle_a := TAU * float(side) / float(PAINT_3D_GIZMO_ARROW_SIDES)
+		var angle_b := TAU * float(side + 1) / float(PAINT_3D_GIZMO_ARROW_SIDES)
+		var radial_direction_a := radial_a * cos(angle_a) + radial_b * sin(angle_a)
+		var radial_direction_b := radial_a * cos(angle_b) + radial_b * sin(angle_b)
+		var shaft_a0 := axis * PAINT_3D_GIZMO_ARROW_SHAFT_START + radial_direction_a * PAINT_3D_GIZMO_ARROW_SHAFT_RADIUS
+		var shaft_b0 := axis * PAINT_3D_GIZMO_ARROW_SHAFT_START + radial_direction_b * PAINT_3D_GIZMO_ARROW_SHAFT_RADIUS
+		var shaft_a1 := axis * PAINT_3D_GIZMO_ARROW_HEAD_START + radial_direction_a * PAINT_3D_GIZMO_ARROW_SHAFT_RADIUS
+		var shaft_b1 := axis * PAINT_3D_GIZMO_ARROW_HEAD_START + radial_direction_b * PAINT_3D_GIZMO_ARROW_SHAFT_RADIUS
+		mesh.surface_add_vertex(shaft_a0)
+		mesh.surface_add_vertex(shaft_a1)
+		mesh.surface_add_vertex(shaft_b1)
+		mesh.surface_add_vertex(shaft_a0)
+		mesh.surface_add_vertex(shaft_b1)
+		mesh.surface_add_vertex(shaft_b0)
+		var head_a := axis * PAINT_3D_GIZMO_ARROW_HEAD_START + radial_direction_a * PAINT_3D_GIZMO_ARROW_HEAD_RADIUS
+		var head_b := axis * PAINT_3D_GIZMO_ARROW_HEAD_START + radial_direction_b * PAINT_3D_GIZMO_ARROW_HEAD_RADIUS
+		var tip := axis * PAINT_3D_GIZMO_ARROW_LENGTH
+		mesh.surface_add_vertex(head_a)
+		mesh.surface_add_vertex(tip)
+		mesh.surface_add_vertex(head_b)
+	mesh.surface_end()
+	return mesh
+
+
+func _make_3d_rotation_gizmo_material(color: Color) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.resource_name = "GDDraw Preview Rotation Ring"
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = color
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.no_depth_test = true
+	material.disable_fog = true
+	material.render_priority = 1
+	return material
+
+
+func _get_3d_gizmo_ring_point(axis_index: int, angle: float) -> Vector3:
+	var cosine := cos(angle)
+	var sine := sin(angle)
+	match axis_index:
+		0:
+			return Vector3(0.0, cosine, sine)
+		1:
+			return Vector3(cosine, 0.0, sine)
+		_:
+			return Vector3(cosine, sine, 0.0)
+
+
+func _get_3d_gizmo_axis(axis_index: int) -> Vector3:
+	match axis_index:
+		0:
+			return Vector3.RIGHT
+		1:
+			return Vector3.UP
+		_:
+			return Vector3.BACK
+
+
+func _update_3d_rotation_gizmo_visibility() -> void:
+	if not _paint_3d_rotation_gizmo:
+		return
+	var has_session: bool = _texture_3d_session != null and _texture_3d_session.has_active_session()
+	_paint_3d_rotation_gizmo.visible = (
+		_paint_3d_gizmo_visible
+		and _canvas_mode_3d
+		and has_session
+		and _paint_3d_mesh != null
+		and _paint_3d_mesh.mesh != null
+	)
+	if not _paint_3d_rotation_gizmo.visible:
+		_cancel_3d_rotation_gizmo_drag(false)
+		_set_3d_transform_gizmo_hover(GIZMO_CONTROL_NONE, -1)
+	_update_3d_transform_gizmo_component_visibility()
+
+
+func _update_3d_transform_gizmo_component_visibility() -> void:
+	for axis_index in range(3):
+		if axis_index < _paint_3d_gizmo_rings.size():
+			_paint_3d_gizmo_rings[axis_index].visible = (
+				not _paint_3d_gizmo_dragging
+				or (_paint_3d_gizmo_active_control == GIZMO_CONTROL_ROTATION and axis_index == _paint_3d_gizmo_active_axis)
+			)
+		if axis_index < _paint_3d_gizmo_translation_axes.size():
+			_paint_3d_gizmo_translation_axes[axis_index].visible = (
+				not _paint_3d_gizmo_dragging
+				or (_paint_3d_gizmo_active_control == GIZMO_CONTROL_TRANSLATION and axis_index == _paint_3d_gizmo_active_axis)
+			)
+
+
+func _update_3d_rotation_gizmo_transform() -> void:
+	if not _paint_3d_rotation_gizmo or not _paint_3d_mesh or not _paint_3d_mesh.mesh:
+		return
+	var preview_transform: Transform3D = _paint_3d_mesh.transform
+	var transformed_aabb := _get_transformed_3d_aabb(_paint_3d_mesh.mesh.get_aabb(), preview_transform)
+	_paint_3d_model_center = transformed_aabb.get_center()
+	var world_scale := _get_3d_rotation_gizmo_world_scale()
+	_paint_3d_rotation_gizmo.transform = Transform3D(
+		Basis.IDENTITY.scaled(Vector3.ONE * world_scale),
+		_paint_3d_model_center
+	)
+
+
+func _get_3d_rotation_gizmo_world_scale(distance_override := -1.0, viewport_height_override := -1.0) -> float:
+	if not _paint_3d_camera:
+		return 1.0
+	var distance: float = distance_override
+	if distance <= 0.0:
+		var camera_to_center := _paint_3d_model_center - _paint_3d_camera.global_position
+		distance = absf(camera_to_center.dot(-_paint_3d_camera.global_transform.basis.z.normalized()))
+	var viewport_height: float = viewport_height_override
+	if viewport_height <= 0.0 and _paint_3d_view:
+		viewport_height = _paint_3d_view.size.y
+	if viewport_height <= 0.0 and _paint_3d_viewport:
+		viewport_height = float(_paint_3d_viewport.size.y)
+	viewport_height = maxf(1.0, viewport_height)
+	var world_height := 2.0 * maxf(distance, _paint_3d_camera.near) * tan(deg_to_rad(_paint_3d_camera.fov) * 0.5)
+	return maxf(0.0001, world_height * PAINT_3D_GIZMO_RADIUS_PIXELS / viewport_height)
+
+
+func _set_3d_transform_gizmo_hover(control_type: int, axis_index: int) -> void:
+	if _paint_3d_gizmo_hover_control == control_type and _paint_3d_gizmo_hover_axis == axis_index and not _paint_3d_gizmo_dragging:
+		return
+	_paint_3d_gizmo_hover_control = control_type
+	_paint_3d_gizmo_hover_axis = axis_index
+	_update_3d_rotation_gizmo_materials()
+
+
+func _set_3d_rotation_gizmo_hover_axis(axis_index: int) -> void:
+	_set_3d_transform_gizmo_hover(GIZMO_CONTROL_ROTATION if axis_index >= 0 else GIZMO_CONTROL_NONE, axis_index)
+
+
+func _update_3d_rotation_gizmo_materials() -> void:
+	for axis_index in range(_paint_3d_gizmo_materials.size()):
+		var color: Color = PAINT_3D_GIZMO_AXIS_COLORS[axis_index]
+		if _paint_3d_gizmo_active_control == GIZMO_CONTROL_ROTATION and axis_index == _paint_3d_gizmo_active_axis:
+			color = color.lerp(Color.WHITE, 0.42)
+			color.a = 1.0
+		elif _paint_3d_gizmo_hover_control == GIZMO_CONTROL_ROTATION and axis_index == _paint_3d_gizmo_hover_axis:
+			color = color.lerp(Color.WHITE, 0.25)
+			color.a = 0.84
+		_paint_3d_gizmo_materials[axis_index].albedo_color = color
+	for axis_index in range(_paint_3d_gizmo_translation_materials.size()):
+		var color: Color = PAINT_3D_GIZMO_AXIS_COLORS[axis_index]
+		if _paint_3d_gizmo_active_control == GIZMO_CONTROL_TRANSLATION and axis_index == _paint_3d_gizmo_active_axis:
+			color = color.lerp(Color.WHITE, 0.42)
+			color.a = 1.0
+		elif _paint_3d_gizmo_hover_control == GIZMO_CONTROL_TRANSLATION and axis_index == _paint_3d_gizmo_hover_axis:
+			color = color.lerp(Color.WHITE, 0.25)
+			color.a = 0.84
+		_paint_3d_gizmo_translation_materials[axis_index].albedo_color = color
 
 
 func _build_canvas_view_controls() -> void:
@@ -1644,39 +2585,121 @@ func _build_canvas_view_controls() -> void:
 	view_controls.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
 	_canvas_2d_host.add_child(view_controls)
 
-	var orientation_controls := HBoxContainer.new()
-	orientation_controls.name = "3D Preview Orientation Controls"
-	orientation_controls.anchor_left = 1.0
-	orientation_controls.anchor_right = 1.0
-	orientation_controls.offset_left = -36.0
-	orientation_controls.offset_top = 8.0
-	orientation_controls.offset_right = -8.0
-	orientation_controls.offset_bottom = 36.0
-	orientation_controls.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
-	_canvas_3d_host.add_child(orientation_controls)
+	_preview_orientation_controls = VBoxContainer.new()
+	_preview_orientation_controls.name = "3D Preview Controls"
+	_preview_orientation_controls.anchor_left = 1.0
+	_preview_orientation_controls.anchor_right = 1.0
+	_preview_orientation_controls.offset_left = -312.0
+	_preview_orientation_controls.offset_top = 8.0
+	_preview_orientation_controls.offset_right = -8.0
+	_preview_orientation_controls.offset_bottom = 96.0
+	_preview_orientation_controls.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
+	_preview_orientation_controls.visible = false
+	_canvas_3d_host.add_child(_preview_orientation_controls)
+	_preview_light_controls_row = HBoxContainer.new()
+	_preview_light_controls_row.name = "Preview Lighting Row"
+	_preview_light_controls_row.alignment = BoxContainer.ALIGNMENT_END
+	_preview_light_controls_row.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
+	_preview_orientation_controls.add_child(_preview_light_controls_row)
+	_preview_transform_controls_row = HBoxContainer.new()
+	_preview_transform_controls_row.name = "Preview Transform Row"
+	_preview_transform_controls_row.alignment = BoxContainer.ALIGNMENT_END
+	_preview_transform_controls_row.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
+	_preview_orientation_controls.add_child(_preview_transform_controls_row)
+	_preview_grid_controls_row = HBoxContainer.new()
+	_preview_grid_controls_row.name = "Preview Grid Row"
+	_preview_grid_controls_row.alignment = BoxContainer.ALIGNMENT_END
+	_preview_grid_controls_row.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
+	_preview_orientation_controls.add_child(_preview_grid_controls_row)
 
-	_preview_orientation_button = _make_icon_menu_button(
-		"rotate-3d_0.svg",
-		"Preview Orientation\nRotate only GDDraw's isolated 3D preview. The source scene, imported mesh, resources, texture-paint data, and stage are not modified."
+	_preview_light_toggle = _make_icon_button("sun_0.svg", "Toggle neutral lighting in the 3D preview.", true)
+	_preview_light_toggle.name = "Neutral Preview Light"
+	_preview_light_toggle.set_pressed_no_signal(_preview_light_enabled)
+	_update_toggle_button_icon(_preview_light_toggle)
+	_preview_light_toggle.toggled.connect(_on_preview_light_toggled)
+	_preview_light_controls_row.add_child(_preview_light_toggle)
+
+	_preview_light_intensity = SpinBox.new()
+	_preview_light_intensity.name = "Neutral Preview Light Intensity"
+	_preview_light_intensity.min_value = PAINT_3D_PREVIEW_LIGHT_MIN
+	_preview_light_intensity.max_value = PAINT_3D_PREVIEW_LIGHT_MAX
+	_preview_light_intensity.step = 0.05
+	_preview_light_intensity.custom_minimum_size = Vector2(72, TOOL_BUTTON_SIZE.y)
+	_preview_light_intensity.update_on_text_changed = true
+	_preview_light_intensity.tooltip_text = "Adjust the neutral light intensity in the 3D preview."
+	_preview_light_intensity.set_value_no_signal(_clamp_preview_light_intensity(_preview_light_intensity_value))
+	_apply_preferences_spinbox_style(_preview_light_intensity)
+	_preview_light_intensity.value_changed.connect(_on_preview_light_intensity_changed)
+	_preview_light_controls_row.add_child(_preview_light_intensity)
+
+	_preview_light_link_toggle = _make_icon_button(
+		"unlink_0.svg",
+		"Link the neutral light direction to the 3D preview camera.",
+		true,
+		"link_1.svg"
 	)
-	_preview_orientation_button.name = "Preview Orientation"
+	_preview_light_link_toggle.name = "Link Preview Light to Camera"
+	_preview_light_link_toggle.set_pressed_no_signal(_preview_light_camera_linked)
+	_update_toggle_button_icon(_preview_light_link_toggle)
+	_preview_light_link_toggle.toggled.connect(_on_preview_light_camera_link_toggled)
+	_preview_light_controls_row.add_child(_preview_light_link_toggle)
+
+	_preview_light_reset_button = _make_icon_button(
+		"refresh-ccw_0.svg",
+		"Unlink and reset the neutral light direction."
+	)
+	_preview_light_reset_button.name = "Reset Preview Light Direction"
+	_preview_light_reset_button.pressed.connect(_reset_preview_light_orientation)
+	_preview_light_controls_row.add_child(_preview_light_reset_button)
+
+	_preview_orientation_button = _make_icon_button(
+		"rotate-3d_0.svg",
+		"Show the X/Y/Z transform gizmo in the 3D preview.",
+		true,
+		"rotate-3d_1.svg"
+	)
+	_preview_orientation_button.name = "Show Preview Transform Gizmo"
+	_preview_orientation_button.set_pressed_no_signal(_paint_3d_gizmo_visible)
+	_update_toggle_button_icon(_preview_orientation_button)
 	_preview_orientation_button.visible = false
-	orientation_controls.add_child(_preview_orientation_button)
+	_preview_orientation_button.toggled.connect(_on_preview_rotation_gizmo_toggled)
+	_preview_transform_controls_row.add_child(_preview_orientation_button)
 
-	_preview_orientation_menu = (_preview_orientation_button as MenuButton).get_popup()
-	_preview_orientation_menu.name = "Preview Orientation Menu"
-	_preview_orientation_menu.add_item("X +90°", PreviewOrientationCommand.X_POSITIVE_90)
-	_preview_orientation_menu.add_item("X −90°", PreviewOrientationCommand.X_NEGATIVE_90)
-	_preview_orientation_menu.add_item("Y +90°", PreviewOrientationCommand.Y_POSITIVE_90)
-	_preview_orientation_menu.add_item("Y −90°", PreviewOrientationCommand.Y_NEGATIVE_90)
-	_preview_orientation_menu.add_item("Z +90°", PreviewOrientationCommand.Z_POSITIVE_90)
-	_preview_orientation_menu.add_item("Z −90°", PreviewOrientationCommand.Z_NEGATIVE_90)
-	_preview_orientation_menu.add_separator()
-	_preview_orientation_menu.add_item("Reset", PreviewOrientationCommand.RESET)
-	_preview_orientation_menu.add_item("Use Scene Orientation", PreviewOrientationCommand.USE_SCENE_ORIENTATION)
-	_preview_orientation_menu.id_pressed.connect(_on_preview_orientation_selected)
+	_preview_scene_orientation_button = _make_icon_button(
+		"unlink_0.svg",
+		"Link the source scene transform to the 3D preview.",
+		true,
+		"link_1.svg"
+	)
+	_preview_scene_orientation_button.name = "Link Preview to Scene Transform"
+	_preview_scene_orientation_button.set_pressed_no_signal(false)
+	_apply_scene_transform_link_control_state(false)
+	_preview_scene_orientation_button.toggled.connect(_on_scene_transform_link_toggled)
+	_preview_transform_controls_row.add_child(_preview_scene_orientation_button)
 
-	_pan_button = _make_icon_button("scan-search_0.svg", "Pan", true, "scan-eye_1.svg")
+	_preview_3d_grid_button = _make_icon_button(
+		"grid-3x3_0.svg",
+		"Show or hide the perspective grid in the 3D preview.",
+		true,
+		"grid-3x3_1.svg"
+	)
+	_preview_3d_grid_button.name = "Show 3D Preview Grid"
+	_preview_3d_grid_button.set_pressed_no_signal(_preview_3d_grid_visible)
+	_update_toggle_button_icon(_preview_3d_grid_button)
+	_preview_3d_grid_button.toggled.connect(_on_preview_3d_grid_toggled)
+	_preview_grid_controls_row.add_child(_preview_3d_grid_button)
+	_apply_3d_preview_grid_state()
+
+	_preview_orientation_reset_button = _make_icon_button(
+		"refresh-ccw_0.svg",
+		"Reset the 3D preview transform and disable scene linking."
+	)
+	_preview_orientation_reset_button.name = "Reset Preview Transform"
+	_preview_orientation_reset_button.pressed.connect(_on_reset_preview_orientation_pressed)
+	_preview_transform_controls_row.add_child(_preview_orientation_reset_button)
+	_apply_preview_lighting_state()
+
+	_pan_button = _make_icon_button("move_0.svg", "Pan", true, "move_1.svg")
 	_pan_button.toggled.connect(_on_pan_toggled)
 	view_controls.add_child(_pan_button)
 
@@ -1714,7 +2737,8 @@ func _build_canvas_view_controls() -> void:
 	_zoom_in_button = _make_icon_button("zoom-in_0.svg", "Zoom in 2D canvas")
 	_zoom_in_button.pressed.connect(_canvas.zoom_in)
 	zoom_2d_controls.add_child(_zoom_in_button)
-	var reset_2d_button := _make_icon_button("rotate-ccw_0.svg", "Reset 2D view")
+	var reset_2d_button := _make_icon_button("refresh-ccw_0.svg", "Reset 2D view")
+	reset_2d_button.name = "Reset 2D View"
 	reset_2d_button.pressed.connect(_canvas.reset_view)
 	zoom_2d_controls.add_child(reset_2d_button)
 
@@ -1743,7 +2767,8 @@ func _build_canvas_view_controls() -> void:
 	_zoom_3d_in_button = _make_icon_button("zoom-in_0.svg", "Zoom in 3D preview")
 	_zoom_3d_in_button.pressed.connect(_zoom_3d_in)
 	zoom_3d_controls.add_child(_zoom_3d_in_button)
-	var frame_3d_button := _make_icon_button("rotate-ccw_0.svg", "Frame 3D mesh")
+	var frame_3d_button := _make_icon_button("refresh-ccw_0.svg", "Frame 3D mesh")
+	frame_3d_button.name = "Frame 3D Mesh"
 	frame_3d_button.pressed.connect(_frame_active_3d_mesh)
 	zoom_3d_controls.add_child(frame_3d_button)
 
@@ -2088,7 +3113,7 @@ func _build_settings_menu() -> void:
 	var file_section := _add_preferences_section(
 		files_tab,
 		"Default save location",
-		"Default save location is the project folder GDDraw offers first when saving new PNG files."
+		"New PNG files default to res://gddraw/images. GDDraw remembers project overrides and creates a missing folder only when an image is written."
 	)
 	var file_row := _add_preferences_control_row(file_section)
 
@@ -2104,6 +3129,27 @@ func _build_settings_menu() -> void:
 	var browse_button := _make_icon_button("folder-open_0.svg", "Choose the default PNG save folder")
 	browse_button.pressed.connect(_show_save_location_dialog)
 	file_row.add_child(browse_button)
+
+	var font_section := _add_preferences_section(
+		files_tab,
+		"Fonts",
+		"Project fonts default to res://gddraw/fonts. Existing project or external folder overrides are preserved; missing folders are never created while scanning. TTF, OTF, WOFF, and WOFF2 files are supported."
+	)
+	var font_row := _add_preferences_control_row(font_section)
+
+	_font_location = LineEdit.new()
+	_font_location.text = _get_default_font_dir()
+	_font_location.placeholder_text = DEFAULT_FONT_DIRECTORY
+	_font_location.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_font_location.tooltip_text = "Project or filesystem folder containing custom fonts"
+	_apply_preferences_line_edit_style(_font_location)
+	_font_location.text_submitted.connect(_on_font_location_submitted)
+	_font_location.focus_exited.connect(_on_font_location_focus_exited)
+	font_row.add_child(_font_location)
+
+	var font_browse_button := _make_icon_button("folder-open_0.svg", "Choose the default custom-font folder")
+	font_browse_button.pressed.connect(_show_font_location_dialog)
+	font_row.add_child(font_browse_button)
 
 
 func _add_preferences_tab(tabs: TabContainer, tab_name: String) -> VBoxContainer:
@@ -2292,14 +3338,11 @@ func _make_icon_button(icon_name: String, tooltip: String, toggle := false, sele
 	button.add_theme_constant_override("icon_max_width", TOOL_ICON_MAX_WIDTH)
 	button.add_theme_constant_override("h_separation", 0)
 	_apply_icon_button_style(button)
-	var icon_path := "%s/%s" % [ICON_DIR, icon_name]
-	if ResourceLoader.exists(icon_path):
-		button.icon = load(icon_path)
-	else:
-		button.text = tooltip.substr(0, 1)
+	button.set_meta("inactive_icon_name", icon_name)
+	button.set_meta("active_icon_name", _get_active_icon_name(icon_name, selected_icon_name))
+	_icon_buttons.append(button)
+	_update_icon_button_icon(button)
 	if toggle:
-		button.set_meta("inactive_icon_name", icon_name)
-		button.set_meta("active_icon_name", _get_active_icon_name(icon_name, selected_icon_name))
 		_apply_selected_tool_style(button)
 		button.toggled.connect(_on_toggle_button_icon_toggled.bind(button))
 	return button
@@ -2323,7 +3366,7 @@ func _make_icon_menu_button(icon_name: String, tooltip: String) -> MenuButton:
 	button.add_theme_constant_override("icon_max_width", TOOL_ICON_MAX_WIDTH)
 	button.add_theme_constant_override("h_separation", 0)
 	_apply_icon_button_style(button)
-	var icon_path := "%s/%s" % [ICON_DIR, icon_name]
+	var icon_path := _resolve_icon_path(icon_name)
 	if ResourceLoader.exists(icon_path):
 		# Contextual menu icons may be added while the editor is already open.
 		# Replace the cached texture so a newly imported SVG cannot display a
@@ -2334,12 +3377,56 @@ func _make_icon_menu_button(icon_name: String, tooltip: String) -> MenuButton:
 	return button
 
 
+func _make_static_icon(icon_name: String, tooltip: String) -> TextureRect:
+	var icon := TextureRect.new()
+	icon.custom_minimum_size = Vector2(20, TOOL_BUTTON_SIZE.y)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.tooltip_text = tooltip
+	var icon_path := _resolve_icon_path(icon_name)
+	if ResourceLoader.exists(icon_path):
+		icon.texture = load(icon_path)
+	return icon
+
+
 func _get_active_icon_name(icon_name: String, selected_icon_name: String) -> String:
 	if not selected_icon_name.is_empty():
 		return selected_icon_name
 	if icon_name.ends_with("_0.svg"):
-		return icon_name.replace("_0.svg", "_1.svg")
+		return _get_icon_state_name(icon_name, IconState.SELECTED)
 	return icon_name
+
+
+func _get_icon_family_name(icon_name: String) -> String:
+	var family_name := icon_name.get_file().trim_suffix(".svg")
+	for state_suffix in ["_0", "_1", "_2"]:
+		if family_name.ends_with(state_suffix):
+			return family_name.trim_suffix(state_suffix)
+	return family_name
+
+
+func _get_icon_state_name(icon_name: String, state: int) -> String:
+	return "%s_%d.svg" % [_get_icon_family_name(icon_name), state]
+
+
+func _get_icon_path(icon_name: String) -> String:
+	var family_name := _get_icon_family_name(icon_name)
+	return "%s/%s/%s" % [ICON_DIR, family_name, icon_name.get_file()]
+
+
+func _resolve_icon_path(icon_name: String, state_override := -1) -> String:
+	var resolved_name := icon_name.get_file()
+	if state_override >= IconState.NORMAL:
+		resolved_name = _get_icon_state_name(resolved_name, state_override)
+	var icon_path := _get_icon_path(resolved_name)
+	if ResourceLoader.exists(icon_path):
+		return icon_path
+	if state_override != IconState.NORMAL:
+		var fallback_name := _get_icon_state_name(resolved_name, IconState.NORMAL)
+		var fallback_path := _get_icon_path(fallback_name)
+		if ResourceLoader.exists(fallback_path):
+			return fallback_path
+	return icon_path
 
 
 func _on_toggle_button_icon_toggled(_enabled: bool, button: Button) -> void:
@@ -2347,14 +3434,91 @@ func _on_toggle_button_icon_toggled(_enabled: bool, button: Button) -> void:
 
 
 func _update_toggle_button_icon(button: Button) -> void:
+	_update_icon_button_icon(button)
+
+
+func _update_icon_button_icon(button: Button) -> void:
 	if not button:
 		return
 	var icon_name := str(button.get_meta("active_icon_name" if button.button_pressed else "inactive_icon_name", ""))
 	if icon_name.is_empty():
 		return
-	var icon_path := "%s/%s" % [ICON_DIR, icon_name]
+	if button.disabled:
+		var disabled_icon_name := _get_icon_state_name(icon_name, IconState.DISABLED)
+		var disabled_icon_color := (
+			ICON_AUTHORED_COLOR
+			if ResourceLoader.exists(_get_icon_path(disabled_icon_name))
+			else ICON_DISABLED_FALLBACK_COLOR
+		)
+		if button.get_theme_color("icon_disabled_color") != disabled_icon_color:
+			button.add_theme_color_override("icon_disabled_color", disabled_icon_color)
+	var icon_path := _resolve_icon_path(icon_name, IconState.DISABLED if button.disabled else -1)
+	if str(button.get_meta("applied_icon_path", "")) == icon_path:
+		return
 	if ResourceLoader.exists(icon_path):
 		button.icon = load(icon_path)
+		button.text = ""
+		button.set_meta("applied_icon_path", icon_path)
+	elif button.text.is_empty():
+		button.text = button.tooltip_text.substr(0, 1)
+
+
+func _refresh_icon_button_states() -> void:
+	var live_buttons: Array[Button] = []
+	for button in _icon_buttons:
+		if not is_instance_valid(button):
+			continue
+		live_buttons.append(button)
+		_update_icon_button_icon(button)
+	_icon_buttons = live_buttons
+
+
+func _make_compact_rotation_controls(
+	control_name: String,
+	counterclockwise_tooltip: String,
+	clockwise_tooltip: String,
+	amount_tooltip: String
+) -> Dictionary:
+	var control := HBoxContainer.new()
+	control.name = control_name
+	control.custom_minimum_size.y = TOOL_BUTTON_SIZE.y
+	control.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	control.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
+
+	var direction_buttons := VBoxContainer.new()
+	direction_buttons.name = "Rotation Direction Buttons"
+	direction_buttons.custom_minimum_size = Vector2(COMPACT_ROTATION_BUTTON_SIZE.x, TOOL_BUTTON_SIZE.y)
+	direction_buttons.add_theme_constant_override("separation", 0)
+	control.add_child(direction_buttons)
+
+	var left_button := _make_icon_button("undo_0.svg", counterclockwise_tooltip)
+	left_button.name = "Rotate Counterclockwise"
+	left_button.custom_minimum_size = COMPACT_ROTATION_BUTTON_SIZE
+	left_button.add_theme_constant_override("icon_max_width", COMPACT_ROTATION_ICON_MAX_WIDTH)
+	direction_buttons.add_child(left_button)
+
+	var right_button := _make_icon_button("redo_0.svg", clockwise_tooltip)
+	right_button.name = "Rotate Clockwise"
+	right_button.custom_minimum_size = COMPACT_ROTATION_BUTTON_SIZE
+	right_button.add_theme_constant_override("icon_max_width", COMPACT_ROTATION_ICON_MAX_WIDTH)
+	direction_buttons.add_child(right_button)
+
+	var amount := SpinBox.new()
+	amount.name = "Rotation Amount"
+	amount.min_value = 1
+	amount.max_value = 359
+	amount.step = 1
+	amount.value = 90
+	amount.custom_minimum_size = Vector2(62, TOOL_BUTTON_SIZE.y)
+	amount.tooltip_text = amount_tooltip
+	control.add_child(amount)
+
+	return {
+		"control": control,
+		"left_button": left_button,
+		"right_button": right_button,
+		"amount": amount,
+	}
 
 
 func _make_dimension_spinbox() -> SpinBox:
@@ -2440,6 +3604,27 @@ func _build_open_dialog() -> void:
 	add_child(_open_dialog)
 
 
+func _build_custom_fill_image_dialog() -> void:
+	_custom_fill_image_dialog = FileDialog.new()
+	_custom_fill_image_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_custom_fill_image_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_custom_fill_image_dialog.filters = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp, *.bmp, *.tga, *.svg ; Image files"])
+	_custom_fill_image_dialog.title = "Select Custom Fill Image"
+	_custom_fill_image_dialog.file_selected.connect(_on_custom_fill_file_selected)
+	add_child(_custom_fill_image_dialog)
+
+
+func _build_text_font_dialog() -> void:
+	_text_font_dialog = FileDialog.new()
+	_text_font_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_text_font_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_text_font_dialog.filters = PackedStringArray(["*.ttf, *.otf, *.woff, *.woff2 ; Font files"])
+	_text_font_dialog.title = "Load Text Font"
+	_text_font_dialog.file_selected.connect(_on_text_font_file_selected)
+	_text_font_dialog.canceled.connect(_on_text_font_dialog_canceled)
+	add_child(_text_font_dialog)
+
+
 func _build_save_dialog() -> void:
 	_save_dialog = FileDialog.new()
 	_save_dialog.access = FileDialog.ACCESS_RESOURCES
@@ -2469,6 +3654,15 @@ func _build_save_location_dialog() -> void:
 	_save_location_dialog.title = "Default Save Location"
 	_save_location_dialog.dir_selected.connect(_on_save_location_selected)
 	add_child(_save_location_dialog)
+
+
+func _build_font_location_dialog() -> void:
+	_font_location_dialog = FileDialog.new()
+	_font_location_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_font_location_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	_font_location_dialog.title = "Default Font Location"
+	_font_location_dialog.dir_selected.connect(_on_font_location_selected)
+	add_child(_font_location_dialog)
 
 
 func _build_brush_preset_dialog() -> void:
@@ -2544,6 +3738,116 @@ func _build_drop_replace_dialog() -> void:
 	_drop_replace_dialog.custom_action.connect(_on_drop_replace_custom_action)
 	_drop_replace_dialog.add_button("Save & Replace", false, "save_replace")
 	add_child(_drop_replace_dialog)
+
+
+func _build_create_textured_csg_dialog() -> void:
+	_create_textured_csg_overlay = PanelContainer.new()
+	_create_textured_csg_overlay.name = "Create Textured CSG3D Overlay"
+	_create_textured_csg_overlay.visible = false
+	_create_textured_csg_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_create_textured_csg_overlay.clip_contents = true
+	_create_textured_csg_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var overlay_background := StyleBoxFlat.new()
+	overlay_background.bg_color = _get_preferences_background_color()
+	_create_textured_csg_overlay.add_theme_stylebox_override("panel", overlay_background)
+	var overlay_host: Control = _workspace_region if _workspace_region else self
+	overlay_host.add_child(_create_textured_csg_overlay)
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 12)
+	margin.add_theme_constant_override("margin_top", 10)
+	margin.add_theme_constant_override("margin_right", 12)
+	margin.add_theme_constant_override("margin_bottom", 12)
+	_create_textured_csg_overlay.add_child(margin)
+
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 8)
+	margin.add_child(content)
+
+	var header_row := HBoxContainer.new()
+	header_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content.add_child(header_row)
+	var title_label := Label.new()
+	title_label.text = "Create Textured CSG3D"
+	title_label.add_theme_font_size_override("font_size", 16)
+	title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header_row.add_child(title_label)
+	var close_button := Button.new()
+	close_button.text = "Close"
+	close_button.tooltip_text = "Close Create Textured CSG3D (Escape)"
+	_apply_preferences_close_button_style(close_button)
+	close_button.pressed.connect(_close_create_textured_csg_overlay)
+	header_row.add_child(close_button)
+	content.add_child(HSeparator.new())
+
+	var options_section := PanelContainer.new()
+	options_section.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	options_section.add_theme_stylebox_override("panel", _make_preferences_section_style())
+	content.add_child(options_section)
+	var options_content := VBoxContainer.new()
+	options_content.add_theme_constant_override("separation", 8)
+	options_section.add_child(options_content)
+
+	var shape_row := HBoxContainer.new()
+	shape_row.add_theme_constant_override("separation", 10)
+	options_content.add_child(shape_row)
+	var shape_label := Label.new()
+	shape_label.text = "Shape"
+	shape_label.custom_minimum_size.x = 150.0
+	shape_row.add_child(shape_label)
+	_create_textured_csg_shape = OptionButton.new()
+	_create_textured_csg_shape.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_create_textured_csg_shape.add_item("Box", GDDrawSpriteCreatorHelper.CSGShape.BOX)
+	_create_textured_csg_shape.add_item("Sphere", GDDrawSpriteCreatorHelper.CSGShape.SPHERE)
+	_create_textured_csg_shape.add_item("Cylinder", GDDrawSpriteCreatorHelper.CSGShape.CYLINDER)
+	_create_textured_csg_shape.item_selected.connect(_update_create_textured_csg_validation)
+	shape_row.add_child(_create_textured_csg_shape)
+
+	_create_textured_csg_assign_image = CheckBox.new()
+	_create_textured_csg_assign_image.text = "Assign Current Image"
+	_create_textured_csg_assign_image.button_pressed = true
+	_create_textured_csg_assign_image.tooltip_text = "Save an RGBA8 PNG and assign it as a nearest-filtered albedo texture."
+	_create_textured_csg_assign_image.toggled.connect(_update_create_textured_csg_validation)
+	options_content.add_child(_create_textured_csg_assign_image)
+
+	_create_textured_csg_select_node = CheckBox.new()
+	_create_textured_csg_select_node.text = "Select Created Node"
+	_create_textured_csg_select_node.button_pressed = true
+	_create_textured_csg_select_node.tooltip_text = "Select the new node in the editor Scene tree."
+	options_content.add_child(_create_textured_csg_select_node)
+
+	_create_textured_csg_enable_collision = CheckBox.new()
+	_create_textured_csg_enable_collision.text = "Enable Collision"
+	_create_textured_csg_enable_collision.button_pressed = false
+	_create_textured_csg_enable_collision.tooltip_text = "Use the CSG node's native static collision support."
+	options_content.add_child(_create_textured_csg_enable_collision)
+
+	_create_textured_csg_validation = Label.new()
+	_create_textured_csg_validation.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_create_textured_csg_validation.custom_minimum_size.y = 42.0
+	options_content.add_child(_create_textured_csg_validation)
+
+	var vertical_spacer := Control.new()
+	vertical_spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	content.add_child(vertical_spacer)
+	var button_row := HBoxContainer.new()
+	button_row.alignment = BoxContainer.ALIGNMENT_END
+	button_row.add_theme_constant_override("separation", 8)
+	content.add_child(button_row)
+	_create_textured_csg_create_button = Button.new()
+	_create_textured_csg_create_button.name = "Create Textured CSG3D"
+	_create_textured_csg_create_button.text = "Create"
+	_create_textured_csg_create_button.tooltip_text = "Create the configured CSG3D node"
+	_apply_light_dialog_button_style(_create_textured_csg_create_button)
+	_create_textured_csg_create_button.pressed.connect(_confirm_create_textured_csg)
+	button_row.add_child(_create_textured_csg_create_button)
+	_create_textured_csg_cancel_button = Button.new()
+	_create_textured_csg_cancel_button.name = "Cancel Textured CSG3D"
+	_create_textured_csg_cancel_button.text = "Cancel"
+	_create_textured_csg_cancel_button.tooltip_text = "Close without creating a CSG3D node"
+	_apply_preferences_small_button_style(_create_textured_csg_cancel_button)
+	_create_textured_csg_cancel_button.pressed.connect(_close_create_textured_csg_overlay)
+	button_row.add_child(_create_textured_csg_cancel_button)
 
 
 func _build_3d_session_picker() -> void:
@@ -2795,6 +4099,508 @@ func _add_scale_dimension_field(parent: GridContainer, label_text: String) -> Sp
 	return field
 
 
+func _build_update_available_overlay() -> void:
+	_update_available_overlay = PanelContainer.new()
+	_update_available_overlay.name = "Update Available Overlay"
+	_update_available_overlay.visible = false
+	_update_available_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_update_available_overlay.clip_contents = true
+	_update_available_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var overlay_background := StyleBoxFlat.new()
+	overlay_background.bg_color = Color(0.035, 0.035, 0.035, 0.96)
+	_update_available_overlay.add_theme_stylebox_override("panel", overlay_background)
+	var overlay_host: Control = _workspace_region if _workspace_region else self
+	overlay_host.add_child(_update_available_overlay)
+
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_update_available_overlay.add_child(center)
+	var card := PanelContainer.new()
+	card.name = "Update Details Card"
+	card.custom_minimum_size = Vector2(440.0, 230.0)
+	card.add_theme_stylebox_override("panel", _make_help_description_style())
+	center.add_child(card)
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 20)
+	margin.add_theme_constant_override("margin_top", 18)
+	margin.add_theme_constant_override("margin_right", 20)
+	margin.add_theme_constant_override("margin_bottom", 18)
+	card.add_child(margin)
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 12)
+	margin.add_child(content)
+
+	_update_overlay_title = Label.new()
+	_update_overlay_title.name = "Update Status Title"
+	_update_overlay_title.add_theme_font_size_override("font_size", 18)
+	content.add_child(_update_overlay_title)
+	_update_installed_version_label = Label.new()
+	_update_installed_version_label.name = "Installed Version"
+	content.add_child(_update_installed_version_label)
+	_update_latest_version_label = Label.new()
+	_update_latest_version_label.name = "Latest Version"
+	_update_latest_version_label.add_theme_color_override("font_color", Color("#FF9AA2"))
+	content.add_child(_update_latest_version_label)
+	_update_overlay_message = Label.new()
+	_update_overlay_message.name = "Update Status Message"
+	_update_overlay_message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_update_overlay_message.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content.add_child(_update_overlay_message)
+	_update_progress_label = Label.new()
+	_update_progress_label.name = "Update Progress Label"
+	_update_progress_label.visible = false
+	content.add_child(_update_progress_label)
+	_update_progress = ProgressBar.new()
+	_update_progress.name = "Update Progress"
+	_update_progress.visible = false
+	_update_progress.min_value = 0.0
+	_update_progress.max_value = 100.0
+	_update_progress.show_percentage = true
+	content.add_child(_update_progress)
+
+	var actions := HBoxContainer.new()
+	actions.alignment = BoxContainer.ALIGNMENT_END
+	actions.add_theme_constant_override("separation", 8)
+	content.add_child(actions)
+	_update_retry_button = Button.new()
+	_update_retry_button.name = "Try Again"
+	_update_retry_button.text = "Try Again"
+	_update_retry_button.visible = false
+	_update_retry_button.pressed.connect(_retry_update_check)
+	actions.add_child(_update_retry_button)
+	_update_cancel_button = Button.new()
+	_update_cancel_button.name = "Cancel Download"
+	_update_cancel_button.text = "Cancel"
+	_update_cancel_button.visible = false
+	_update_cancel_button.pressed.connect(_cancel_update_download)
+	actions.add_child(_update_cancel_button)
+	_update_later_button = Button.new()
+	_update_later_button.name = "Later"
+	_update_later_button.text = "Later"
+	_update_later_button.pressed.connect(_close_update_available_overlay)
+	actions.add_child(_update_later_button)
+	_update_download_button = Button.new()
+	_update_download_button.name = "Download Update"
+	_update_download_button.text = "Download Update"
+	_update_download_button.visible = false
+	_update_download_button.pressed.connect(_download_update)
+	actions.add_child(_update_download_button)
+	_update_install_button = Button.new()
+	_update_install_button.name = "Install and Restart"
+	_update_install_button.text = "Install and Restart"
+	_update_install_button.visible = false
+	_update_install_button.pressed.connect(_install_update_and_restart)
+	actions.add_child(_update_install_button)
+	_update_open_release_button = Button.new()
+	_update_open_release_button.name = "Open Release Page"
+	_update_open_release_button.text = "Open Release Page"
+	_update_open_release_button.pressed.connect(_open_latest_release_page)
+	actions.add_child(_update_open_release_button)
+
+
+func _check_for_updates(automatic := false) -> bool:
+	_ensure_helpers()
+	if not _update_checker or _update_checker.is_request_active() or (_updater and _updater.is_busy()):
+		return false
+	var installed_version := _get_installed_plugin_version()
+	if installed_version.is_empty():
+		if not automatic:
+			_show_update_error_overlay("Could not determine the installed GDDraw version.")
+		return false
+	if not automatic:
+		_show_update_checking_overlay()
+	if _updater:
+		_updater.mark_checking(automatic)
+	_set_update_checking_state(true)
+	var started: bool = _update_checker.check_for_updates(installed_version, automatic)
+	if not started:
+		_set_update_checking_state(false)
+	return started
+
+
+func _on_update_check_completed(result: Dictionary) -> void:
+	if not is_inside_tree():
+		return
+	_set_update_checking_state(false)
+	var automatic := bool(result.get("automatic", false))
+	var status := str(result.get("status", "error"))
+	if status == "update_available":
+		var latest_version := str(result.get("latest_version", ""))
+		var release_url := str(result.get("release_url", ""))
+		if latest_version.is_empty() or not _update_checker.is_valid_release_url(release_url):
+			if not automatic:
+				_show_update_error_overlay("The update response did not contain a safe release link.")
+			return
+		if not _updater or not _updater.prepare_release(result, _get_installed_plugin_version()):
+			if not automatic:
+				_show_update_error_overlay("The stable release does not contain one unambiguous, digest-protected GDDraw update asset.")
+			return
+		_latest_release_descriptor = result.duplicate(true)
+		_latest_available_version = latest_version
+		_latest_release_url = release_url
+		_show_update_available_indicator()
+		if not automatic:
+			_show_update_available_overlay()
+	elif status == "up_to_date":
+		if _updater:
+			_updater.mark_current(str(result.get("latest_version", "")), automatic)
+		if not automatic:
+			_show_update_current_overlay(str(result.get("latest_version", "")))
+	elif status == "installed_ahead_of_release":
+		if _updater:
+			_updater.mark_installed_ahead(str(result.get("latest_version", "")), automatic)
+		if not automatic:
+			_show_update_ahead_overlay(str(result.get("latest_version", "")))
+	elif not automatic:
+		var error_kind := str(result.get("error_kind", ""))
+		if error_kind.begins_with("release_asset"):
+			_latest_release_url = str(result.get("release_url", ""))
+			_show_update_error_overlay("The release is newer, but its required GDDraw ZIP or SHA-256 metadata is missing or ambiguous.")
+		else:
+			_show_update_error_overlay("Could not check for GDDraw updates. Try again when online.")
+
+
+func _set_update_checking_state(checking: bool) -> void:
+	if not _help_menu:
+		return
+	var index := _help_menu.get_item_index(MenuCommand.HELP_CHECK_UPDATES)
+	if index < 0:
+		return
+	_help_menu.set_item_text(index, "Checking for Updates..." if checking else "Check for Updates...")
+	_help_menu.set_item_disabled(index, checking)
+
+
+func _show_update_available_indicator() -> void:
+	if _latest_available_version.is_empty() or not _help_menu:
+		return
+	_populate_help_menu(true)
+	if _help_update_badge:
+		_help_update_badge.tooltip_text = "GDDraw v%s is available" % _latest_available_version
+		_help_update_badge.visible = true
+		for menu_index in range(_menu_bar.get_menu_count()):
+			if _menu_bar.get_menu_popup(menu_index) == _help_menu:
+				_menu_bar.set_menu_tooltip(menu_index, _help_update_badge.tooltip_text)
+				break
+		call_deferred("_reposition_help_update_badge")
+
+
+func _make_update_warning_icon() -> ImageTexture:
+	var image := Image.create_empty(16, 16, false, Image.FORMAT_RGBA8)
+	image.fill(Color.TRANSPARENT)
+	for y in range(16):
+		for x in range(16):
+			var offset := Vector2(float(x) - 7.5, float(y) - 7.5)
+			if offset.length_squared() <= 49.0:
+				image.set_pixel(x, y, Color("#D93643"))
+	for y in range(3, 10):
+		image.set_pixel(7, y, Color.WHITE)
+		image.set_pixel(8, y, Color.WHITE)
+	for y in range(12, 14):
+		image.set_pixel(7, y, Color.WHITE)
+		image.set_pixel(8, y, Color.WHITE)
+	return ImageTexture.create_from_image(image)
+
+
+func _show_update_available_overlay() -> void:
+	if _updater and _updater.state in [
+		GDDrawUpdater.State.DOWNLOADING,
+		GDDrawUpdater.State.VERIFYING,
+		GDDrawUpdater.State.READY_TO_INSTALL,
+		GDDrawUpdater.State.INSTALLING,
+		GDDrawUpdater.State.RESTART_REQUIRED,
+		GDDrawUpdater.State.FAILED,
+	]:
+		_on_updater_state_changed(_updater.state, _updater.details)
+		return
+	if (
+		not _update_available_overlay
+		or _latest_available_version.is_empty()
+		or not _update_checker
+		or not _update_checker.is_valid_release_url(_latest_release_url)
+	):
+		return
+	_present_update_overlay(
+		"GDDraw Update Available",
+		"Download the digest-protected stable release to user data. Nothing is downloaded or installed until you choose it.",
+		_latest_available_version,
+		Color("#FF7A85"),
+		true,
+		false,
+		"Later"
+	)
+	_update_download_button.visible = true
+	_update_download_button.disabled = false
+
+
+func _show_update_checking_overlay() -> void:
+	_present_update_overlay(
+		"Checking for Updates...",
+		"GDDraw is checking the latest stable GitHub release.",
+		"",
+		Color("#D8E8FF"),
+		false,
+		false,
+		"Close"
+	)
+
+
+func _show_update_current_overlay(latest_version: String) -> void:
+	_present_update_overlay(
+		"GDDraw Is Up to Date!",
+		"You have the latest stable version of GDDraw.",
+		latest_version,
+		Color("#7ED99A"),
+		false,
+		false,
+		"Close"
+	)
+
+
+func _show_update_ahead_overlay(latest_version: String) -> void:
+	_present_update_overlay(
+		"GDDraw Build Ahead of Release",
+		"This GDDraw build is newer than the latest published release.",
+		latest_version,
+		Color("#8FCBFF"),
+		false,
+		false,
+		"Close"
+	)
+
+
+func _show_update_error_overlay(message: String) -> void:
+	_update_retry_mode = "check"
+	_present_update_overlay(
+		"Update Check Unavailable",
+		message,
+		"",
+		Color("#FFB36B"),
+		false,
+		true,
+		"Close"
+	)
+
+
+func _present_update_overlay(
+	title: String,
+	message: String,
+	latest_version: String,
+	title_color: Color,
+	show_open_release: bool,
+	show_retry: bool,
+	close_text: String
+) -> void:
+	if not _update_available_overlay:
+		return
+	if _settings_overlay:
+		_settings_overlay.visible = false
+	if _fill_settings_overlay:
+		_fill_settings_overlay.visible = false
+	if _create_textured_csg_overlay:
+		_create_textured_csg_overlay.visible = false
+	_update_overlay_title.text = title
+	_update_overlay_title.add_theme_color_override("font_color", title_color)
+	_update_overlay_message.text = message
+	_update_installed_version_label.text = "Installed version: v%s" % _get_installed_plugin_version()
+	_update_latest_version_label.visible = not latest_version.is_empty()
+	_update_latest_version_label.text = "Latest version: v%s" % latest_version
+	_update_open_release_button.visible = show_open_release
+	_update_retry_button.visible = show_retry
+	_update_later_button.text = close_text
+	_update_later_button.visible = true
+	_update_later_button.disabled = false
+	_update_download_button.visible = false
+	_update_download_button.disabled = false
+	_update_install_button.visible = false
+	_update_install_button.disabled = false
+	_update_cancel_button.visible = false
+	_update_cancel_button.disabled = false
+	_update_progress.visible = false
+	_update_progress_label.visible = false
+	var overlay_parent := _update_available_overlay.get_parent()
+	if overlay_parent:
+		overlay_parent.move_child(_update_available_overlay, overlay_parent.get_child_count() - 1)
+	_update_available_overlay.visible = true
+
+
+func _close_update_available_overlay() -> void:
+	if _updater and _updater.state == GDDrawUpdater.State.INSTALLING:
+		return
+	if _update_available_overlay:
+		_update_available_overlay.visible = false
+
+
+func _retry_update_check() -> void:
+	if _update_retry_mode == "download" and _updater and not _latest_release_descriptor.is_empty():
+		if _updater.prepare_release(_latest_release_descriptor, _get_installed_plugin_version()):
+			_updater.download_update()
+		return
+	_check_for_updates(false)
+
+
+func _download_update() -> void:
+	if not _updater or _latest_release_descriptor.is_empty():
+		_show_update_error_overlay("The validated release metadata is no longer available.")
+		return
+	_updater.download_update()
+
+
+func _cancel_update_download() -> void:
+	if _updater:
+		_updater.cancel_download()
+
+
+func _install_update_and_restart() -> void:
+	if not _updater:
+		return
+	_update_install_button.disabled = true
+	_update_later_button.disabled = true
+	_updater.install_and_restart()
+
+
+func _on_updater_progress_changed(downloaded_bytes: int, total_bytes: int) -> void:
+	if not _update_progress or not _update_progress_label:
+		return
+	_update_progress_label.visible = true
+	_update_progress_label.text = "%s downloaded%s" % [
+		_format_update_bytes(downloaded_bytes),
+		" of %s" % _format_update_bytes(total_bytes) if total_bytes > 0 else "",
+	]
+	if total_bytes > 0:
+		_update_progress.indeterminate = false
+		_update_progress.value = clampf(float(downloaded_bytes) / float(total_bytes) * 100.0, 0.0, 100.0)
+	else:
+		_update_progress.indeterminate = true
+
+
+func _on_updater_state_changed(updater_state: int, updater_details: Dictionary) -> void:
+	if not _update_available_overlay:
+		return
+	_set_update_operation_busy(updater_state in [
+		GDDrawUpdater.State.DOWNLOADING,
+		GDDrawUpdater.State.VERIFYING,
+		GDDrawUpdater.State.INSTALLING,
+		GDDrawUpdater.State.RECOVERING,
+	])
+	var target_version := str(updater_details.get("target_version", _latest_available_version))
+	match updater_state:
+		GDDrawUpdater.State.DOWNLOADING:
+			_present_update_overlay(
+				"Downloading GDDraw v%s" % target_version,
+				"The stable release archive is downloading to user://gddraw/updates/downloads/.",
+				target_version, Color("#D8E8FF"), false, false, "Later"
+			)
+			_update_later_button.visible = false
+			_update_cancel_button.visible = true
+			_update_progress.visible = true
+			_update_progress.indeterminate = int(updater_details.get("total_bytes", -1)) <= 0
+			_on_updater_progress_changed(int(updater_details.get("downloaded_bytes", 0)), int(updater_details.get("total_bytes", -1)))
+		GDDrawUpdater.State.VERIFYING:
+			_present_update_overlay(
+				"Validating GDDraw v%s" % target_version,
+				"GDDraw is checking the external SHA-256 digest, every archive path, package layout, and internal versions.",
+				target_version, Color("#D8E8FF"), false, false, "Later"
+			)
+			_update_later_button.visible = false
+		GDDrawUpdater.State.READY_TO_INSTALL:
+			_present_update_overlay(
+				"GDDraw v%s Is Ready" % target_version,
+				"Install and Restart backs up the complete current plugin, transactionally replaces it, verifies every file, and asks Godot to restart. The update is not installed yet.",
+				target_version, Color("#7ED99A"), true, false, "Later"
+			)
+			_update_install_button.visible = true
+		GDDrawUpdater.State.INSTALLING:
+			_present_update_overlay(
+				"Installing GDDraw v%s" % target_version,
+				"GDDraw is backing up and replacing the plugin package. Do not interact with the dock.",
+				target_version, Color("#FFB36B"), false, false, "Later"
+			)
+			_update_later_button.visible = false
+		GDDrawUpdater.State.RESTART_REQUIRED:
+			_present_update_overlay(
+				"Restart Requested",
+				str(updater_details.get("message", "Restart Godot manually. The update becomes active only after the restarted editor validates it.")),
+				target_version, Color("#7ED99A"), false, false, "Close"
+			)
+		GDDrawUpdater.State.FAILED:
+			_update_retry_mode = "download" if bool(updater_details.get("retry_safe", false)) and not _latest_release_descriptor.is_empty() else "check"
+			var release_url := str(updater_details.get("release_url", ""))
+			if not release_url.is_empty():
+				_latest_release_url = release_url
+			_present_update_overlay(
+				"GDDraw Update Failed",
+				str(updater_details.get("message", "The update could not be completed.")),
+				target_version, Color("#FF7A85"), not _latest_release_url.is_empty(), bool(updater_details.get("retry_safe", false)), "Close"
+			)
+
+
+func _set_update_operation_busy(busy: bool) -> void:
+	if not _help_menu:
+		return
+	var check_index := _help_menu.get_item_index(MenuCommand.HELP_CHECK_UPDATES)
+	if check_index >= 0:
+		_help_menu.set_item_disabled(check_index, busy)
+	var available_index := _help_menu.get_item_index(MenuCommand.HELP_UPDATE_AVAILABLE)
+	if available_index >= 0:
+		_help_menu.set_item_disabled(available_index, busy)
+
+
+func _recover_update_transaction() -> void:
+	if not _updater:
+		return
+	var recovery: Dictionary = _updater.recover_incomplete_transaction()
+	var recovery_status := str(recovery.get("status", "none"))
+	if recovery_status == "rolled_back":
+		_present_update_overlay(
+			"GDDraw Update Rolled Back",
+			str(recovery.get("message", "The previous verified package was restored.")),
+			"", Color("#FFB36B"), false, false, "Close"
+		)
+	elif recovery_status == "manual_recovery":
+		_present_update_overlay(
+			"Manual Update Recovery Required",
+			str(recovery.get("message", "Update recovery data was preserved under user://gddraw/updates/.")),
+			"", Color("#FF7A85"), false, false, "Close"
+		)
+
+
+func _format_update_bytes(byte_count: int) -> String:
+	if byte_count < 1024:
+		return "%d B" % byte_count
+	if byte_count < 1024 * 1024:
+		return "%.1f KiB" % (float(byte_count) / 1024.0)
+	return "%.1f MiB" % (float(byte_count) / (1024.0 * 1024.0))
+
+
+func _open_latest_release_page() -> void:
+	if not _update_checker or not _update_checker.is_valid_release_url(_latest_release_url):
+		_show_update_error_overlay("The configured GDDraw release page is not valid.")
+		return
+	var error := OK
+	if _release_url_opener.is_valid():
+		var opener_result = _release_url_opener.call(_latest_release_url)
+		if opener_result is int:
+			error = opener_result
+	else:
+		error = OS.shell_open(_latest_release_url)
+	if error == OK:
+		_close_update_available_overlay()
+	else:
+		_show_update_error_overlay("Could not open the GDDraw release page.")
+
+
+func set_release_url_opener_for_tests(opener: Callable) -> void:
+	_release_url_opener = opener
+
+
+func _get_installed_plugin_version() -> String:
+	var plugin_script = load(PLUGIN_SCRIPT_PATH)
+	if not plugin_script or not plugin_script.has_method("get_script_constant_map"):
+		return ""
+	var constants: Dictionary = plugin_script.call("get_script_constant_map")
+	return str(constants.get("PLUGIN_VERSION", ""))
+
+
 func _build_help_dialog() -> void:
 	_help_dialog = AcceptDialog.new()
 	_help_dialog.min_size = Vector2i(560, 320)
@@ -2911,7 +4717,16 @@ func _on_brush_toggled(enabled: bool) -> void:
 
 
 func _open_preferences() -> void:
+	if _fill_settings_overlay:
+		_fill_settings_overlay.visible = false
+	if _create_textured_csg_overlay:
+		_create_textured_csg_overlay.visible = false
+	if _update_available_overlay:
+		_update_available_overlay.visible = false
 	if _settings_overlay:
+		var overlay_parent := _settings_overlay.get_parent()
+		if overlay_parent:
+			overlay_parent.move_child(_settings_overlay, overlay_parent.get_child_count() - 1)
 		_settings_overlay.visible = true
 
 
@@ -2923,6 +4738,8 @@ func _close_preferences() -> void:
 func _select_canvas_mode(mode_id: int) -> void:
 	if mode_id < CANVAS_MODE_2D or mode_id > CANVAS_MODE_SPLIT:
 		return
+	if mode_id != _canvas_mode:
+		_cancel_3d_surface_shape("Canceled 3D shape preview because the view changed.", true)
 	if _canvas_mode == CANVAS_MODE_SPLIT and mode_id != CANVAS_MODE_SPLIT:
 		_capture_split_ratio()
 	if mode_id != CANVAS_MODE_SPLIT:
@@ -3080,50 +4897,241 @@ func _update_3d_context_control_visibility() -> void:
 		_uv_overlay_toggle.visible = _canvas_mode_3d and has_uv_data
 	if _preview_orientation_button:
 		_preview_orientation_button.visible = _canvas_mode_3d and has_active_session
-		if not _preview_orientation_button.visible and _preview_orientation_menu:
-			_preview_orientation_menu.hide()
+	if _preview_orientation_controls:
+		_preview_orientation_controls.visible = _canvas_mode_3d and has_active_session
+	if _preview_scene_orientation_button:
+		var linked: bool = (
+			has_active_session
+			and _texture_3d_session.has_method("is_scene_transform_linked")
+			and _texture_3d_session.is_scene_transform_linked()
+		)
+		_apply_scene_transform_link_control_state(linked)
+	_update_3d_rotation_gizmo_visibility()
 	if _empty_3d_state:
 		_empty_3d_state.visible = _canvas_mode_3d and not has_active_session
 	_sync_menu_state()
 
 
-func _on_preview_orientation_selected(command_id: int) -> void:
+func _on_preview_light_toggled(enabled: bool) -> void:
+	_set_preview_light_enabled(enabled, true)
+
+
+func _on_preview_light_intensity_changed(value: float) -> void:
+	_set_preview_light_intensity(value, true)
+
+
+func _on_preview_light_camera_link_toggled(linked: bool) -> void:
+	_set_preview_light_camera_linked(linked, true)
+
+
+func _set_preview_light_enabled(enabled: bool, save_preference := false) -> void:
+	_preview_light_enabled = enabled
+	_apply_preview_lighting_state()
+	if save_preference:
+		_save_preview_light_preferences()
+
+
+func _set_preview_light_intensity(value: float, save_preference := false) -> void:
+	_preview_light_intensity_value = _clamp_preview_light_intensity(value)
+	if _paint_3d_preview_light:
+		_paint_3d_preview_light.light_energy = _preview_light_intensity_value
+	if _preview_light_intensity:
+		_preview_light_intensity.set_value_no_signal(_preview_light_intensity_value)
+	if save_preference:
+		_save_preview_light_preferences()
+
+
+func _clamp_preview_light_intensity(value: float) -> float:
+	return clampf(value, PAINT_3D_PREVIEW_LIGHT_MIN, PAINT_3D_PREVIEW_LIGHT_MAX)
+
+
+func _set_preview_light_camera_linked(linked: bool, save_preference := false) -> void:
+	_preview_light_camera_linked = linked
+	_update_preview_light_transform()
+	_apply_preview_light_control_state()
+	if save_preference:
+		_save_preview_light_preferences()
+
+
+func _reset_preview_light_orientation() -> void:
+	_preview_light_camera_linked = false
+	if _paint_3d_preview_light:
+		_paint_3d_preview_light.rotation_degrees = PAINT_3D_PREVIEW_LIGHT_DEFAULT_ROTATION
+	_apply_preview_light_control_state()
+	_save_preview_light_preferences()
+
+
+func _update_preview_light_transform() -> void:
+	if not _preview_light_camera_linked or not _paint_3d_preview_light or not _paint_3d_camera:
+		return
+	# The camera and light are siblings in the private preview root, so copying
+	# the camera basis creates a neutral headlight without touching scene nodes.
+	var light_transform := _paint_3d_preview_light.transform
+	light_transform.basis = _paint_3d_camera.transform.basis
+	_paint_3d_preview_light.transform = light_transform
+
+
+func _apply_preview_lighting_state() -> void:
+	if _paint_3d_preview_light:
+		_paint_3d_preview_light.visible = _preview_light_enabled
+		_paint_3d_preview_light.light_energy = _clamp_preview_light_intensity(_preview_light_intensity_value)
+	if _paint_3d_material:
+		_paint_3d_material.shading_mode = (
+			BaseMaterial3D.SHADING_MODE_PER_PIXEL
+			if _preview_light_enabled
+			else BaseMaterial3D.SHADING_MODE_UNSHADED
+		)
+	if _preview_light_toggle:
+		_preview_light_toggle.set_pressed_no_signal(_preview_light_enabled)
+		_update_toggle_button_icon(_preview_light_toggle)
+		_preview_light_toggle.tooltip_text = (
+			"Neutral lighting is enabled. Disable it for a color-accurate unshaded preview."
+			if _preview_light_enabled
+			else "Neutral lighting is disabled for a color-accurate unshaded preview."
+		)
+	if _preview_light_intensity:
+		_preview_light_intensity.editable = _preview_light_enabled
+		_preview_light_intensity.tooltip_text = (
+			"Adjust the neutral light intensity in the 3D preview."
+			if _preview_light_enabled
+			else "Enable neutral lighting to adjust its intensity."
+		)
+	_update_preview_light_transform()
+	_apply_preview_light_control_state()
+
+
+func _apply_preview_light_control_state() -> void:
+	if _preview_light_link_toggle:
+		_preview_light_link_toggle.disabled = not _preview_light_enabled
+		_preview_light_link_toggle.set_pressed_no_signal(_preview_light_camera_linked)
+		_update_toggle_button_icon(_preview_light_link_toggle)
+		_preview_light_link_toggle.tooltip_text = (
+			"The neutral light follows the 3D preview camera. Disable linking to hold its direction."
+			if _preview_light_camera_linked
+			else "Link the neutral light direction to the 3D preview camera."
+		)
+	if _preview_light_reset_button:
+		_preview_light_reset_button.disabled = not _preview_light_enabled
+		_preview_light_reset_button.tooltip_text = "Unlink and reset the neutral light direction."
+
+
+func _on_preview_rotation_gizmo_toggled(enabled: bool) -> void:
+	if _paint_3d_gizmo_dragging:
+		_cancel_3d_rotation_gizmo_drag(true)
+	_paint_3d_gizmo_visible = enabled
+	_update_3d_rotation_gizmo_visibility()
+	if _preview_orientation_button:
+		_preview_orientation_button.set_pressed_no_signal(enabled)
+		_update_toggle_button_icon(_preview_orientation_button)
+	_save_preview_transform_gizmo_preference()
+
+
+func _on_reset_preview_orientation_pressed() -> void:
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		return
-	var label := ""
-	match command_id:
-		PreviewOrientationCommand.X_POSITIVE_90:
-			_texture_3d_session.rotate_preview_orientation(Vector3.RIGHT, PI * 0.5)
-			label = "X +90°"
-		PreviewOrientationCommand.X_NEGATIVE_90:
-			_texture_3d_session.rotate_preview_orientation(Vector3.RIGHT, -PI * 0.5)
-			label = "X −90°"
-		PreviewOrientationCommand.Y_POSITIVE_90:
-			_texture_3d_session.rotate_preview_orientation(Vector3.UP, PI * 0.5)
-			label = "Y +90°"
-		PreviewOrientationCommand.Y_NEGATIVE_90:
-			_texture_3d_session.rotate_preview_orientation(Vector3.UP, -PI * 0.5)
-			label = "Y −90°"
-		PreviewOrientationCommand.Z_POSITIVE_90:
-			_texture_3d_session.rotate_preview_orientation(Vector3.BACK, PI * 0.5)
-			label = "Z +90°"
-		PreviewOrientationCommand.Z_NEGATIVE_90:
-			_texture_3d_session.rotate_preview_orientation(Vector3.BACK, -PI * 0.5)
-			label = "Z −90°"
-		PreviewOrientationCommand.RESET:
-			_texture_3d_session.reset_preview_orientation()
-			label = "Reset"
-		PreviewOrientationCommand.USE_SCENE_ORIENTATION:
-			if not _texture_3d_session.use_scene_orientation():
-				_clear_3d_paint_mesh()
-				_update_3d_context_control_visibility()
-				_set_status("The source 3D node is no longer available.")
-				return
-			label = "Scene orientation"
-		_:
-			return
-	_apply_3d_preview_transform(true)
-	_set_status("%s applied only to GDDraw's 3D preview." % label)
+	_cancel_3d_rotation_gizmo_drag(false)
+	_texture_3d_session.reset_preview_transform()
+	_apply_scene_transform_link_control_state(false)
+	_apply_3d_preview_transform(false)
+	_set_status("Restored GDDraw's isolated preview to its session-start transform; the source scene is unchanged.")
+
+
+func _on_scene_transform_link_toggled(linked: bool) -> void:
+	if not _texture_3d_session or not _texture_3d_session.has_active_session():
+		_apply_scene_transform_link_control_state(false)
+		return
+	_cancel_3d_rotation_gizmo_drag(false)
+	var source := _get_active_3d_source_node()
+	if linked and (not is_instance_valid(source) or not source.is_inside_tree()):
+		_texture_3d_session.set_scene_transform_linked(false)
+		_apply_scene_transform_link_control_state(false)
+		_update_3d_context_control_visibility()
+		_set_status("Scene Transform Link is unavailable while the source scene is inactive; the private 3D preview remains editable.")
+		return
+	var preview_changed: bool = _texture_3d_session.set_scene_transform_linked(
+		linked,
+		source.global_transform if linked else Transform3D.IDENTITY
+	)
+	if preview_changed:
+		_apply_3d_preview_transform(false)
+	_apply_scene_transform_link_control_state(linked)
+	_set_status(
+		"Source transforms now update GDDraw's isolated preview one-way."
+		if linked
+		else "Scene transform linking disabled; GDDraw's isolated preview transform is retained."
+	)
+
+
+func _apply_scene_transform_link_control_state(linked: bool) -> void:
+	if not _preview_scene_orientation_button:
+		return
+	var source_available := _is_active_3d_source_available()
+	_preview_scene_orientation_button.disabled = not source_available
+	_preview_scene_orientation_button.set_pressed_no_signal(linked)
+	_update_toggle_button_icon(_preview_scene_orientation_button)
+	_preview_scene_orientation_button.tooltip_text = (
+		"Scene transform linking is unavailable while the source scene is inactive or closed. The 3D preview remains editable."
+		if not source_available
+		else
+		"The source scene transform is linked to the 3D preview."
+		if linked
+		else "Link the source scene transform to the 3D preview."
+	)
+
+
+func _is_active_3d_source_available() -> bool:
+	if not _texture_3d_session or not _texture_3d_session.has_active_session():
+		return false
+	var source := _get_active_3d_source_node()
+	return is_instance_valid(source) and source.is_inside_tree()
+
+
+func _get_active_3d_source_node() -> Node3D:
+	if not _texture_3d_session:
+		return null
+	var has_source_property := false
+	for property in _texture_3d_session.get_property_list():
+		if str(property.get("name", "")) == "source_node":
+			has_source_property = true
+			break
+	if not has_source_property:
+		return null
+	var candidate = _texture_3d_session.get("source_node")
+	return candidate as Node3D if is_instance_valid(candidate) and candidate is Node3D else null
+
+
+func _on_preview_3d_grid_toggled(enabled: bool) -> void:
+	_set_3d_preview_grid_visible(enabled, true)
+
+
+func _set_3d_preview_grid_visible(enabled: bool, save_preference := false) -> void:
+	_preview_3d_grid_visible = enabled
+	_apply_3d_preview_grid_state()
+	if save_preference:
+		_save_preview_3d_grid_preference()
+
+
+func _apply_3d_preview_grid_state() -> void:
+	if _paint_3d_stage_floor:
+		# Retain the compatibility node, but do not render an opaque floor behind
+		# the perspective grid. Godot's editor grid is lines over the environment.
+		_paint_3d_stage_floor.visible = false
+	if _paint_3d_stage_grid:
+		_paint_3d_stage_grid.visible = _preview_3d_grid_visible
+	if _preview_3d_grid_button:
+		_preview_3d_grid_button.set_pressed_no_signal(_preview_3d_grid_visible)
+		_update_toggle_button_icon(_preview_3d_grid_button)
+		_preview_3d_grid_button.tooltip_text = (
+			"Hide the perspective grid in the 3D preview."
+			if _preview_3d_grid_visible
+			else "Show the perspective grid in the 3D preview."
+		)
+
+
+func _on_use_scene_orientation_pressed() -> void:
+	# Compatibility entry point for older integrations; the action is now an
+	# explicit one-way toggle instead of a destructive one-shot import.
+	_on_scene_transform_link_toggled(true)
 
 
 func _set_canvas_mode_3d(enabled: bool) -> void:
@@ -3203,6 +5211,288 @@ func _on_shape_toggled(enabled: bool) -> void:
 		_select_tool(GDDrawCanvasControl.ToolMode.BRUSH)
 
 
+func _on_text_toggled(enabled: bool) -> void:
+	if not _canvas:
+		return
+	if enabled:
+		_select_tool(GDDrawCanvasControl.ToolMode.TEXT)
+		_set_status("Drag to create a text box, then type. Ctrl+Enter commits; Escape cancels.")
+	elif not _has_selected_tool():
+		_select_tool(GDDrawCanvasControl.ToolMode.BRUSH)
+
+
+func _on_text_font_selected(index: int) -> void:
+	if not _canvas or not _text_font_selector:
+		return
+	var font_id := _text_font_selector.get_item_id(index)
+	if font_id == TEXT_FONT_LOAD_ID:
+		var previous_index := _text_font_selector.get_item_index(_text_font_selected_id)
+		if previous_index >= 0:
+			_text_font_selector.select(previous_index)
+		if _text_font_dialog:
+			var font_dir := _get_default_font_dir()
+			if _font_directory_exists(font_dir):
+				_text_font_dialog.current_dir = _font_directory_dialog_path(font_dir)
+			_text_font_dialog.popup_centered_ratio(0.7)
+		return
+	var selected_font: Font
+	if font_id == TEXT_FONT_DEFAULT_ID:
+		selected_font = ThemeDB.fallback_font
+	elif _text_font_sources.has(font_id):
+		var font_source: Variant = _text_font_sources[font_id]
+		if font_source is Font:
+			selected_font = font_source
+		elif font_source is Dictionary:
+			selected_font = _load_text_font(str(font_source.get("path", "")))
+	else:
+		selected_font = ThemeDB.fallback_font
+		font_id = TEXT_FONT_DEFAULT_ID
+	if not selected_font:
+		selected_font = ThemeDB.fallback_font
+		font_id = TEXT_FONT_DEFAULT_ID
+	_text_font_selected_id = font_id
+	_canvas.text_font = selected_font
+	call_deferred("_refocus_text_editor")
+
+
+func _refresh_text_font_selector() -> void:
+	if not _text_font_selector:
+		return
+	var previous_id := _text_font_selected_id
+	_text_font_selector.clear()
+	_text_font_sources.clear()
+	_text_font_selector.add_item("Theme Default", TEXT_FONT_DEFAULT_ID)
+
+	var custom_paths := _get_custom_font_paths(_get_default_font_dir())
+	if not _text_custom_font_path.is_empty() and not custom_paths.has(_text_custom_font_path):
+		custom_paths.push_back(_text_custom_font_path)
+	custom_paths.sort_custom(func(left: String, right: String) -> bool: return left.naturalnocasecmp_to(right) < 0)
+	var custom_id := TEXT_FONT_CUSTOM_ID_BASE
+	for path in custom_paths:
+		var font := _load_text_font(path)
+		if not font:
+			continue
+		var item_id := TEXT_FONT_CUSTOM_ID if path == _text_custom_font_path else custom_id
+		if item_id != TEXT_FONT_CUSTOM_ID:
+			custom_id += 1
+		_text_font_sources[item_id] = font
+		_text_font_selector.add_item(path.get_file().get_basename(), item_id)
+
+	_text_font_selector.add_item("Load Font…", TEXT_FONT_LOAD_ID)
+	_text_font_selector.add_separator()
+	var system_paths := _get_system_font_paths()
+	for custom_path in custom_paths:
+		system_paths.erase(custom_path)
+	system_paths.sort_custom(func(left: String, right: String) -> bool: return left.get_file().naturalnocasecmp_to(right.get_file()) < 0)
+	var system_id := TEXT_FONT_SYSTEM_ID_BASE
+	for path in system_paths:
+		# Load the exact system font file only when selected; eagerly parsing every
+		# installed face can stall machines with large font collections.
+		_text_font_sources[system_id] = {"path": path}
+		_text_font_selector.add_item(path.get_file().get_basename(), system_id)
+		_text_font_selector.set_item_tooltip(_text_font_selector.item_count - 1, path)
+		system_id += 1
+
+	var selected_index := _text_font_selector.get_item_index(previous_id)
+	if selected_index < 0:
+		_text_font_selected_id = TEXT_FONT_DEFAULT_ID
+		selected_index = _text_font_selector.get_item_index(TEXT_FONT_DEFAULT_ID)
+		if _canvas:
+			_canvas.text_font = ThemeDB.fallback_font
+	_text_font_selector.select(selected_index)
+
+
+func _get_custom_font_paths(directory: String) -> Array[String]:
+	var paths: Array[String] = []
+	if not _font_directory_exists(directory):
+		return paths
+	_collect_custom_font_paths(directory, paths, 0)
+	return paths
+
+
+func _get_system_font_paths() -> Array[String]:
+	var paths: Array[String] = []
+	for directory in _get_system_font_directories():
+		if _font_directory_exists(directory):
+			_collect_custom_font_paths(directory, paths, 0)
+	var unique_paths: Array[String] = []
+	var seen := {}
+	for path in paths:
+		var key := path.to_lower()
+		if not seen.has(key):
+			seen[key] = true
+			unique_paths.push_back(path)
+	return unique_paths
+
+
+func _get_system_font_directories() -> Array[String]:
+	var directories: Array[String] = []
+	match OS.get_name():
+		"Windows":
+			var windows_dir := OS.get_environment("WINDIR")
+			directories.push_back((windows_dir if not windows_dir.is_empty() else "C:/Windows").path_join("Fonts"))
+			var local_app_data := OS.get_environment("LOCALAPPDATA")
+			if not local_app_data.is_empty():
+				directories.push_back(local_app_data.path_join("Microsoft/Windows/Fonts"))
+		"macOS":
+			directories.assign(["/System/Library/Fonts", "/Library/Fonts"])
+			var mac_home := OS.get_environment("HOME")
+			if not mac_home.is_empty():
+				directories.push_back(mac_home.path_join("Library/Fonts"))
+		_:
+			directories.assign(["/usr/share/fonts", "/usr/local/share/fonts"])
+			var unix_home := OS.get_environment("HOME")
+			if not unix_home.is_empty():
+				directories.push_back(unix_home.path_join(".fonts"))
+				directories.push_back(unix_home.path_join(".local/share/fonts"))
+	return directories
+
+
+func _collect_custom_font_paths(directory: String, paths: Array[String], depth: int) -> void:
+	if depth > 16:
+		return
+	var dir := DirAccess.open(directory)
+	if not dir:
+		return
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while not entry.is_empty():
+		if entry != "." and entry != ".." and not entry.begins_with("."):
+			var path := directory.path_join(entry)
+			if dir.current_is_dir():
+				_collect_custom_font_paths(path, paths, depth + 1)
+			elif _is_supported_font_path(path):
+				paths.push_back(path)
+		entry = dir.get_next()
+	dir.list_dir_end()
+
+
+func _is_supported_font_path(path: String) -> bool:
+	return path.get_extension().to_lower() in ["ttf", "ttc", "otf", "otc", "woff", "woff2"]
+
+
+func _load_text_font(path: String) -> FontFile:
+	var font := FontFile.new()
+	var load_path := ProjectSettings.globalize_path(path) if path.begins_with("res://") else path
+	return font if font.load_dynamic_font(load_path) == OK else null
+
+
+func _on_text_font_file_selected(path: String) -> void:
+	var font := _load_text_font(path)
+	if not font:
+		_set_status("Could not load font " + path.get_file() + ".")
+		_on_text_font_dialog_canceled()
+		return
+	_text_custom_font_path = path
+	_refresh_text_font_selector()
+	var custom_index := _text_font_selector.get_item_index(TEXT_FONT_CUSTOM_ID)
+	_text_font_selector.select(custom_index)
+	_on_text_font_selected(custom_index)
+	_set_status("Loaded text font " + path.get_file() + ".")
+
+
+func _on_text_font_dialog_canceled() -> void:
+	if not _text_font_selector:
+		return
+	var previous_index := _text_font_selector.get_item_index(_text_font_selected_id)
+	if previous_index >= 0:
+		_text_font_selector.select(previous_index)
+	call_deferred("_refocus_text_editor")
+
+
+func _on_text_font_size_changed(value: float) -> void:
+	if _canvas:
+		_canvas.text_font_size = int(value)
+
+
+func _on_text_alignment_toggled(enabled: bool, alignment: int) -> void:
+	if enabled and _canvas:
+		_canvas.text_alignment = alignment
+		call_deferred("_refocus_text_editor")
+
+
+func _on_text_wrap_toggled(enabled: bool) -> void:
+	if _canvas:
+		_canvas.text_wrapping = (
+			GDDrawCanvasControl.TextWrapping.WORD_WRAP
+			if enabled
+			else GDDrawCanvasControl.TextWrapping.NO_WRAP
+		)
+		call_deferred("_refocus_text_editor")
+
+
+func _on_text_option_text_submitted(_text: String) -> void:
+	call_deferred("_refocus_text_editor")
+
+
+func _rotate_text_by_amount(clockwise: bool) -> void:
+	if not _canvas:
+		return
+	var amount := 90.0
+	if _text_rotate_amount:
+		amount = clampf(float(_text_rotate_amount.value), 1.0, 359.0)
+	var signed_amount := amount if clockwise else -amount
+	if _canvas.rotate_text_draft_degrees(signed_amount):
+		_set_status("Rotated text %s° %s." % [int(amount), "clockwise" if clockwise else "counterclockwise"])
+	else:
+		_set_status("Create a text box before rotating.")
+	_update_text_rotation_controls()
+	call_deferred("_refocus_text_editor")
+
+
+func _refocus_text_editor() -> void:
+	if _canvas and _canvas.active_tool == GDDrawCanvasControl.ToolMode.TEXT:
+		_canvas.focus_text_editor()
+
+
+func _commit_text_draft() -> void:
+	if _canvas and _canvas.commit_text_draft():
+		_set_status("Committed text to the image.")
+	else:
+		_set_status("No visible text to commit.")
+
+
+func _cancel_text_draft() -> void:
+	if _canvas and _canvas.cancel_text_draft():
+		_set_status("Canceled the text draft.")
+	else:
+		_set_status("No text draft to cancel.")
+
+
+func _on_text_draft_started() -> void:
+	_update_text_rotation_controls()
+	_set_status("Editing text. Drag the border or handles to move or resize the box.")
+
+
+func _on_text_draft_finished(committed: bool) -> void:
+	_update_text_rotation_controls()
+	_set_status("Committed text to the image." if committed else "Canceled the text draft.")
+
+
+func _on_text_draft_copied(as_image: bool) -> void:
+	_set_status("Copied text box image. Paste it as a selection." if as_image else "Copied selected text.")
+
+
+func _copy_text_draft_contextual() -> void:
+	if not _canvas or not _canvas.copy_text_draft_contextual():
+		_set_status("No visible text box content to copy.")
+
+
+func _update_text_rotation_controls() -> void:
+	var has_draft: bool = _canvas != null and _canvas.has_text_draft()
+	for button: Button in [
+		_text_rotate_left_button,
+		_text_rotate_right_button,
+		_text_commit_button,
+		_text_cancel_button,
+	]:
+		if button:
+			button.disabled = not has_draft
+			_update_icon_button_icon(button)
+	if _text_rotate_amount:
+		_text_rotate_amount.editable = has_draft
+
+
 func _on_selection_mode_toggled(enabled: bool) -> void:
 	if not _canvas:
 		return
@@ -3213,18 +5503,56 @@ func _on_selection_mode_toggled(enabled: bool) -> void:
 		_select_tool(GDDrawCanvasControl.ToolMode.BRUSH)
 
 
-func _on_color_changed(color: Color) -> void:
-	if not _canvas:
-		return
-	_canvas.brush_color = color
-	_color_picker_has_pending_recent_color = true
+func _on_foreground_color_changed(color: Color) -> void:
+	_set_foreground_color(color, false)
+	_foreground_color_picker_has_pending_recent_color = true
 
 
-func _on_color_picker_popup_closed() -> void:
-	if not _color_picker_has_pending_recent_color or not _color_picker:
+func _on_background_color_changed(color: Color) -> void:
+	_set_background_color(color, false)
+
+
+func _on_swap_colors_pressed() -> void:
+	var foreground := Color.BLACK
+	var background := Color.WHITE
+	if _canvas:
+		foreground = _canvas.brush_color
+		background = _canvas.background_color
+	else:
+		if _foreground_color_picker:
+			foreground = _foreground_color_picker.color
+		if _background_color_picker:
+			background = _background_color_picker.color
+	_set_foreground_color(background)
+	_set_background_color(foreground)
+
+
+func _set_foreground_color(color: Color, synchronize_picker := true) -> void:
+	if synchronize_picker and _foreground_color_picker:
+		_foreground_color_picker.set_block_signals(true)
+		_foreground_color_picker.color = color
+		_foreground_color_picker.set_block_signals(false)
+	if _canvas:
+		_canvas.brush_color = color
+	_update_fill_settings_button()
+	_refresh_3d_brush_preview_color()
+
+
+func _set_background_color(color: Color, synchronize_picker := true) -> void:
+	if synchronize_picker and _background_color_picker:
+		_background_color_picker.set_block_signals(true)
+		_background_color_picker.color = color
+		_background_color_picker.set_block_signals(false)
+	if _canvas:
+		_canvas.background_color = color
+	_update_fill_settings_button()
+
+
+func _on_foreground_color_picker_popup_closed() -> void:
+	if not _foreground_color_picker_has_pending_recent_color or not _foreground_color_picker:
 		return
-	_color_picker_has_pending_recent_color = false
-	_record_recent_color(_color_picker.color)
+	_foreground_color_picker_has_pending_recent_color = false
+	_record_recent_color(_foreground_color_picker.color)
 
 
 func _on_brush_size_changed(value: float) -> void:
@@ -3281,7 +5609,7 @@ func _load_custom_brush_presets() -> void:
 	var editor_settings := _get_editor_settings()
 	if not editor_settings:
 		return
-	var stored_presets: Variant = editor_settings.get_project_metadata(SETTINGS_SECTION, CUSTOM_BRUSH_PRESETS_KEY, [])
+	var stored_presets: Variant = StoragePaths.get_custom_brush_presets(editor_settings)
 	if not (stored_presets is Array):
 		return
 	for preset in stored_presets:
@@ -3292,9 +5620,7 @@ func _load_custom_brush_presets() -> void:
 
 
 func _save_custom_brush_presets() -> void:
-	var editor_settings := _get_editor_settings()
-	if editor_settings:
-		editor_settings.set_project_metadata(SETTINGS_SECTION, CUSTOM_BRUSH_PRESETS_KEY, _custom_brush_presets)
+	StoragePaths.set_custom_brush_presets(_get_editor_settings(), _custom_brush_presets)
 
 
 func _normalize_custom_brush_preset(preset: Dictionary) -> Dictionary:
@@ -3534,6 +5860,789 @@ func _on_fill_mode_selected(index: int) -> void:
 	_canvas.fill_mode = _fill_mode.get_item_id(index)
 
 
+func _on_fill_style_selected(index: int) -> void:
+	if not _fill_style:
+		return
+	if _canvas:
+		_canvas.fill_style = _fill_style.get_item_id(index)
+	_update_fill_settings_button()
+
+
+func _make_fill_setting_row(label_text: String, control: Control) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var label := Label.new()
+	label.text = label_text
+	label.custom_minimum_size.x = 112
+	row.add_child(label)
+	control.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(control)
+	return row
+
+
+func _make_fill_setting_compact_row(label_text: String, control: Control, control_width: float) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var label := Label.new()
+	label.text = label_text
+	label.custom_minimum_size.x = 112
+	row.add_child(label)
+	control.custom_minimum_size.x = maxf(control.custom_minimum_size.x, control_width)
+	control.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	row.add_child(control)
+	return row
+
+
+func _make_fill_setting_pair_row(
+	label_text: String,
+	first_label_text: String,
+	first_control: Control,
+	second_label_text: String,
+	second_control: Control,
+	trailing_control: Control = null,
+	first_width: float = 220.0,
+	second_width: float = 180.0,
+	sublabel_width: float = 56.0
+) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var label := Label.new()
+	label.text = label_text
+	label.custom_minimum_size.x = 112
+	row.add_child(label)
+	var first_label := Label.new()
+	first_label.text = first_label_text
+	first_label.custom_minimum_size.x = sublabel_width
+	first_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(first_label)
+	first_control.custom_minimum_size.x = maxf(first_control.custom_minimum_size.x, first_width)
+	first_control.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	row.add_child(first_control)
+	var pair_spacer := Control.new()
+	pair_spacer.custom_minimum_size.x = 8
+	row.add_child(pair_spacer)
+	var second_label := Label.new()
+	second_label.text = second_label_text
+	second_label.custom_minimum_size.x = sublabel_width
+	second_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(second_label)
+	second_control.custom_minimum_size.x = maxf(second_control.custom_minimum_size.x, second_width)
+	second_control.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	row.add_child(second_control)
+	if trailing_control:
+		var trailing_spacer := Control.new()
+		trailing_spacer.custom_minimum_size.x = 8
+		row.add_child(trailing_spacer)
+		row.add_child(trailing_control)
+	return row
+
+
+func _make_fill_setting_spin(minimum: float, maximum: float, step: float, suffix: String) -> SpinBox:
+	var spin := SpinBox.new()
+	spin.min_value = minimum
+	spin.max_value = maximum
+	spin.step = step
+	spin.suffix = suffix
+	_apply_preferences_spinbox_style(spin)
+	spin.value_changed.connect(_on_fill_settings_value_changed)
+	return spin
+
+
+func _build_fill_settings_tabs() -> void:
+	var solid_tab := _add_preferences_tab(_fill_settings_tabs, "Solid")
+	var solid_section := _add_preferences_section(
+		solid_tab,
+		"Solid fill",
+		"Solid fill uses only the foreground color across the discovered bucket region."
+	)
+	var solid_help := Label.new()
+	solid_help.text = "Fills the discovered region with the foreground color.\nThe background color is ignored."
+	solid_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	solid_section.add_child(solid_help)
+
+	var dither_tab := _add_preferences_tab(_fill_settings_tabs, "Dither")
+	var dither_section := _add_preferences_section(
+		dither_tab,
+		"Ordered dither",
+		"Configure a deterministic Bayer matrix, foreground density, and canvas-pixel sample scale."
+	)
+	_dither_settings_preset = OptionButton.new()
+	for preset_name in ["Bayer 2x2 25%", "Bayer 2x2 50%", "Bayer 2x2 75%", "Bayer 4x4 25%", "Bayer 4x4 50%", "Bayer 4x4 75%"]:
+		_dither_settings_preset.add_item(preset_name)
+	_dither_settings_preset.add_item("Custom", FILL_CUSTOM_PRESET_ID)
+	_dither_settings_preset.item_selected.connect(_on_dither_settings_preset_selected)
+	dither_section.add_child(_make_fill_setting_row("Preset", _dither_settings_preset))
+	_dither_settings_matrix = OptionButton.new()
+	_dither_settings_matrix.add_item("2x2", 2)
+	_dither_settings_matrix.add_item("4x4", 4)
+	_dither_settings_matrix.add_item("8x8", 8)
+	_dither_settings_matrix.item_selected.connect(_on_dither_settings_custom_changed)
+	_dither_settings_density = _make_fill_setting_spin(0.0, 100.0, 0.1, "%")
+	_dither_settings_density.value_changed.disconnect(_on_fill_settings_value_changed)
+	_dither_settings_density.value_changed.connect(_on_dither_settings_custom_changed)
+	dither_section.add_child(_make_fill_setting_pair_row("Dither", "Matrix", _dither_settings_matrix, "Density", _dither_settings_density, null, 220.0, 180.0, 58.0))
+	_dither_settings_scale = _make_fill_setting_spin(1.0, 8.0, 1.0, " px")
+	_dither_settings_scale.value_changed.disconnect(_on_fill_settings_value_changed)
+	_dither_settings_scale.value_changed.connect(_on_dither_settings_custom_changed)
+	dither_section.add_child(_make_fill_setting_compact_row("Sample scale", _dither_settings_scale, 180.0))
+	var dither_help := Label.new()
+	dither_help.text = "Density is quantized to the selected Bayer matrix."
+	dither_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	dither_section.add_child(dither_help)
+
+	var pattern_tab := _add_preferences_tab(_fill_settings_tabs, "Pattern")
+	var pattern_section := _add_preferences_section(
+		pattern_tab,
+		"Repeating pattern",
+		"Configure canvas-anchored checker, stripe, or dot geometry with editable rotation and dimensions."
+	)
+	_pattern_settings_preset = OptionButton.new()
+	for preset_name in ["Checker 2x2", "Horizontal Stripes", "Vertical Stripes", "Diagonal Stripes", "Dots 4x4"]:
+		_pattern_settings_preset.add_item(preset_name)
+	_pattern_settings_preset.add_item("Custom", FILL_CUSTOM_PRESET_ID)
+	_pattern_settings_preset.item_selected.connect(_on_pattern_settings_preset_selected)
+	pattern_section.add_child(_make_fill_setting_row("Preset", _pattern_settings_preset))
+	_pattern_settings_kind = OptionButton.new()
+	_pattern_settings_kind.add_item("Checker", GDDrawCanvasControl.PatternKind.CHECKER)
+	_pattern_settings_kind.add_item("Stripes", GDDrawCanvasControl.PatternKind.STRIPES)
+	_pattern_settings_kind.add_item("Dots", GDDrawCanvasControl.PatternKind.DOTS)
+	_pattern_settings_kind.item_selected.connect(_on_pattern_settings_custom_changed)
+	_pattern_settings_angle = _make_fill_setting_spin(0.0, 359.0, 1.0, "°")
+	_pattern_settings_angle.value_changed.disconnect(_on_fill_settings_value_changed)
+	_pattern_settings_angle.value_changed.connect(_on_pattern_settings_custom_changed)
+	pattern_section.add_child(_make_fill_setting_pair_row("Geometry", "Type", _pattern_settings_kind, "Rotation", _pattern_settings_angle, null, 220.0, 180.0, 58.0))
+	_pattern_settings_thickness = _make_fill_setting_spin(1.0, 32.0, 1.0, " px")
+	_pattern_settings_thickness.value_changed.disconnect(_on_fill_settings_value_changed)
+	_pattern_settings_thickness.value_changed.connect(_on_pattern_settings_custom_changed)
+	_pattern_settings_gap = _make_fill_setting_spin(0.0, 32.0, 1.0, " px")
+	_pattern_settings_gap.value_changed.disconnect(_on_fill_settings_value_changed)
+	_pattern_settings_gap.value_changed.connect(_on_pattern_settings_custom_changed)
+	_pattern_settings_thickness_row = _make_fill_setting_pair_row("Stripes", "Width", _pattern_settings_thickness, "Gap", _pattern_settings_gap, null, 220.0, 180.0, 58.0)
+	_pattern_settings_gap_row = _pattern_settings_thickness_row
+	pattern_section.add_child(_pattern_settings_gap_row)
+	_pattern_settings_cell_width = _make_fill_setting_spin(1.0, 32.0, 1.0, " px")
+	_pattern_settings_cell_width.value_changed.disconnect(_on_fill_settings_value_changed)
+	_pattern_settings_cell_width.value_changed.connect(_on_pattern_settings_custom_changed)
+	_pattern_settings_cell_height = _make_fill_setting_spin(1.0, 32.0, 1.0, " px")
+	_pattern_settings_cell_height.value_changed.disconnect(_on_fill_settings_value_changed)
+	_pattern_settings_cell_height.value_changed.connect(_on_pattern_settings_custom_changed)
+	_pattern_settings_cell_width_row = _make_fill_setting_pair_row("Cell size", "W", _pattern_settings_cell_width, "H", _pattern_settings_cell_height, null, 220.0, 180.0, 58.0)
+	_pattern_settings_cell_height_row = _pattern_settings_cell_width_row
+	pattern_section.add_child(_pattern_settings_cell_height_row)
+	_pattern_settings_dot_size = _make_fill_setting_spin(1.0, 32.0, 1.0, " px")
+	_pattern_settings_dot_size.value_changed.disconnect(_on_fill_settings_value_changed)
+	_pattern_settings_dot_size.value_changed.connect(_on_pattern_settings_custom_changed)
+	_pattern_settings_dot_size_row = _make_fill_setting_compact_row("Dot size", _pattern_settings_dot_size, 180.0)
+	pattern_section.add_child(_pattern_settings_dot_size_row)
+
+	var custom_tab := _add_preferences_tab(_fill_settings_tabs, "Custom")
+	var custom_top_grid := GridContainer.new()
+	custom_top_grid.columns = 2
+	custom_top_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	custom_top_grid.add_theme_constant_override("h_separation", 10)
+	custom_tab.add_child(custom_top_grid)
+	var source_section := _add_preferences_section(
+		custom_top_grid,
+		"Source image",
+		"Choose a project image or supported external raster image. The source remains staged until Use is pressed."
+	)
+	var source_body := HBoxContainer.new()
+	source_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	source_body.add_theme_constant_override("separation", 8)
+	source_section.add_child(source_body)
+	var source_actions := VBoxContainer.new()
+	source_actions.add_theme_constant_override("separation", 6)
+	_custom_fill_source_button = Button.new()
+	_custom_fill_source_button.text = "Select Image..."
+	_custom_fill_source_button.tooltip_text = "Select a project or external image for the custom fill"
+	_custom_fill_source_button.pressed.connect(_on_custom_fill_select_pressed)
+	source_actions.add_child(_custom_fill_source_button)
+	_custom_fill_paste_button = Button.new()
+	_custom_fill_paste_button.text = "Paste Image"
+	_custom_fill_paste_button.tooltip_text = "Stage an image copied from a GDDraw selection or the system clipboard"
+	_custom_fill_paste_button.pressed.connect(_on_custom_fill_paste_pressed)
+	source_actions.add_child(_custom_fill_paste_button)
+	_custom_fill_clear_button = Button.new()
+	_custom_fill_clear_button.text = "Clear Image"
+	_custom_fill_clear_button.tooltip_text = "Clear the staged custom fill source"
+	_custom_fill_clear_button.pressed.connect(_on_custom_fill_clear_pressed)
+	source_actions.add_child(_custom_fill_clear_button)
+	_custom_fill_drop_target = ImageDropTarget.new()
+	_custom_fill_drop_target.name = "Custom Fill Image Drop Target"
+	_custom_fill_drop_target.custom_minimum_size = Vector2(220, 90)
+	_custom_fill_drop_target.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_custom_fill_drop_target.tooltip_text = "Drop a project texture or supported external image here"
+	_custom_fill_drop_target.add_theme_stylebox_override("panel", _make_preferences_section_style())
+	_custom_fill_drop_target.image_data_dropped.connect(_on_custom_fill_image_dropped)
+	source_body.add_child(_custom_fill_drop_target)
+	source_body.add_child(source_actions)
+	var drop_content := HBoxContainer.new()
+	drop_content.add_theme_constant_override("separation", 10)
+	_custom_fill_drop_target.add_child(drop_content)
+	_custom_fill_thumbnail = TextureRect.new()
+	_custom_fill_thumbnail.name = "Custom Fill Source Thumbnail"
+	_custom_fill_thumbnail.custom_minimum_size = Vector2(72, 72)
+	_custom_fill_thumbnail.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_custom_fill_thumbnail.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_custom_fill_thumbnail.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	drop_content.add_child(_custom_fill_thumbnail)
+	var source_text := VBoxContainer.new()
+	source_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	source_text.alignment = BoxContainer.ALIGNMENT_CENTER
+	drop_content.add_child(source_text)
+	var drop_label := Label.new()
+	drop_label.text = "Drop image here"
+	drop_label.add_theme_font_size_override("font_size", 14)
+	source_text.add_child(drop_label)
+	_custom_fill_filename = Label.new()
+	_custom_fill_filename.text = "No image selected"
+	_custom_fill_filename.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_custom_fill_filename.tooltip_text = "No image selected"
+	source_text.add_child(_custom_fill_filename)
+
+	var color_section := _add_preferences_section(
+		custom_top_grid,
+		"Color mode",
+		"Use original RGBA, tint source alpha with the foreground, or choose between the two configured colors by luminance."
+	)
+	_custom_fill_color_mode = OptionButton.new()
+	_custom_fill_color_mode.add_item("Original RGBA", GDDrawCanvasControl.CustomFillColorMode.ORIGINAL_RGBA)
+	_custom_fill_color_mode.add_item("Alpha Mask", GDDrawCanvasControl.CustomFillColorMode.ALPHA_MASK)
+	_custom_fill_color_mode.add_item("Two-Color Mask", GDDrawCanvasControl.CustomFillColorMode.TWO_COLOR_MASK)
+	_custom_fill_color_mode.item_selected.connect(_on_custom_fill_color_mode_changed)
+	color_section.add_child(_make_fill_setting_row("Mode", _custom_fill_color_mode))
+	_custom_fill_threshold = _make_fill_setting_spin(0.0, 100.0, 0.1, "%")
+	_custom_fill_threshold_row = _make_fill_setting_row("Mask threshold", _custom_fill_threshold)
+	color_section.add_child(_custom_fill_threshold_row)
+
+	var transform_section := _add_preferences_section(
+		custom_tab,
+		"Transform and repeat",
+		"The transform is anchored to the canvas origin, so separate bucket regions align seamlessly."
+	)
+	_custom_fill_repeat_x = CheckBox.new()
+	_custom_fill_repeat_x.text = ""
+	_custom_fill_repeat_x.button_pressed = true
+	_custom_fill_repeat_x.toggled.connect(_on_fill_settings_value_changed)
+	_custom_fill_repeat_y = CheckBox.new()
+	_custom_fill_repeat_y.text = ""
+	_custom_fill_repeat_y.button_pressed = true
+	_custom_fill_repeat_y.toggled.connect(_on_fill_settings_value_changed)
+	transform_section.add_child(_make_fill_setting_pair_row(
+		"Repeat", "X", _custom_fill_repeat_x, "Y", _custom_fill_repeat_y, null, 140.0, 140.0, 24.0
+	))
+	_custom_fill_scale_x = _make_fill_setting_spin(0.125, 16.0, 0.001, "x")
+	_custom_fill_scale_x.value = 1.0
+	_custom_fill_scale_x.value_changed.disconnect(_on_fill_settings_value_changed)
+	_custom_fill_scale_x.value_changed.connect(_on_custom_fill_scale_x_changed)
+	_custom_fill_scale_y = _make_fill_setting_spin(0.125, 16.0, 0.001, "x")
+	_custom_fill_scale_y.value = 1.0
+	_custom_fill_scale_y.value_changed.disconnect(_on_fill_settings_value_changed)
+	_custom_fill_scale_y.value_changed.connect(_on_custom_fill_scale_y_changed)
+	_custom_fill_lock_aspect = CheckBox.new()
+	_custom_fill_lock_aspect.text = "Lock aspect ratio"
+	_custom_fill_lock_aspect.button_pressed = true
+	_custom_fill_lock_aspect.toggled.connect(_on_custom_fill_lock_aspect_toggled)
+	transform_section.add_child(_make_fill_setting_pair_row(
+		"Scale", "X", _custom_fill_scale_x, "Y", _custom_fill_scale_y, _custom_fill_lock_aspect, 140.0, 140.0, 24.0
+	))
+	_custom_fill_spacing_x = _make_fill_setting_spin(0.0, 256.0, 1.0, " px")
+	_custom_fill_spacing_y = _make_fill_setting_spin(0.0, 256.0, 1.0, " px")
+	transform_section.add_child(_make_fill_setting_pair_row(
+		"Spacing", "H", _custom_fill_spacing_x, "V", _custom_fill_spacing_y, null, 140.0, 140.0, 24.0
+	))
+	_custom_fill_rotation = _make_fill_setting_spin(0.0, 359.0, 1.0, " deg")
+	_custom_fill_offset_x = _make_fill_setting_spin(-4096.0, 4096.0, 1.0, " px")
+	_custom_fill_offset_y = _make_fill_setting_spin(-4096.0, 4096.0, 1.0, " px")
+	transform_section.add_child(_make_fill_setting_pair_row(
+		"Offset", "X", _custom_fill_offset_x, "Y", _custom_fill_offset_y, null, 140.0, 140.0, 24.0
+	))
+	transform_section.add_child(_make_fill_setting_compact_row("Rotation", _custom_fill_rotation, 180.0))
+	_custom_fill_filtering = OptionButton.new()
+	_custom_fill_filtering.add_item("Nearest", GDDrawCanvasControl.CustomFillFiltering.NEAREST)
+	_custom_fill_filtering.add_item("Bilinear", GDDrawCanvasControl.CustomFillFiltering.BILINEAR)
+	_custom_fill_filtering.item_selected.connect(_on_fill_settings_value_changed)
+	transform_section.add_child(_make_fill_setting_compact_row("Filtering", _custom_fill_filtering, 220.0))
+	_update_custom_fill_source_display()
+	_update_custom_fill_settings_visibility()
+
+
+func _load_fill_settings_from_canvas() -> void:
+	if not _canvas:
+		return
+	_syncing_fill_settings = true
+	_fill_settings_style = _canvas.fill_style
+	_fill_settings_tabs.current_tab = _canvas.fill_style
+	_fill_settings_foreground.color = _canvas.brush_color
+	_fill_settings_background.color = _canvas.background_color
+	_select_option_by_id(_fill_settings_target, _canvas.fill_target_mode)
+	_select_option_by_id(_dither_settings_matrix, _canvas.dither_matrix_size)
+	_dither_settings_density.value = _canvas.dither_density
+	_dither_settings_scale.value = _canvas.dither_scale
+	_select_option_by_id(_dither_settings_preset, _matching_dither_preset())
+	_select_option_by_id(_pattern_settings_kind, _canvas.pattern_kind)
+	_pattern_settings_angle.value = _canvas.pattern_angle
+	_pattern_settings_thickness.value = _canvas.pattern_thickness
+	_pattern_settings_gap.value = _canvas.pattern_gap
+	_pattern_settings_cell_width.value = _canvas.pattern_cell_width
+	_pattern_settings_cell_height.value = _canvas.pattern_cell_height
+	_pattern_settings_dot_size.value = _canvas.pattern_dot_size
+	_select_option_by_id(_pattern_settings_preset, _matching_pattern_preset())
+	_custom_fill_staged_image = _canvas.custom_fill_image.duplicate() if _canvas.custom_fill_image else null
+	_custom_fill_staged_name = _canvas.custom_fill_source_name
+	_select_option_by_id(_custom_fill_color_mode, _canvas.custom_fill_color_mode)
+	_custom_fill_repeat_x.set_pressed_no_signal(_canvas.custom_fill_repeat_x)
+	_custom_fill_repeat_y.set_pressed_no_signal(_canvas.custom_fill_repeat_y)
+	_custom_fill_scale_x.set_value_no_signal(_canvas.custom_fill_scale.x)
+	_custom_fill_scale_y.set_value_no_signal(_canvas.custom_fill_scale.y)
+	_custom_fill_lock_aspect.set_pressed_no_signal(_canvas.custom_fill_lock_aspect)
+	_custom_fill_aspect_ratio = _canvas.custom_fill_scale.y / maxf(_canvas.custom_fill_scale.x, 0.125)
+	_custom_fill_spacing_x.set_value_no_signal(_canvas.custom_fill_spacing.x)
+	_custom_fill_spacing_y.set_value_no_signal(_canvas.custom_fill_spacing.y)
+	_custom_fill_rotation.set_value_no_signal(_canvas.custom_fill_rotation)
+	_custom_fill_offset_x.set_value_no_signal(_canvas.custom_fill_offset.x)
+	_custom_fill_offset_y.set_value_no_signal(_canvas.custom_fill_offset.y)
+	_select_option_by_id(_custom_fill_filtering, _canvas.custom_fill_filtering)
+	_custom_fill_threshold.set_value_no_signal(_canvas.custom_fill_mask_threshold)
+	_syncing_fill_settings = false
+	_update_custom_fill_source_display()
+	_update_custom_fill_settings_visibility()
+	_refresh_fill_settings_preview()
+
+
+func _select_option_by_id(option: OptionButton, item_id: int) -> void:
+	var index := option.get_item_index(item_id)
+	if index >= 0:
+		option.select(index)
+
+
+func _matching_dither_preset() -> int:
+	if _canvas.dither_scale != 1 or (_canvas.dither_matrix_size != 2 and _canvas.dither_matrix_size != 4):
+		return FILL_CUSTOM_PRESET_ID
+	for density_index in range(3):
+		if is_equal_approx(_canvas.dither_density, [25.0, 50.0, 75.0][density_index]):
+			return density_index + (0 if _canvas.dither_matrix_size == 2 else 3)
+	return FILL_CUSTOM_PRESET_ID
+
+
+func _matching_pattern_preset() -> int:
+	if _canvas.pattern_kind == GDDrawCanvasControl.PatternKind.CHECKER and is_zero_approx(_canvas.pattern_angle) and _canvas.pattern_cell_width == 1 and _canvas.pattern_cell_height == 1:
+		return GDDrawCanvasControl.PatternPreset.CHECKER_2X2
+	if _canvas.pattern_kind == GDDrawCanvasControl.PatternKind.STRIPES and _canvas.pattern_thickness == 1:
+		if is_zero_approx(_canvas.pattern_angle) and _canvas.pattern_gap == 1:
+			return GDDrawCanvasControl.PatternPreset.HORIZONTAL_STRIPES
+		if is_equal_approx(_canvas.pattern_angle, 90.0) and _canvas.pattern_gap == 1:
+			return GDDrawCanvasControl.PatternPreset.VERTICAL_STRIPES
+		if is_equal_approx(_canvas.pattern_angle, 45.0) and _canvas.pattern_gap == 3:
+			return GDDrawCanvasControl.PatternPreset.DIAGONAL_STRIPES
+	if _canvas.pattern_kind == GDDrawCanvasControl.PatternKind.DOTS and is_zero_approx(_canvas.pattern_angle) and _canvas.pattern_cell_width == 4 and _canvas.pattern_cell_height == 4 and _canvas.pattern_dot_size == 1:
+		return GDDrawCanvasControl.PatternPreset.DOTS_4X4
+	return FILL_CUSTOM_PRESET_ID
+
+
+func _on_fill_settings_tab_changed(tab: int) -> void:
+	_fill_settings_style = tab
+	if not _syncing_fill_settings:
+		_refresh_fill_settings_preview()
+
+
+func _on_fill_settings_value_changed(_value: Variant = null) -> void:
+	if not _syncing_fill_settings:
+		_refresh_fill_settings_preview()
+
+
+func _on_custom_fill_color_mode_changed(_index: int) -> void:
+	_update_custom_fill_settings_visibility()
+	_on_fill_settings_value_changed()
+
+
+func _update_custom_fill_settings_visibility() -> void:
+	if not _custom_fill_threshold_row or not _custom_fill_color_mode:
+		return
+	_custom_fill_threshold_row.visible = (
+		_custom_fill_color_mode.get_item_id(_custom_fill_color_mode.selected)
+		== GDDrawCanvasControl.CustomFillColorMode.TWO_COLOR_MASK
+	)
+
+
+func _on_custom_fill_scale_x_changed(value: float) -> void:
+	if _syncing_fill_settings:
+		return
+	if _custom_fill_lock_aspect.button_pressed:
+		_custom_fill_scale_y.set_value_no_signal(clampf(value * _custom_fill_aspect_ratio, 0.125, 16.0))
+	_refresh_fill_settings_preview()
+
+
+func _on_custom_fill_scale_y_changed(value: float) -> void:
+	if _syncing_fill_settings:
+		return
+	if _custom_fill_lock_aspect.button_pressed:
+		_custom_fill_scale_x.set_value_no_signal(clampf(value / maxf(_custom_fill_aspect_ratio, 0.000001), 0.125, 16.0))
+	_refresh_fill_settings_preview()
+
+
+func _on_custom_fill_lock_aspect_toggled(enabled: bool) -> void:
+	if enabled:
+		_custom_fill_aspect_ratio = _custom_fill_scale_y.value / maxf(_custom_fill_scale_x.value, 0.125)
+	_on_fill_settings_value_changed()
+
+
+func _on_custom_fill_select_pressed() -> void:
+	if not _custom_fill_image_dialog:
+		return
+	var source_path := _custom_fill_staged_name
+	if source_path.begins_with("res://"):
+		source_path = ProjectSettings.globalize_path(source_path)
+	if not source_path.is_empty() and FileAccess.file_exists(source_path):
+		_custom_fill_image_dialog.current_dir = source_path.get_base_dir()
+		_custom_fill_image_dialog.current_file = source_path.get_file()
+	_custom_fill_image_dialog.popup_centered_ratio(0.75)
+
+
+func _on_custom_fill_paste_pressed() -> void:
+	var clipboard_image: Image
+	var clipboard_label := "clipboard image"
+	if _canvas and _canvas.has_clipboard_image():
+		clipboard_image = _canvas.get_clipboard_image_copy()
+		clipboard_label = "GDDraw selection clipboard"
+	else:
+		var clipboard_source := _get_system_clipboard_image_source()
+		clipboard_image = clipboard_source.get("image", null)
+		clipboard_label = str(clipboard_source.get("label", clipboard_label))
+	if not clipboard_image or clipboard_image.is_empty():
+		_set_status("Copy a GDDraw selection or an image to the clipboard first.")
+		return
+	_set_staged_custom_fill_image(clipboard_image, clipboard_label)
+	_set_status("Staged %s as the custom fill source." % clipboard_label)
+
+
+func _on_custom_fill_file_selected(path: String) -> void:
+	_set_staged_custom_fill_from_path(path)
+
+
+func _on_custom_fill_clear_pressed() -> void:
+	_custom_fill_staged_image = null
+	_custom_fill_staged_name = ""
+	_update_custom_fill_source_display()
+	_refresh_fill_settings_preview()
+
+
+func _on_custom_fill_image_dropped(data: Variant) -> void:
+	var path := _extract_drop_image_path(data)
+	if not path.is_empty():
+		_set_staged_custom_fill_from_path(path)
+		return
+	var image := _extract_drop_image(data)
+	if image and not image.is_empty():
+		_set_staged_custom_fill_image(image, "dropped texture")
+		return
+	_set_status("That drop did not contain a supported custom fill image.")
+
+
+func _set_staged_custom_fill_from_path(path: String) -> bool:
+	var normalized_path := _normalize_filesystem_path(path)
+	if not _is_supported_filesystem_image_path(normalized_path):
+		_set_status("Custom fill source must be a supported image path.")
+		return false
+	var image := Image.new()
+	var load_path := ProjectSettings.globalize_path(normalized_path) if normalized_path.begins_with("res://") else normalized_path
+	if not FileAccess.file_exists(load_path):
+		_set_status("Custom fill source image is missing.")
+		return false
+	var error := image.load(load_path)
+	if error != OK or image.is_empty():
+		_set_status("Could not load custom fill image. Error: %s" % error)
+		return false
+	_set_staged_custom_fill_image(image, normalized_path)
+	return true
+
+
+func _set_staged_custom_fill_image(image: Image, source_name: String) -> void:
+	_custom_fill_staged_image = image.duplicate()
+	if _custom_fill_staged_image.get_format() != Image.FORMAT_RGBA8:
+		_custom_fill_staged_image.convert(Image.FORMAT_RGBA8)
+	_custom_fill_staged_name = source_name
+	_update_custom_fill_source_display()
+	_refresh_fill_settings_preview()
+
+
+func _update_custom_fill_source_display() -> void:
+	if _custom_fill_filename:
+		var display_name := _custom_fill_staged_name.get_file() if not _custom_fill_staged_name.is_empty() else "No image selected"
+		_custom_fill_filename.text = display_name
+		_custom_fill_filename.tooltip_text = _custom_fill_staged_name if not _custom_fill_staged_name.is_empty() else display_name
+	if _custom_fill_clear_button:
+		_custom_fill_clear_button.disabled = _custom_fill_staged_image == null
+	if _custom_fill_thumbnail:
+		_custom_fill_thumbnail.texture = ImageTexture.create_from_image(_make_custom_fill_thumbnail())
+
+
+func _make_custom_fill_thumbnail() -> Image:
+	var size := 64
+	var thumbnail := Image.create_empty(size, size, false, Image.FORMAT_RGBA8)
+	for y in range(size):
+		for x in range(size):
+			thumbnail.set_pixel(x, y, _preview_checker_color(Vector2i(x, y)))
+	if not _custom_fill_staged_image or _custom_fill_staged_image.is_empty():
+		return thumbnail
+	var source_size := Vector2(_custom_fill_staged_image.get_width(), _custom_fill_staged_image.get_height())
+	var fit_scale := minf(float(size) / source_size.x, float(size) / source_size.y)
+	var drawn_size := source_size * fit_scale
+	var origin := (Vector2(size, size) - drawn_size) * 0.5
+	for y in range(size):
+		for x in range(size):
+			var position := Vector2(x, y)
+			if position.x < origin.x or position.y < origin.y or position.x >= origin.x + drawn_size.x or position.y >= origin.y + drawn_size.y:
+				continue
+			var source_pixel := Vector2i(
+				clampi(floori((position.x - origin.x) / fit_scale), 0, _custom_fill_staged_image.get_width() - 1),
+				clampi(floori((position.y - origin.y) / fit_scale), 0, _custom_fill_staged_image.get_height() - 1)
+			)
+			thumbnail.set_pixel(x, y, _composite_preview_color(thumbnail.get_pixel(x, y), _custom_fill_staged_image.get_pixelv(source_pixel)))
+	return thumbnail
+
+
+func _on_fill_settings_swap_pressed() -> void:
+	var foreground := _fill_settings_foreground.color
+	_fill_settings_foreground.color = _fill_settings_background.color
+	_fill_settings_background.color = foreground
+	_refresh_fill_settings_preview()
+
+
+func _on_dither_settings_preset_selected(index: int) -> void:
+	if _syncing_fill_settings:
+		return
+	var preset := _dither_settings_preset.get_item_id(index)
+	if preset == FILL_CUSTOM_PRESET_ID:
+		return
+	_syncing_fill_settings = true
+	_select_option_by_id(_dither_settings_matrix, 2 if preset < 3 else 4)
+	_dither_settings_density.value = [25.0, 50.0, 75.0][preset % 3]
+	_dither_settings_scale.value = 1
+	_syncing_fill_settings = false
+	_refresh_fill_settings_preview()
+
+
+func _on_dither_settings_custom_changed(_value: Variant = null) -> void:
+	if _syncing_fill_settings:
+		return
+	_select_option_by_id(_dither_settings_preset, FILL_CUSTOM_PRESET_ID)
+	_refresh_fill_settings_preview()
+
+
+func _on_pattern_settings_preset_selected(index: int) -> void:
+	if _syncing_fill_settings:
+		return
+	var preset := _pattern_settings_preset.get_item_id(index)
+	if preset == FILL_CUSTOM_PRESET_ID:
+		return
+	_syncing_fill_settings = true
+	match preset:
+		GDDrawCanvasControl.PatternPreset.HORIZONTAL_STRIPES:
+			_set_pattern_settings_values(GDDrawCanvasControl.PatternKind.STRIPES, 0.0, 1, 1, 1, 1, 1)
+		GDDrawCanvasControl.PatternPreset.VERTICAL_STRIPES:
+			_set_pattern_settings_values(GDDrawCanvasControl.PatternKind.STRIPES, 90.0, 1, 1, 1, 1, 1)
+		GDDrawCanvasControl.PatternPreset.DIAGONAL_STRIPES:
+			_set_pattern_settings_values(GDDrawCanvasControl.PatternKind.STRIPES, 45.0, 1, 3, 1, 1, 1)
+		GDDrawCanvasControl.PatternPreset.DOTS_4X4:
+			_set_pattern_settings_values(GDDrawCanvasControl.PatternKind.DOTS, 0.0, 1, 1, 4, 4, 1)
+		_:
+			_set_pattern_settings_values(GDDrawCanvasControl.PatternKind.CHECKER, 0.0, 1, 1, 1, 1, 1)
+	_syncing_fill_settings = false
+	_refresh_fill_settings_preview()
+
+
+func _set_pattern_settings_values(kind: int, angle: float, thickness: int, gap: int, width: int, height: int, dot_size: int) -> void:
+	_select_option_by_id(_pattern_settings_kind, kind)
+	_pattern_settings_angle.value = angle
+	_pattern_settings_thickness.value = thickness
+	_pattern_settings_gap.value = gap
+	_pattern_settings_cell_width.value = width
+	_pattern_settings_cell_height.value = height
+	_pattern_settings_dot_size.value = dot_size
+
+
+func _on_pattern_settings_custom_changed(_value: Variant = null) -> void:
+	if _syncing_fill_settings:
+		return
+	_select_option_by_id(_pattern_settings_preset, FILL_CUSTOM_PRESET_ID)
+	_refresh_fill_settings_preview()
+
+
+func _update_pattern_settings_visibility() -> void:
+	if not _pattern_settings_kind:
+		return
+	var kind := _pattern_settings_kind.get_item_id(_pattern_settings_kind.selected)
+	var stripes: bool = kind == GDDrawCanvasControl.PatternKind.STRIPES
+	var dots: bool = kind == GDDrawCanvasControl.PatternKind.DOTS
+	_pattern_settings_thickness_row.visible = stripes
+	_pattern_settings_gap_row.visible = stripes
+	_pattern_settings_cell_width_row.visible = not stripes
+	_pattern_settings_cell_height_row.visible = not stripes
+	_pattern_settings_dot_size_row.visible = dots
+
+
+func _on_fill_settings_button_pressed() -> void:
+	if not _fill_settings_overlay or not _fill_settings_button or not _fill_settings_button.visible:
+		return
+	_load_fill_settings_from_canvas()
+	if _settings_overlay:
+		_settings_overlay.visible = false
+	if _create_textured_csg_overlay:
+		_create_textured_csg_overlay.visible = false
+	var overlay_parent := _fill_settings_overlay.get_parent()
+	if overlay_parent:
+		overlay_parent.move_child(_fill_settings_overlay, overlay_parent.get_child_count() - 1)
+	_fill_settings_overlay.visible = true
+
+
+func _on_fill_settings_cancel_pressed() -> void:
+	if _fill_settings_overlay:
+		_fill_settings_overlay.visible = false
+
+
+func _on_fill_settings_use_pressed() -> void:
+	if not _canvas or not _fill_settings_tabs:
+		return
+	var foreground := _fill_settings_foreground.color
+	var background := _fill_settings_background.color
+	_canvas.fill_style = _fill_settings_style
+	_canvas.fill_target_mode = _fill_settings_target.get_item_id(_fill_settings_target.selected)
+	var dither_id := _dither_settings_preset.get_item_id(_dither_settings_preset.selected)
+	if dither_id >= 0 and dither_id < 6:
+		_canvas.dither_preset = dither_id
+	_canvas.dither_matrix_size = _dither_settings_matrix.get_item_id(_dither_settings_matrix.selected)
+	_canvas.dither_density = _dither_settings_density.value
+	_canvas.dither_scale = int(_dither_settings_scale.value)
+	var pattern_id := _pattern_settings_preset.get_item_id(_pattern_settings_preset.selected)
+	if pattern_id >= 0 and pattern_id < 5:
+		_canvas.pattern_preset = pattern_id
+	_canvas.pattern_kind = _pattern_settings_kind.get_item_id(_pattern_settings_kind.selected)
+	_canvas.pattern_angle = _pattern_settings_angle.value
+	_canvas.pattern_thickness = int(_pattern_settings_thickness.value)
+	_canvas.pattern_gap = int(_pattern_settings_gap.value)
+	_canvas.pattern_cell_width = int(_pattern_settings_cell_width.value)
+	_canvas.pattern_cell_height = int(_pattern_settings_cell_height.value)
+	_canvas.pattern_dot_size = int(_pattern_settings_dot_size.value)
+	_canvas.custom_fill_image = _custom_fill_staged_image.duplicate() if _custom_fill_staged_image else null
+	_canvas.custom_fill_source_name = _custom_fill_staged_name
+	_canvas.custom_fill_color_mode = _custom_fill_color_mode.get_item_id(_custom_fill_color_mode.selected)
+	_canvas.custom_fill_repeat_x = _custom_fill_repeat_x.button_pressed
+	_canvas.custom_fill_repeat_y = _custom_fill_repeat_y.button_pressed
+	_canvas.custom_fill_scale = Vector2(_custom_fill_scale_x.value, _custom_fill_scale_y.value)
+	_canvas.custom_fill_lock_aspect = _custom_fill_lock_aspect.button_pressed
+	_canvas.custom_fill_spacing = Vector2(_custom_fill_spacing_x.value, _custom_fill_spacing_y.value)
+	_canvas.custom_fill_rotation = _custom_fill_rotation.value
+	_canvas.custom_fill_offset = Vector2(_custom_fill_offset_x.value, _custom_fill_offset_y.value)
+	_canvas.custom_fill_filtering = _custom_fill_filtering.get_item_id(_custom_fill_filtering.selected)
+	_canvas.custom_fill_mask_threshold = _custom_fill_threshold.value
+	_set_foreground_color(foreground)
+	_set_background_color(background)
+	var style_index := _fill_style.get_item_index(_canvas.fill_style)
+	if style_index >= 0:
+		_fill_style.select(style_index)
+	_update_fill_settings_button()
+	_fill_settings_overlay.visible = false
+
+
+func _update_fill_settings_button() -> void:
+	if not _fill_style or not _fill_settings_button:
+		return
+	var style := GDDrawCanvasControl.FillStyle.SOLID
+	if _canvas:
+		style = _canvas.fill_style
+	else:
+		style = _fill_style.get_item_id(_fill_style.selected)
+	var style_index := _fill_style.get_item_index(style)
+	if style_index >= 0 and _fill_style.selected != style_index:
+		_fill_style.select(style_index)
+	match style:
+		GDDrawCanvasControl.FillStyle.DITHER:
+			_fill_style.tooltip_text = "Ordered dithering uses foreground and background colors at a fixed canvas-pixel phase"
+		GDDrawCanvasControl.FillStyle.PATTERN:
+			_fill_style.tooltip_text = "Repeating patterns use foreground and background colors at a fixed canvas-pixel phase"
+		GDDrawCanvasControl.FillStyle.CUSTOM:
+			_fill_style.tooltip_text = "Custom image fills repeat a transformed source image at a fixed canvas-pixel phase"
+		_:
+			_fill_style.tooltip_text = "Solid fill uses only the foreground color"
+	var is_fill_tool: bool = _canvas != null and _canvas.active_tool == GDDrawCanvasControl.ToolMode.FILL
+	_fill_settings_button.visible = is_fill_tool
+	_fill_settings_button.tooltip_text = "Open Fill Settings (%s)" % _fill_style.get_item_text(_fill_style.selected)
+
+
+func _refresh_fill_settings_preview() -> void:
+	if not _fill_settings_preview or not _fill_settings_tabs:
+		return
+	_update_pattern_settings_visibility()
+	var foreground: Color = _fill_settings_foreground.color
+	var background: Color = _fill_settings_background.color
+	var style := _fill_settings_style
+	var size := FILL_SETTINGS_PREVIEW_IMAGE_SIZE
+	var image := Image.create_empty(size, size, false, Image.FORMAT_RGBA8)
+	for y in range(size):
+		for x in range(size):
+			var preview_color := foreground
+			var foreground_pixel := true
+			if style == GDDrawCanvasControl.FillStyle.DITHER:
+				foreground_pixel = GDDrawCanvasControl.is_dither_foreground_config(
+					Vector2i(x, y),
+					_dither_settings_matrix.get_item_id(_dither_settings_matrix.selected),
+					_dither_settings_density.value,
+					int(_dither_settings_scale.value)
+				)
+			elif style == GDDrawCanvasControl.FillStyle.PATTERN:
+				foreground_pixel = GDDrawCanvasControl.is_pattern_foreground_config(
+					Vector2i(x, y),
+					_pattern_settings_kind.get_item_id(_pattern_settings_kind.selected),
+					_pattern_settings_angle.value,
+					int(_pattern_settings_thickness.value),
+					int(_pattern_settings_gap.value),
+					int(_pattern_settings_cell_width.value),
+					int(_pattern_settings_cell_height.value),
+					int(_pattern_settings_dot_size.value)
+				)
+			elif style == GDDrawCanvasControl.FillStyle.CUSTOM:
+				preview_color = GDDrawCanvasControl.sample_custom_fill_color(
+					Vector2i(x, y),
+					_custom_fill_staged_image,
+					_custom_fill_color_mode.get_item_id(_custom_fill_color_mode.selected),
+					foreground,
+					background,
+					_custom_fill_repeat_x.button_pressed,
+					_custom_fill_repeat_y.button_pressed,
+					Vector2(_custom_fill_scale_x.value, _custom_fill_scale_y.value),
+					Vector2(_custom_fill_spacing_x.value, _custom_fill_spacing_y.value),
+					_custom_fill_rotation.value,
+					Vector2(_custom_fill_offset_x.value, _custom_fill_offset_y.value),
+					_custom_fill_filtering.get_item_id(_custom_fill_filtering.selected),
+					_custom_fill_threshold.value
+				)
+			else:
+				preview_color = foreground if foreground_pixel else background
+			if style == GDDrawCanvasControl.FillStyle.DITHER or style == GDDrawCanvasControl.FillStyle.PATTERN:
+				preview_color = foreground if foreground_pixel else background
+			if style == GDDrawCanvasControl.FillStyle.CUSTOM:
+				preview_color = _composite_preview_color(_preview_checker_color(Vector2i(x, y)), preview_color)
+			image.set_pixel(x, y, preview_color)
+	_fill_settings_preview.texture = ImageTexture.create_from_image(image)
+
+
+func _preview_checker_color(pixel: Vector2i) -> Color:
+	var light: Color = _canvas.checker_color_light if _canvas else DEFAULT_CHECKER_LIGHT_COLOR
+	var dark: Color = _canvas.checker_color_dark if _canvas else DEFAULT_CHECKER_DARK_COLOR
+	return light if ((pixel.x / 8) + (pixel.y / 8)) % 2 == 0 else dark
+
+
+func _composite_preview_color(destination: Color, source: Color) -> Color:
+	var source_alpha := clampf(source.a, 0.0, 1.0)
+	return Color(
+		source.r * source_alpha + destination.r * (1.0 - source_alpha),
+		source.g * source_alpha + destination.g * (1.0 - source_alpha),
+		source.b * source_alpha + destination.b * (1.0 - source_alpha),
+		1.0
+	)
+
+
 func _on_mirror_mode_selected(index: int) -> void:
 	if not _mirror_mode:
 		return
@@ -3559,14 +6668,41 @@ func _set_mirror_mode(mode: int) -> void:
 
 
 func _on_shape_fill_mode_selected(index: int) -> void:
-	if not _canvas:
+	if not _canvas or not _shape_fill_mode:
 		return
-	_canvas.shape_fill_enabled = index == 1
+	_canvas.shape_fill_mode = _shape_fill_mode.get_item_id(index)
+	_update_shape_fill_tooltip(_canvas.shape_fill_mode)
 
 
-func _on_shape_from_center_toggled(enabled: bool) -> void:
-	if _canvas:
-		_canvas.shape_from_center = enabled
+func _update_shape_fill_tooltip(mode: int) -> void:
+	if not _shape_fill_mode:
+		return
+	match mode:
+		GDDrawCanvasControl.ShapeFillMode.BACKGROUND:
+			_shape_fill_mode.tooltip_text = "Foreground color outlines the shape; background color fills its interior"
+		GDDrawCanvasControl.ShapeFillMode.FOREGROUND:
+			_shape_fill_mode.tooltip_text = "Foreground color is used for both the shape outline and interior"
+		_:
+			_shape_fill_mode.tooltip_text = "Foreground color outlines the shape; the interior is left unchanged"
+
+
+func _on_shape_origin_mode_selected(index: int) -> void:
+	if not _canvas or not _shape_origin_mode:
+		return
+	_canvas.shape_origin_mode = _shape_origin_mode.get_item_id(index)
+	_update_shape_origin_tooltip(_canvas.shape_origin_mode)
+
+
+func _update_shape_origin_tooltip(mode: int) -> void:
+	if not _shape_origin_mode:
+		return
+	match mode:
+		GDDrawCanvasControl.ShapeOriginMode.FROM_START_POINT:
+			_shape_origin_mode.tooltip_text = "Shape origin: the initial click is the center and the shape expands symmetrically"
+		GDDrawCanvasControl.ShapeOriginMode.FROM_CANVAS_CENTER:
+			_shape_origin_mode.tooltip_text = "Shape origin: the image canvas center stays fixed and the pointer controls the extent"
+		_:
+			_shape_origin_mode.tooltip_text = "Shape origin: the initial click and pointer define opposite corners or line endpoints"
 
 
 func _on_eraser_toggled(enabled: bool) -> void:
@@ -4008,6 +7144,8 @@ func _process_canvas_hover_uv(uv: Vector2, has_hover: bool) -> void:
 func _on_3d_paint_uv_started(hit: Dictionary) -> bool:
 	if not _canvas:
 		return false
+	if _is_3d_surface_shape_tool(_canvas.active_tool):
+		return _begin_3d_surface_shape(hit)
 	if not hit.has("uv_overlap_count"):
 		hit["uv_overlap_count"] = _count_3d_uv_overlaps(hit)
 	if _shared_uv_paint_is_blocked(hit):
@@ -4024,6 +7162,9 @@ func _on_3d_paint_uv_started(hit: Dictionary) -> bool:
 
 
 func _on_3d_paint_uv_dragged(hit: Dictionary) -> void:
+	if not _paint_3d_surface_shape_state.is_empty():
+		_update_3d_surface_shape(hit)
+		return
 	if _canvas:
 		if _shared_uv_paint_is_blocked(hit):
 			_paint_3d_last_stroke_hit.clear()
@@ -4038,11 +7179,229 @@ func _on_3d_paint_uv_dragged(hit: Dictionary) -> void:
 
 
 func _on_3d_paint_uv_finished() -> void:
+	if not _paint_3d_surface_shape_state.is_empty():
+		_finish_3d_surface_shape()
+		return
 	if _canvas:
 		_canvas.end_uv_triangle_stroke()
 	_paint_3d_last_stroke_hit.clear()
 	_end_3d_soft_brush_stroke()
 	_sync_3d_paint_texture()
+
+
+func _begin_3d_surface_shape(hit: Dictionary) -> bool:
+	if (
+		not _canvas
+		or not _texture_3d_session
+		or not _texture_3d_session.has_active_session()
+		or not _paint_3d_mesh_cache
+		or not _paint_3d_mesh_cache.is_valid()
+	):
+		return false
+	var validation: Dictionary = _paint_3d_mesh_cache.validate_surface_shape_endpoints(
+		hit,
+		hit,
+		_get_3d_uv_overlap_distance_epsilon()
+	)
+	if not bool(validation.get("valid", false)):
+		_set_status(str(validation.get("reason", "The shape cannot start here.")))
+		return false
+	if not hit.has("uv_overlap_count"):
+		hit["uv_overlap_count"] = _count_3d_uv_overlaps(hit)
+	_warn_if_3d_hit_has_uv_overlap(hit)
+	var texture_uv: Vector2 = hit.get("texture_uv", hit.get("uv", Vector2.ZERO))
+	var pixel: Vector2i = _canvas.image_pixel_from_uv(texture_uv)
+	var shape_tool: int = _canvas.active_tool
+	var shape_name := _get_3d_surface_shape_name(shape_tool)
+	_paint_3d_surface_shape_state = {
+		"shape_tool": shape_tool,
+		"shape_name": shape_name,
+		"preview_mesh_node": _paint_3d_mesh,
+		"preview_mesh_resource": _paint_3d_mesh.mesh if _paint_3d_mesh else null,
+		"preview_material": _paint_3d_material,
+		"session": _texture_3d_session,
+		"source_node": _texture_3d_session.source_node if _texture_3d_session else null,
+		"material_slot": int(_texture_3d_session.material_slot) if _texture_3d_session else -1,
+		"surface_index": int(hit.get("surface_index", -1)),
+		"start_hit": hit.duplicate(true),
+		"end_hit": hit.duplicate(true),
+		"start_uv": texture_uv,
+		"end_uv": texture_uv,
+		"start_pixel": pixel,
+		"end_pixel": pixel,
+		"foreground_color": _canvas.brush_color,
+		"shape_settings": {
+			"width": _canvas.brush_size,
+			"brush_head": _canvas.brush_head,
+			"pixel_perfect": _canvas.pixel_perfect,
+			"brush_hardness": _canvas.brush_hardness,
+			"opacity": _canvas.brush_color.a,
+			"alpha_lock": _canvas.alpha_lock,
+			"mirror_mode": _canvas.mirror_mode,
+			"stroke_overlap_enabled": _canvas.stroke_overlap_enabled,
+			"fill_mode": _canvas.shape_fill_mode,
+			"background_color": _canvas.background_color,
+		},
+		"endpoint_valid": true,
+		"invalid_reason": "",
+	}
+	if not _canvas.begin_surface_shape_preview(pixel, pixel):
+		_paint_3d_surface_shape_state.clear()
+		return false
+	_sync_3d_surface_shape_preview()
+	return true
+
+
+func _update_3d_surface_shape(hit: Dictionary) -> bool:
+	if _paint_3d_surface_shape_state.is_empty() or not _canvas:
+		return false
+	var validation := _validate_3d_surface_shape_hit(hit)
+	var valid := bool(validation.get("valid", false))
+	_paint_3d_surface_shape_state["endpoint_valid"] = valid
+	_paint_3d_surface_shape_state["invalid_reason"] = str(validation.get("reason", ""))
+	if not valid:
+		_canvas.update_surface_shape_preview(Vector2i.ZERO, false)
+		_sync_3d_surface_shape_preview()
+		return false
+	var texture_uv: Vector2 = hit.get("texture_uv", hit.get("uv", Vector2.ZERO))
+	var pixel: Vector2i = _canvas.image_pixel_from_uv(texture_uv)
+	_paint_3d_surface_shape_state["end_hit"] = hit.duplicate(true)
+	_paint_3d_surface_shape_state["end_uv"] = texture_uv
+	_paint_3d_surface_shape_state["end_pixel"] = pixel
+	_canvas.update_surface_shape_preview(pixel, true)
+	_sync_3d_surface_shape_preview()
+	return true
+
+
+func _invalidate_3d_surface_shape(reason: String) -> void:
+	if _paint_3d_surface_shape_state.is_empty():
+		return
+	_paint_3d_surface_shape_state["endpoint_valid"] = false
+	_paint_3d_surface_shape_state["invalid_reason"] = reason
+	if _canvas:
+		_canvas.update_surface_shape_preview(Vector2i.ZERO, false)
+	_sync_3d_surface_shape_preview()
+
+
+func _validate_3d_surface_shape_hit(hit: Dictionary) -> Dictionary:
+	if _paint_3d_surface_shape_state.is_empty() or not _canvas:
+		return {"valid": false, "reason": "There is no active 3D shape preview."}
+	if _canvas.active_tool != int(_paint_3d_surface_shape_state.get("shape_tool", -1)):
+		return {"valid": false, "reason": "The active tool changed before the shape was released."}
+	if (
+		_paint_3d_surface_shape_state.get("preview_mesh_node") != _paint_3d_mesh
+		or _paint_3d_surface_shape_state.get("preview_mesh_resource") != (_paint_3d_mesh.mesh if _paint_3d_mesh else null)
+		or _paint_3d_surface_shape_state.get("preview_material") != _paint_3d_material
+		or _paint_3d_surface_shape_state.get("session") != _texture_3d_session
+	):
+		return {"valid": false, "reason": "The active mesh or material surface changed during the shape drag."}
+	if not _texture_3d_session or int(_texture_3d_session.material_slot) != int(_paint_3d_surface_shape_state.get("material_slot", -1)):
+		return {"valid": false, "reason": "The selected material surface changed during the shape drag."}
+	if hit.is_empty():
+		return {"valid": false, "reason": "Release the shape over the active 3D surface."}
+	if not _paint_3d_mesh_cache or not _paint_3d_mesh_cache.is_valid():
+		return {"valid": false, "reason": "The active mesh geometry is no longer available."}
+	return _paint_3d_mesh_cache.validate_surface_shape_endpoints(
+		_paint_3d_surface_shape_state.get("start_hit", {}),
+		hit,
+		_get_3d_uv_overlap_distance_epsilon()
+	)
+
+
+func _finish_3d_surface_shape(release_hit: Dictionary = {}) -> bool:
+	if _paint_3d_surface_shape_state.is_empty():
+		return false
+	if not release_hit.is_empty():
+		_update_3d_surface_shape(release_hit)
+	var valid := bool(_paint_3d_surface_shape_state.get("endpoint_valid", false))
+	var reason := str(_paint_3d_surface_shape_state.get("invalid_reason", "Release the shape over the active 3D surface."))
+	if not valid:
+		_cancel_3d_surface_shape(reason, true)
+		return false
+	var shape_name := str(_paint_3d_surface_shape_state.get("shape_name", "Shape"))
+	var committed: bool = _canvas != null and _canvas.commit_surface_shape_preview()
+	_paint_3d_surface_shape_state.clear()
+	_paint_3d_last_stroke_hit.clear()
+	_sync_3d_paint_texture()
+	_set_status(
+		"Committed 3D surface %s." % shape_name.to_lower()
+		if committed
+		else "The 3D surface %s made no pixel changes." % shape_name.to_lower()
+	)
+	return committed
+
+
+func _finish_3d_surface_shape_at(view_position: Vector2) -> bool:
+	var release_hit := _pick_3d_paint_uv(view_position)
+	if release_hit.is_empty():
+		_invalidate_3d_surface_shape("Release the shape over the active 3D surface.")
+		return _finish_3d_surface_shape()
+	return _finish_3d_surface_shape(release_hit)
+
+
+func _cancel_3d_surface_shape(reason := "Canceled 3D shape preview.", show_status := false, sync_texture := true) -> bool:
+	if _paint_3d_surface_shape_state.is_empty():
+		return false
+	if _canvas:
+		_canvas.cancel_surface_shape_preview()
+	_paint_3d_surface_shape_state.clear()
+	_paint_3d_last_stroke_hit.clear()
+	_paint_3d_drawing = false
+	_paint_3d_pending_motion = false
+	if sync_texture:
+		_sync_3d_paint_texture()
+	if show_status and not reason.is_empty():
+		_set_status(reason)
+	return true
+
+
+func _sync_3d_surface_shape_preview() -> void:
+	if not _canvas or _paint_3d_surface_shape_state.is_empty():
+		return
+	_set_3d_paint_texture_image(_canvas.get_surface_shape_preview_image())
+
+
+func _is_3d_surface_shape_tool(tool: int) -> bool:
+	return tool in [
+		GDDrawCanvasControl.ToolMode.LINE,
+		GDDrawCanvasControl.ToolMode.RECTANGLE,
+		GDDrawCanvasControl.ToolMode.ELLIPSE,
+	]
+
+
+func _get_3d_surface_shape_name(tool: int) -> String:
+	match tool:
+		GDDrawCanvasControl.ToolMode.RECTANGLE:
+			return "Rectangle"
+		GDDrawCanvasControl.ToolMode.ELLIPSE:
+			return "Ellipse"
+		_:
+			return "Line"
+
+
+# Compatibility entry points retained for focused Line integrations/tests.
+func _begin_3d_surface_line(hit: Dictionary) -> bool:
+	return _begin_3d_surface_shape(hit)
+
+
+func _update_3d_surface_line(hit: Dictionary) -> bool:
+	return _update_3d_surface_shape(hit)
+
+
+func _invalidate_3d_surface_line(reason: String) -> void:
+	_invalidate_3d_surface_shape(reason)
+
+
+func _validate_3d_surface_line_hit(hit: Dictionary) -> Dictionary:
+	return _validate_3d_surface_shape_hit(hit)
+
+
+func _finish_3d_surface_line(release_hit: Dictionary = {}) -> bool:
+	return _finish_3d_surface_shape(release_hit)
+
+
+func _finish_3d_surface_line_at(view_position: Vector2) -> bool:
+	return _finish_3d_surface_shape_at(view_position)
 
 
 func _should_connect_3d_stroke_hits(previous_hit: Dictionary, current_hit: Dictionary) -> bool:
@@ -4083,11 +7442,7 @@ func _3d_triangles_share_edge(left: PackedVector3Array, right: PackedVector3Arra
 func _on_color_picked(color: Color, pixel: Vector2i) -> void:
 	if not _canvas:
 		return
-	if _color_picker:
-		_color_picker.set_block_signals(true)
-		_color_picker.color = color
-		_color_picker.set_block_signals(false)
-	_canvas.brush_color = color
+	_set_foreground_color(color)
 	_record_recent_color(color)
 	_set_status("Picked color at %s, %s." % [pixel.x, pixel.y])
 
@@ -4288,6 +7643,8 @@ func _delete_selection() -> void:
 
 func _cancel_selection_or_preview() -> void:
 	if not _canvas:
+		return
+	if _cancel_3d_surface_shape("Canceled 3D shape preview.", true):
 		return
 	if _crop_workflow_active:
 		_cancel_crop_rectangle()
@@ -4592,7 +7949,6 @@ func _show_2d_save_as() -> void:
 	if not _save_dialog:
 		return
 	var save_dir := _get_default_save_dir()
-	_ensure_resource_dir(save_dir)
 	_save_dialog.current_dir = save_dir
 	_save_dialog.current_file = _document_path.get_file() if not _document_path.is_empty() else _make_default_png_name()
 	_save_dialog.popup_centered_ratio(0.75)
@@ -4647,7 +8003,6 @@ func _popup_3d_texture_save_as_dialog() -> void:
 			source_cursor = source_cursor.get_parent()
 	if save_dir.is_empty():
 		save_dir = _get_default_save_dir()
-	_ensure_resource_dir(save_dir)
 	var base_name := current_path.get_file().get_basename() if not current_path.is_empty() else ""
 	if base_name.is_empty() and source_resource_path.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp"]:
 		base_name = source_resource_path.get_file().get_basename()
@@ -4661,7 +8016,6 @@ func _popup_3d_texture_save_as_dialog() -> void:
 func _show_load_png_dialog() -> void:
 	if _open_dialog:
 		var save_dir := _get_default_save_dir()
-		_ensure_resource_dir(save_dir)
 		_open_dialog.current_dir = save_dir
 		_open_dialog.popup_centered_ratio(0.75)
 
@@ -5118,8 +8472,10 @@ func _clear_pending_session_transition() -> void:
 
 
 func _clear_3d_texture_session_state(restore_workspace := true) -> void:
+	_cancel_3d_surface_shape("", false, false)
 	if _texture_3d_session:
 		_texture_3d_session.clear()
+	_paint_3d_source_available = false
 	if _canvas:
 		_canvas.clear_uv_overlay_data()
 		_canvas.clear_eraser_restore_image()
@@ -5178,6 +8534,7 @@ func _begin_3d_texture_session(surface_target: Node3D, create_if_missing := fals
 	if _saved_2d_workspace.is_empty():
 		_capture_2d_workspace()
 	_texture_3d_session = candidate
+	_paint_3d_source_available = _is_active_3d_source_available()
 	_pending_3d_session_candidate = null
 	_clear_3d_session_picker()
 	_update_canvas_resize_control_availability()
@@ -5531,18 +8888,25 @@ func _sync_3d_paint_view() -> void:
 func _poll_active_3d_target_geometry() -> void:
 	if not _texture_3d_session or not _texture_3d_session.target:
 		return
-	var source: Node3D = _texture_3d_session.target.source_node
+	var source: Node3D
+	if is_instance_valid(_texture_3d_session.target.source_node):
+		source = _texture_3d_session.target.source_node
 	if not is_instance_valid(source) or not source.is_inside_tree():
-		_texture_3d_session.reset_preview_orientation()
-		_clear_3d_paint_mesh()
+		var became_unavailable := _paint_3d_source_available
+		_paint_3d_source_available = false
+		_texture_3d_session.set_scene_transform_linked(false)
+		_apply_scene_transform_link_control_state(false)
 		_update_3d_context_control_visibility()
 		_update_3d_session_status()
-		_set_status("The source 3D node was removed; its preview orientation was cleared.")
+		if became_unavailable:
+			_set_status("The source scene is inactive or closed. The private 3D preview remains editable; Scene Transform Link is unavailable.")
 		return
-	var current_scene_transform := source.global_transform
-	if current_scene_transform != _texture_3d_session.target.source_transform:
-		_texture_3d_session.target.source_transform = current_scene_transform
-		_apply_3d_preview_transform(false)
+	var became_available := not _paint_3d_source_available
+	_paint_3d_source_available = true
+	_apply_scene_transform_link_control_state(_texture_3d_session.is_scene_transform_linked())
+	if became_available:
+		_paint_3d_geometry_dirty = true
+		_set_status("The source scene is active again; Scene Transform Link is available.")
 	if source is MeshInstance3D and (source as MeshInstance3D).mesh != _texture_3d_session.mesh_snapshot:
 		_paint_3d_geometry_dirty = true
 	# CSG does not expose a stable Mesh resource whose changed signal can
@@ -5552,6 +8916,31 @@ func _poll_active_3d_target_geometry() -> void:
 	if _paint_3d_geometry_dirty:
 		_paint_3d_geometry_dirty = false
 		_refresh_active_3d_target_geometry()
+
+
+func _poll_active_3d_target_transform() -> void:
+	if (
+		not _texture_3d_session
+		or not _texture_3d_session.target
+		or not _texture_3d_session.is_scene_transform_linked()
+	):
+		return
+	var source: Node3D
+	if is_instance_valid(_texture_3d_session.target.source_node):
+		source = _texture_3d_session.target.source_node
+	if not is_instance_valid(source) or not source.is_inside_tree():
+		_paint_3d_source_available = false
+		_texture_3d_session.set_scene_transform_linked(false)
+		_apply_scene_transform_link_control_state(false)
+		_update_3d_context_control_visibility()
+		_update_3d_session_status()
+		_set_status("The source scene is inactive or closed. The private 3D preview remains editable; Scene Transform Link is unavailable.")
+		return
+	_paint_3d_source_available = true
+	var current_scene_transform := source.global_transform
+	_texture_3d_session.target.source_transform = current_scene_transform
+	if _texture_3d_session.update_live_source_transform(current_scene_transform):
+		_apply_3d_preview_transform(false)
 
 
 func _observe_3d_paint_mesh(mesh: Mesh) -> void:
@@ -5593,10 +8982,16 @@ func _sync_3d_paint_texture() -> void:
 		return
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		return
-	_set_3d_paint_texture_image(_canvas.get_image_copy())
+	if _canvas.is_surface_shape_previewing():
+		_set_3d_paint_texture_image(_canvas.get_surface_shape_preview_image())
+	else:
+		_set_3d_paint_texture_image(_canvas.get_image_copy())
 
 
 func _clear_3d_paint_mesh() -> void:
+	_cancel_3d_surface_shape("", false, false)
+	_cancel_3d_rotation_gizmo_drag(false)
+	_set_3d_rotation_gizmo_hover_axis(-1)
 	_observe_3d_paint_mesh(null)
 	_hide_3d_hover_debug_marker("3D mesh cleared")
 	_hide_3d_brush_preview()
@@ -5625,16 +9020,21 @@ func _clear_3d_paint_mesh() -> void:
 	_paint_3d_geometry_dirty = false
 	_paint_3d_pending_motion = false
 	_paint_3d_pending_2d_hover = false
+	_update_3d_rotation_gizmo_visibility()
 
 
 func _set_3d_paint_mesh_from_target(surface_target, texture_image: Image) -> void:
 	if not _paint_3d_root or not surface_target or not surface_target.mesh_snapshot:
 		return
-	var source: Node3D = surface_target.source_node
+	var source: Node3D
+	if is_instance_valid(surface_target.source_node):
+		source = surface_target.source_node
+	var source_name: String = surface_target.get_source_name() if surface_target.has_method("get_source_name") else "3D Surface"
 	var preview_mesh: Mesh = surface_target.mesh_snapshot
 	_clear_3d_paint_mesh()
+	_paint_3d_source_available = is_instance_valid(source) and source.is_inside_tree()
 	_paint_3d_mesh = MeshInstance3D.new()
-	_paint_3d_mesh.name = source.name + " Preview"
+	_paint_3d_mesh.name = source_name + " Preview"
 	_paint_3d_mesh.mesh = preview_mesh
 	_paint_3d_mesh.transform = _get_3d_preview_transform(surface_target)
 	_paint_3d_mesh.lod_bias = PAINT_3D_PREVIEW_LOD_BIAS
@@ -5670,13 +9070,16 @@ func _set_3d_paint_mesh_from_target(surface_target, texture_image: Image) -> voi
 	_paint_3d_hover_triangle.material_override = _make_3d_hover_triangle_material()
 	_paint_3d_root.add_child(_paint_3d_hover_triangle)
 	_paint_3d_wire_mesh = MeshInstance3D.new()
-	_paint_3d_wire_mesh.name = source.name + " UV Overlay"
+	_paint_3d_wire_mesh.name = source_name + " UV Overlay"
 	_paint_3d_wire_mesh.mesh = _make_3d_wire_overlay_mesh(preview_mesh)
 	_paint_3d_wire_mesh.transform = _paint_3d_mesh.transform
 	_paint_3d_wire_mesh.material_override = _make_3d_wire_overlay_material()
 	_paint_3d_root.add_child(_paint_3d_wire_mesh)
 	_update_3d_wire_overlay_visibility()
+	_establish_3d_preview_stage(preview_mesh)
 	_frame_3d_paint_mesh(preview_mesh)
+	_update_3d_rotation_gizmo_transform()
+	_update_3d_rotation_gizmo_visibility()
 
 
 func _get_3d_preview_transform(surface_target) -> Transform3D:
@@ -5698,6 +9101,7 @@ func _apply_3d_preview_transform(reframe: bool) -> void:
 		_paint_3d_wire_mesh.transform = preview_transform
 	if _paint_3d_hover_triangle:
 		_paint_3d_hover_triangle.transform = preview_transform
+	_update_3d_rotation_gizmo_transform()
 	# Cursor-space helpers are reconstructed from mesh-local hit data on the
 	# next hover. Hiding them prevents a stale world-space brush marker from
 	# lingering during the orientation change.
@@ -5735,14 +9139,25 @@ func _set_3d_paint_texture_image(texture_image: Image) -> void:
 
 func _make_3d_paint_material(source: Node3D, texture_image: Image) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
-	material.resource_name = source.name + " GDDraw Paint Preview"
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var source_name := "3D Surface"
+	if is_instance_valid(source):
+		source_name = str(source.name)
+	elif _texture_3d_session and _texture_3d_session.target and _texture_3d_session.target.has_method("get_source_name"):
+		source_name = _texture_3d_session.target.get_source_name()
+	material.resource_name = source_name + " GDDraw Paint Preview"
+	material.shading_mode = (
+		BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		if _preview_light_enabled
+		else BaseMaterial3D.SHADING_MODE_UNSHADED
+	)
 	material.albedo_color = Color.WHITE
+	material.roughness = 1.0
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	material.texture_repeat = false
 	material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	material.disable_receive_shadows = true
+	material.disable_fog = true
 	material.vertex_color_use_as_albedo = false
 	var source_material: StandardMaterial3D
 	if source is CSGShape3D and source.has_method("get_material"):
@@ -5751,6 +9166,8 @@ func _make_3d_paint_material(source: Node3D, texture_image: Image) -> StandardMa
 		var source_mesh := source as MeshInstance3D
 		var source_slot: int = int(_texture_3d_session.material_slot) if _texture_3d_session else 0
 		source_material = source_mesh.get_active_material(source_slot) as StandardMaterial3D
+	if not source_material and _texture_3d_session and _texture_3d_session.material is StandardMaterial3D:
+		source_material = _texture_3d_session.material
 	if source_material:
 		# The preview replaces the scene material, but its UV transform remains
 		# part of how the albedo is mapped and must survive that replacement.
@@ -6118,13 +9535,53 @@ func _frame_3d_paint_mesh(mesh: Mesh) -> void:
 	var aabb := _get_transformed_3d_aabb(mesh.get_aabb(), preview_transform)
 	_paint_3d_target = aabb.get_center()
 	var largest_axis := maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
-	var stage_size := maxf(PAINT_3D_STAGE_MIN_SIZE, largest_axis * PAINT_3D_STAGE_PADDING)
-	_update_3d_paint_stage(aabb, stage_size)
 	_paint_3d_distance = maxf(largest_axis * 1.8, 1.0)
-	_paint_3d_yaw = PAINT_3D_INITIAL_YAW
-	_paint_3d_pitch = PAINT_3D_INITIAL_PITCH
+	var editor_camera_basis: Variant = _get_3d_editor_view_camera_basis()
+	_paint_3d_camera_basis_override_active = editor_camera_basis is Basis
+	if _paint_3d_camera_basis_override_active:
+		_paint_3d_camera_basis_override = (editor_camera_basis as Basis).orthonormalized()
+	var initial_angles := (
+		_get_3d_camera_angles_from_offset_direction(_paint_3d_camera_basis_override.z)
+		if _paint_3d_camera_basis_override_active
+		else Vector2(PAINT_3D_INITIAL_YAW, PAINT_3D_INITIAL_PITCH)
+	)
+	_paint_3d_yaw = initial_angles.x
+	_paint_3d_pitch = initial_angles.y
 	_update_3d_paint_camera()
 	_resize_3d_paint_viewport()
+	_update_3d_rotation_gizmo_transform()
+
+
+func _get_3d_editor_view_camera_basis() -> Variant:
+	if _plugin:
+		var editor_interface := _plugin.get_editor_interface()
+		var editor_viewport: SubViewport = editor_interface.get_editor_viewport_3d(0) if editor_interface else null
+		var editor_camera: Camera3D = editor_viewport.get_camera_3d() if editor_viewport else null
+		if is_instance_valid(editor_camera):
+			return editor_camera.global_transform.basis.orthonormalized()
+	return null
+
+
+func _release_3d_editor_camera_basis_override() -> void:
+	if not _paint_3d_camera_basis_override_active:
+		return
+	# Orbit and freelook intentionally return to the world-up navigation model.
+	# Seed it from the current viewing direction so the transition starts from
+	# the closest representable yaw/pitch instead of snapping to the fallback.
+	var angles := _get_3d_camera_angles_from_offset_direction(_paint_3d_camera_basis_override.z)
+	_paint_3d_yaw = angles.x
+	_paint_3d_pitch = angles.y
+	_paint_3d_camera_basis_override_active = false
+
+
+func _get_3d_camera_angles_from_offset_direction(direction: Vector3) -> Vector2:
+	if direction.length_squared() <= 0.000001:
+		return Vector2(PAINT_3D_INITIAL_YAW, PAINT_3D_INITIAL_PITCH)
+	var normalized := direction.normalized()
+	return Vector2(
+		atan2(normalized.x, normalized.z),
+		clampf(asin(clampf(normalized.y, -1.0, 1.0)), -1.45, 1.45)
+	)
 
 
 func _get_transformed_3d_aabb(local_aabb: AABB, preview_transform: Transform3D) -> AABB:
@@ -6144,6 +9601,353 @@ func _get_transformed_3d_aabb(local_aabb: AABB, preview_transform: Transform3D) 
 	return AABB(minimum, maximum - minimum)
 
 
+func _pick_3d_rotation_gizmo_axis(view_position: Vector2) -> int:
+	return int(_pick_3d_rotation_gizmo_detail(view_position).get("axis", -1))
+
+
+func _pick_3d_rotation_gizmo_detail(view_position: Vector2) -> Dictionary:
+	if (
+		not _paint_3d_camera
+		or not _paint_3d_rotation_gizmo
+		or not _paint_3d_rotation_gizmo.visible
+	):
+		return {}
+	var best_axis := -1
+	var best_distance := PAINT_3D_GIZMO_HIT_PIXELS
+	var gizmo_transform := _paint_3d_rotation_gizmo.global_transform
+	for axis_index in range(3):
+		if axis_index >= _paint_3d_gizmo_rings.size() or not _paint_3d_gizmo_rings[axis_index].visible:
+			continue
+		for segment in range(PAINT_3D_GIZMO_SEGMENTS):
+			var angle_a := TAU * float(segment) / float(PAINT_3D_GIZMO_SEGMENTS)
+			var angle_b := TAU * float(segment + 1) / float(PAINT_3D_GIZMO_SEGMENTS)
+			var world_a := gizmo_transform * _get_3d_gizmo_ring_point(axis_index, angle_a)
+			var world_b := gizmo_transform * _get_3d_gizmo_ring_point(axis_index, angle_b)
+			if _paint_3d_camera.is_position_behind(world_a) and _paint_3d_camera.is_position_behind(world_b):
+				continue
+			var screen_a := _paint_3d_camera.unproject_position(world_a)
+			var screen_b := _paint_3d_camera.unproject_position(world_b)
+			var distance := _distance_to_2d_segment(view_position, screen_a, screen_b)
+			if distance < best_distance:
+				best_distance = distance
+				best_axis = axis_index
+	return {"axis": best_axis, "distance": best_distance} if best_axis >= 0 else {}
+
+
+func _pick_3d_translation_gizmo_axis(view_position: Vector2) -> int:
+	return int(_pick_3d_translation_gizmo_detail(view_position).get("axis", -1))
+
+
+func _pick_3d_translation_gizmo_detail(view_position: Vector2) -> Dictionary:
+	if not _paint_3d_camera or not _paint_3d_rotation_gizmo or not _paint_3d_rotation_gizmo.visible:
+		return {}
+	var best := {}
+	var gizmo_transform := _paint_3d_rotation_gizmo.global_transform
+	for axis_index in range(3):
+		if axis_index >= _paint_3d_gizmo_translation_axes.size() or not _paint_3d_gizmo_translation_axes[axis_index].visible:
+			continue
+		var axis := _get_3d_gizmo_axis(axis_index)
+		var shaft_start_world := gizmo_transform * (axis * PAINT_3D_GIZMO_ARROW_SHAFT_START)
+		var head_world := gizmo_transform * (axis * PAINT_3D_GIZMO_ARROW_HEAD_START)
+		var tip_world := gizmo_transform * (axis * PAINT_3D_GIZMO_ARROW_LENGTH)
+		if _paint_3d_camera.is_position_behind(shaft_start_world) and _paint_3d_camera.is_position_behind(tip_world):
+			continue
+		var shaft_start := _paint_3d_camera.unproject_position(shaft_start_world)
+		var head := _paint_3d_camera.unproject_position(head_world)
+		var tip := _paint_3d_camera.unproject_position(tip_world)
+		var head_distance := _distance_to_2d_segment(view_position, head, tip)
+		var shaft_distance := _distance_to_2d_segment(view_position, shaft_start, head)
+		var distance := minf(head_distance, shaft_distance)
+		var threshold := PAINT_3D_GIZMO_HIT_PIXELS + (3.0 if head_distance <= shaft_distance else 0.0)
+		if distance <= threshold and (best.is_empty() or distance < float(best.distance)):
+			best = {"axis": axis_index, "distance": distance, "arrowhead": head_distance <= shaft_distance}
+	return best
+
+
+func _pick_3d_transform_gizmo_control(view_position: Vector2) -> Dictionary:
+	var translation := _pick_3d_translation_gizmo_detail(view_position)
+	var rotation := _pick_3d_rotation_gizmo_detail(view_position)
+	if translation.is_empty():
+		if rotation.is_empty():
+			return {}
+		rotation["type"] = GIZMO_CONTROL_ROTATION
+		return rotation
+	if bool(translation.get("arrowhead", false)) or rotation.is_empty() or float(translation.distance) <= float(rotation.distance) + 1.5:
+		translation["type"] = GIZMO_CONTROL_TRANSLATION
+		return translation
+	rotation["type"] = GIZMO_CONTROL_ROTATION
+	return rotation
+
+
+func _distance_to_2d_segment(point: Vector2, segment_a: Vector2, segment_b: Vector2) -> float:
+	var segment := segment_b - segment_a
+	var length_squared := segment.length_squared()
+	if length_squared <= 0.000001:
+		return point.distance_to(segment_a)
+	var weight := clampf((point - segment_a).dot(segment) / length_squared, 0.0, 1.0)
+	return point.distance_to(segment_a + segment * weight)
+
+
+func _begin_3d_rotation_gizmo_drag(axis_index: int, view_position: Vector2) -> bool:
+	if (
+		axis_index < 0
+		or axis_index > 2
+		or not _texture_3d_session
+		or not _texture_3d_session.has_active_session()
+		or not _texture_3d_session.has_method("set_preview_orientation")
+	):
+		return false
+	_paint_3d_gizmo_drag_start_adjustment = _texture_3d_session.get_preview_adjustment()
+	_paint_3d_orbiting = false
+	_paint_3d_panning = false
+	_stop_3d_freelook()
+	_paint_3d_gizmo_active_axis = axis_index
+	_paint_3d_gizmo_active_control = GIZMO_CONTROL_ROTATION
+	_paint_3d_gizmo_dragging = true
+	_update_3d_transform_gizmo_component_visibility()
+	_paint_3d_gizmo_drag_start_mouse = view_position
+	_paint_3d_gizmo_drag_center = _paint_3d_rotation_gizmo.global_position
+	_paint_3d_gizmo_drag_axis_world = _get_3d_rotation_gizmo_world_axis(axis_index)
+	var preview_rotation := _paint_3d_mesh.global_transform.basis.orthonormalized()
+	_paint_3d_gizmo_drag_axis_preview_local = (
+		preview_rotation.inverse() * _paint_3d_gizmo_drag_axis_world
+	).normalized()
+	_paint_3d_gizmo_drag_start_vector = _get_3d_rotation_gizmo_plane_vector_at(
+		view_position,
+		_paint_3d_gizmo_drag_center,
+		_paint_3d_gizmo_drag_axis_world
+	)
+	if _paint_3d_gizmo_drag_start_vector.length_squared() <= 0.000001:
+		_paint_3d_gizmo_drag_start_vector = _get_nearest_3d_gizmo_ring_vector(view_position, axis_index)
+	_configure_3d_gizmo_drag_fallback(axis_index)
+	_paint_3d_pending_motion = false
+	_hide_3d_brush_preview()
+	_hide_3d_hover_debug_marker("rotation gizmo drag")
+	if _paint_3d_hover_triangle:
+		_paint_3d_hover_triangle.visible = false
+	_update_3d_paint_cursor(false)
+	_update_3d_rotation_gizmo_materials()
+	if _paint_3d_gizmo_drag_start_vector.length_squared() <= 0.000001:
+		_paint_3d_gizmo_dragging = false
+		_paint_3d_gizmo_active_control = GIZMO_CONTROL_NONE
+		_paint_3d_gizmo_active_axis = -1
+		_update_3d_transform_gizmo_component_visibility()
+		_update_3d_rotation_gizmo_materials()
+		return false
+	return true
+
+
+func _get_3d_rotation_gizmo_plane_vector(view_position: Vector2, axis_index: int) -> Vector3:
+	if not _paint_3d_camera or not _paint_3d_rotation_gizmo:
+		return Vector3.ZERO
+	return _get_3d_rotation_gizmo_plane_vector_at(
+		view_position,
+		_paint_3d_rotation_gizmo.global_position,
+		_get_3d_rotation_gizmo_world_axis(axis_index)
+	)
+
+
+func _get_3d_rotation_gizmo_plane_vector_at(view_position: Vector2, center: Vector3, axis_world: Vector3) -> Vector3:
+	var ray_origin := _paint_3d_camera.project_ray_origin(view_position)
+	var ray_direction := _paint_3d_camera.project_ray_normal(view_position).normalized()
+	var denominator := axis_world.dot(ray_direction)
+	if absf(denominator) <= 0.0001:
+		return Vector3.ZERO
+	var ray_distance := axis_world.dot(center - ray_origin) / denominator
+	if ray_distance < 0.0:
+		return Vector3.ZERO
+	var vector := ray_origin + ray_direction * ray_distance - center
+	return vector.normalized() if vector.length_squared() > 0.000001 else Vector3.ZERO
+
+
+func _get_3d_rotation_gizmo_world_axis(axis_index: int) -> Vector3:
+	if not _paint_3d_rotation_gizmo:
+		return _get_3d_gizmo_axis(axis_index)
+	return (_paint_3d_rotation_gizmo.global_transform.basis * _get_3d_gizmo_axis(axis_index)).normalized()
+
+
+func _get_nearest_3d_gizmo_ring_vector(view_position: Vector2, axis_index: int) -> Vector3:
+	var best_distance := INF
+	var best_vector := Vector3.ZERO
+	var center := _paint_3d_rotation_gizmo.global_position
+	var gizmo_transform := _paint_3d_rotation_gizmo.global_transform
+	for segment in range(PAINT_3D_GIZMO_SEGMENTS):
+		var angle := TAU * float(segment) / float(PAINT_3D_GIZMO_SEGMENTS)
+		var world_point := gizmo_transform * _get_3d_gizmo_ring_point(axis_index, angle)
+		var screen_point := _paint_3d_camera.unproject_position(world_point)
+		var distance := view_position.distance_squared_to(screen_point)
+		if distance < best_distance:
+			best_distance = distance
+			best_vector = (world_point - center).normalized()
+	return best_vector
+
+
+func _configure_3d_gizmo_drag_fallback(_axis_index: int) -> void:
+	_paint_3d_gizmo_drag_fallback_tangent = Vector2.RIGHT
+	_paint_3d_gizmo_drag_fallback_radius = PAINT_3D_GIZMO_RADIUS_PIXELS
+	if not _paint_3d_camera or _paint_3d_gizmo_drag_start_vector.length_squared() <= 0.000001:
+		return
+	var center := _paint_3d_gizmo_drag_center
+	var axis_world := _paint_3d_gizmo_drag_axis_world
+	var radius := _get_3d_rotation_gizmo_world_scale()
+	var start_point := center + _paint_3d_gizmo_drag_start_vector * radius
+	var rotated_point := center + _paint_3d_gizmo_drag_start_vector.rotated(axis_world, 0.08) * radius
+	var tangent := (
+		_paint_3d_camera.unproject_position(rotated_point)
+		- _paint_3d_camera.unproject_position(start_point)
+	)
+	if tangent.length_squared() > 0.000001:
+		_paint_3d_gizmo_drag_fallback_tangent = tangent.normalized()
+	_paint_3d_gizmo_drag_fallback_radius = maxf(
+		8.0,
+		_paint_3d_camera.unproject_position(center).distance_to(
+			_paint_3d_camera.unproject_position(start_point)
+		)
+	)
+
+
+func _update_3d_rotation_gizmo_drag(view_position: Vector2, snap: bool) -> void:
+	if not _paint_3d_gizmo_dragging or not _texture_3d_session:
+		return
+	var current_vector := _get_3d_rotation_gizmo_plane_vector_at(
+		view_position,
+		_paint_3d_gizmo_drag_center,
+		_paint_3d_gizmo_drag_axis_world
+	)
+	var angle := 0.0
+	if current_vector.length_squared() > 0.000001:
+		angle = atan2(
+			_paint_3d_gizmo_drag_axis_world.dot(_paint_3d_gizmo_drag_start_vector.cross(current_vector)),
+			_paint_3d_gizmo_drag_start_vector.dot(current_vector)
+		)
+	else:
+		angle = (
+			(view_position - _paint_3d_gizmo_drag_start_mouse).dot(_paint_3d_gizmo_drag_fallback_tangent)
+			/ _paint_3d_gizmo_drag_fallback_radius
+		)
+	if snap:
+		angle = snappedf(angle, PAINT_3D_GIZMO_SNAP_RADIANS)
+	var rotation := Transform3D(Basis(_paint_3d_gizmo_drag_axis_preview_local, angle), Vector3.ZERO)
+	_texture_3d_session.set_preview_adjustment(_paint_3d_gizmo_drag_start_adjustment * rotation)
+	_apply_3d_preview_transform(false)
+
+
+func _begin_3d_translation_gizmo_drag(axis_index: int, view_position: Vector2) -> bool:
+	if axis_index < 0 or axis_index > 2 or not _texture_3d_session or not _texture_3d_session.has_active_session():
+		return false
+	_paint_3d_gizmo_drag_start_adjustment = _texture_3d_session.get_preview_adjustment()
+	_paint_3d_orbiting = false
+	_paint_3d_panning = false
+	_stop_3d_freelook()
+	_paint_3d_gizmo_active_control = GIZMO_CONTROL_TRANSLATION
+	_paint_3d_gizmo_active_axis = axis_index
+	_paint_3d_gizmo_dragging = true
+	_paint_3d_gizmo_drag_start_mouse = view_position
+	_paint_3d_gizmo_drag_center = _paint_3d_rotation_gizmo.global_position
+	_paint_3d_gizmo_drag_axis_world = _get_3d_rotation_gizmo_world_axis(axis_index)
+	var closest := _get_3d_gizmo_ray_axis_parameter(view_position, _paint_3d_gizmo_drag_center, _paint_3d_gizmo_drag_axis_world)
+	_paint_3d_gizmo_drag_use_screen_fallback = not bool(closest.get("valid", false))
+	_paint_3d_gizmo_drag_start_axis_parameter = float(closest.get("parameter", 0.0))
+	_configure_3d_translation_drag_fallback()
+	_update_3d_transform_gizmo_component_visibility()
+	_paint_3d_pending_motion = false
+	_hide_3d_brush_preview()
+	_hide_3d_hover_debug_marker("translation gizmo drag")
+	if _paint_3d_hover_triangle:
+		_paint_3d_hover_triangle.visible = false
+	_update_3d_paint_cursor(false)
+	_update_3d_rotation_gizmo_materials()
+	return true
+
+
+func _get_3d_gizmo_ray_axis_parameter(view_position: Vector2, center: Vector3, axis_world: Vector3) -> Dictionary:
+	if not _paint_3d_camera:
+		return {}
+	var ray_origin := _paint_3d_camera.project_ray_origin(view_position)
+	var ray_direction := _paint_3d_camera.project_ray_normal(view_position).normalized()
+	var parallel := ray_direction.dot(axis_world)
+	var denominator := 1.0 - parallel * parallel
+	if denominator <= 0.002:
+		return {}
+	var offset := ray_origin - center
+	return {
+		"valid": true,
+		"parameter": (axis_world.dot(offset) - parallel * ray_direction.dot(offset)) / denominator,
+	}
+
+
+func _configure_3d_translation_drag_fallback() -> void:
+	_paint_3d_gizmo_drag_screen_axis = Vector2.RIGHT
+	_paint_3d_gizmo_drag_world_per_pixel = _get_3d_rotation_gizmo_world_scale() / PAINT_3D_GIZMO_RADIUS_PIXELS
+	if not _paint_3d_camera:
+		return
+	var radius := _get_3d_rotation_gizmo_world_scale()
+	var center_screen := _paint_3d_camera.unproject_position(_paint_3d_gizmo_drag_center)
+	var axis_screen := _paint_3d_camera.unproject_position(
+		_paint_3d_gizmo_drag_center + _paint_3d_gizmo_drag_axis_world * radius
+	) - center_screen
+	if axis_screen.length_squared() > 4.0:
+		_paint_3d_gizmo_drag_screen_axis = axis_screen.normalized()
+		_paint_3d_gizmo_drag_world_per_pixel = radius / axis_screen.length()
+	else:
+		_paint_3d_gizmo_drag_use_screen_fallback = true
+
+
+func _update_3d_translation_gizmo_drag(view_position: Vector2) -> void:
+	if not _paint_3d_gizmo_dragging or _paint_3d_gizmo_active_control != GIZMO_CONTROL_TRANSLATION or not _texture_3d_session:
+		return
+	var world_delta := 0.0
+	if not _paint_3d_gizmo_drag_use_screen_fallback:
+		var closest := _get_3d_gizmo_ray_axis_parameter(view_position, _paint_3d_gizmo_drag_center, _paint_3d_gizmo_drag_axis_world)
+		if bool(closest.get("valid", false)):
+			world_delta = float(closest.parameter) - _paint_3d_gizmo_drag_start_axis_parameter
+		else:
+			_paint_3d_gizmo_drag_use_screen_fallback = true
+	if _paint_3d_gizmo_drag_use_screen_fallback:
+		world_delta = (
+			(view_position - _paint_3d_gizmo_drag_start_mouse).dot(_paint_3d_gizmo_drag_screen_axis)
+			* _paint_3d_gizmo_drag_world_per_pixel
+		)
+	var base_basis: Basis = _texture_3d_session.imported_source_transform.basis
+	var local_delta := base_basis.inverse() * (_paint_3d_gizmo_drag_axis_world * world_delta)
+	var adjustment := _paint_3d_gizmo_drag_start_adjustment
+	adjustment.origin = _paint_3d_gizmo_drag_start_adjustment.origin + local_delta
+	_texture_3d_session.set_preview_adjustment(adjustment)
+	_apply_3d_preview_transform(false)
+
+
+func _end_3d_rotation_gizmo_drag() -> void:
+	if not _paint_3d_gizmo_dragging:
+		return
+	_paint_3d_gizmo_dragging = false
+	_paint_3d_gizmo_active_control = GIZMO_CONTROL_NONE
+	_paint_3d_gizmo_active_axis = -1
+	_paint_3d_gizmo_drag_axis_preview_local = Vector3.ZERO
+	_update_3d_transform_gizmo_component_visibility()
+	_update_3d_rotation_gizmo_materials()
+
+
+func _cancel_3d_rotation_gizmo_drag(restore_orientation := true) -> void:
+	var was_dragging := _paint_3d_gizmo_dragging
+	if was_dragging and restore_orientation and _texture_3d_session and _texture_3d_session.has_method("set_preview_adjustment"):
+		_texture_3d_session.set_preview_adjustment(_paint_3d_gizmo_drag_start_adjustment)
+		_apply_3d_preview_transform(false)
+	_paint_3d_gizmo_dragging = false
+	_paint_3d_gizmo_active_control = GIZMO_CONTROL_NONE
+	_paint_3d_gizmo_active_axis = -1
+	_paint_3d_gizmo_drag_axis_preview_local = Vector3.ZERO
+	_update_3d_transform_gizmo_component_visibility()
+	_update_3d_rotation_gizmo_materials()
+
+
+func _establish_3d_preview_stage(mesh: Mesh) -> void:
+	if not _paint_3d_mesh or not mesh:
+		return
+	var aabb := _get_transformed_3d_aabb(mesh.get_aabb(), _paint_3d_mesh.transform)
+	var largest_axis := maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
+	_update_3d_paint_stage(aabb, maxf(PAINT_3D_STAGE_MIN_SIZE, largest_axis * PAINT_3D_STAGE_PADDING))
+
+
 func _update_3d_paint_stage(aabb: AABB, stage_size: float) -> void:
 	if not _paint_3d_stage_root or not _paint_3d_stage_floor or not _paint_3d_stage_grid:
 		return
@@ -6153,46 +9957,85 @@ func _update_3d_paint_stage(aabb: AABB, stage_size: float) -> void:
 		center = Vector3.ZERO
 		floor_y = -0.5
 	_paint_3d_stage_root.position = Vector3(center.x, floor_y - 0.01, center.z)
+	var grid_extent := _get_3d_stage_grid_extent(stage_size)
 	var floor_mesh := _paint_3d_stage_floor.mesh as PlaneMesh
 	if floor_mesh:
-		floor_mesh.size = Vector2(stage_size, stage_size)
+		floor_mesh.size = Vector2(grid_extent, grid_extent)
 	_paint_3d_stage_grid.mesh = _make_3d_stage_grid_mesh(stage_size)
+	var grid_material := _paint_3d_stage_grid.material_override as ShaderMaterial
+	if grid_material:
+		_configure_3d_stage_grid_fade(grid_material, grid_extent)
+
+
+func _get_3d_stage_grid_extent(stage_size: float) -> float:
+	return stage_size * float(PAINT_3D_STAGE_GRID_EXTENT_MULTIPLIER)
 
 
 func _make_3d_stage_grid_mesh(stage_size: float) -> ImmediateMesh:
 	var mesh := ImmediateMesh.new()
-	var half_size := stage_size * 0.5
-	var line_count := PAINT_3D_STAGE_GRID_LINES
-	var step := stage_size / float(line_count)
+	var grid_extent := _get_3d_stage_grid_extent(stage_size)
+	var half_size := grid_extent * 0.5
+	var line_count := PAINT_3D_STAGE_GRID_LINES * PAINT_3D_STAGE_GRID_EXTENT_MULTIPLIER
+	var step := grid_extent / float(line_count)
 	var minor_color := Color(0.42, 0.44, 0.46, 0.26)
 	var major_color := Color(0.62, 0.65, 0.68, 0.42)
 	var axis_x_color := Color(0.85, 0.32, 0.28, 0.62)
+	var axis_y_color := Color(0.32, 0.85, 0.28, 0.62)
 	var axis_z_color := Color(0.28, 0.48, 0.9, 0.62)
 	mesh.surface_begin(Mesh.PRIMITIVE_LINES)
 	for index in range(line_count + 1):
 		var offset := -half_size + step * float(index)
 		var color := major_color if index % 4 == 0 else minor_color
 		if is_zero_approx(offset):
-			color = axis_z_color
+			# These vertices vary on X, so the center line is the X axis.
+			color = axis_x_color
 		mesh.surface_set_color(color)
 		mesh.surface_add_vertex(Vector3(-half_size, 0.004, offset))
 		mesh.surface_add_vertex(Vector3(half_size, 0.004, offset))
 		color = major_color if index % 4 == 0 else minor_color
 		if is_zero_approx(offset):
-			color = axis_x_color
+			# These vertices vary on Z, so the center line is the Z axis.
+			color = axis_z_color
 		mesh.surface_set_color(color)
 		mesh.surface_add_vertex(Vector3(offset, 0.005, -half_size))
 		mesh.surface_add_vertex(Vector3(offset, 0.005, half_size))
+	mesh.surface_set_color(axis_y_color)
+	mesh.surface_add_vertex(Vector3(0.0, -half_size, 0.0))
+	mesh.surface_add_vertex(Vector3(0.0, half_size, 0.0))
 	mesh.surface_end()
 	return mesh
 
 
 func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		if _cancel_3d_surface_shape("Canceled 3D shape preview.", true):
+			_paint_3d_view.accept_event()
+			return
+		if _paint_3d_gizmo_dragging:
+			_cancel_3d_rotation_gizmo_drag(true)
+			_paint_3d_view.accept_event()
+		return
 	if event is InputEventMouseButton:
 		if event.pressed and _paint_3d_view:
 			_paint_3d_view.grab_focus()
+		if _paint_3d_gizmo_dragging:
+			if event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
+				_end_3d_rotation_gizmo_drag()
+			_paint_3d_view.accept_event()
+			return
+		var gizmo_control := _pick_3d_transform_gizmo_control(event.position)
+		var gizmo_axis := int(gizmo_control.get("axis", -1))
+		var gizmo_type := int(gizmo_control.get("type", GIZMO_CONTROL_NONE))
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
+				var began_gizmo_drag := false
+				if gizmo_type == GIZMO_CONTROL_TRANSLATION:
+					began_gizmo_drag = _begin_3d_translation_gizmo_drag(gizmo_axis, event.position)
+				elif gizmo_type == GIZMO_CONTROL_ROTATION:
+					began_gizmo_drag = _begin_3d_rotation_gizmo_drag(gizmo_axis, event.position)
+				if began_gizmo_drag:
+					_paint_3d_view.accept_event()
+					return
 				_paint_3d_pending_motion = false
 				var hit := _pick_3d_paint_uv(event.position)
 				if not hit.is_empty():
@@ -6201,10 +10044,17 @@ func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
 					_paint_3d_drawing = _on_3d_paint_uv_started(hit)
 					_paint_3d_view.accept_event()
 			elif _paint_3d_drawing:
-				_process_pending_3d_pointer_motion()
 				_paint_3d_drawing = false
-				_on_3d_paint_uv_finished()
+				if not _paint_3d_surface_shape_state.is_empty():
+					_paint_3d_pending_motion = false
+					_finish_3d_surface_shape_at(event.position)
+				else:
+					_process_pending_3d_pointer_motion()
+					_on_3d_paint_uv_finished()
 				_paint_3d_view.accept_event()
+		elif event.pressed and gizmo_axis >= 0 and event.button_index in [MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE]:
+			_paint_3d_view.accept_event()
+			return
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			if event.pressed:
 				_start_3d_freelook()
@@ -6214,6 +10064,8 @@ func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
 			_paint_3d_view.accept_event()
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			var navigation_mode := _get_3d_mouse_navigation_mode(event)
+			if event.pressed and navigation_mode == NAVIGATION_3D_ORBIT:
+				_release_3d_editor_camera_basis_override()
 			_paint_3d_panning = event.pressed and navigation_mode == NAVIGATION_3D_PAN
 			_paint_3d_orbiting = event.pressed and navigation_mode == NAVIGATION_3D_ORBIT
 			_paint_3d_last_mouse_position = event.position
@@ -6237,7 +10089,13 @@ func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
 	elif event is InputEventMouseMotion:
 		var delta: Vector2 = event.relative
 		_paint_3d_last_mouse_position = event.position
-		if _paint_3d_drawing:
+		if _paint_3d_gizmo_dragging:
+			if _paint_3d_gizmo_active_control == GIZMO_CONTROL_TRANSLATION:
+				_update_3d_translation_gizmo_drag(event.position)
+			else:
+				_update_3d_rotation_gizmo_drag(event.position, event.shift_pressed)
+			_paint_3d_view.accept_event()
+		elif _paint_3d_drawing:
 			_paint_3d_pending_motion_position = event.position
 			_paint_3d_pending_motion = true
 			_paint_3d_view.accept_event()
@@ -6255,8 +10113,21 @@ func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
 			_freelook_3d_paint_camera(delta)
 			_paint_3d_view.accept_event()
 		else:
-			_paint_3d_pending_motion_position = event.position
-			_paint_3d_pending_motion = true
+			var gizmo_control := _pick_3d_transform_gizmo_control(event.position)
+			var gizmo_axis := int(gizmo_control.get("axis", -1))
+			var gizmo_type := int(gizmo_control.get("type", GIZMO_CONTROL_NONE))
+			_set_3d_transform_gizmo_hover(gizmo_type, gizmo_axis)
+			if gizmo_axis >= 0:
+				_paint_3d_pending_motion = false
+				_hide_3d_brush_preview()
+				_hide_3d_hover_debug_marker("transform gizmo hover")
+				if _paint_3d_hover_triangle:
+					_paint_3d_hover_triangle.visible = false
+				_update_3d_paint_cursor(false)
+				_paint_3d_view.accept_event()
+			else:
+				_paint_3d_pending_motion_position = event.position
+				_paint_3d_pending_motion = true
 	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F:
 		if _paint_3d_mesh and _paint_3d_mesh.mesh:
 			_frame_3d_paint_mesh(_paint_3d_mesh.mesh)
@@ -6267,14 +10138,17 @@ func _process_pending_3d_pointer_motion() -> void:
 	if not _paint_3d_pending_motion:
 		return
 	_paint_3d_pending_motion = false
-	if _paint_3d_orbiting or _paint_3d_panning or _paint_3d_freelooking:
+	if _paint_3d_orbiting or _paint_3d_panning or _paint_3d_freelooking or _paint_3d_gizmo_dragging or _paint_3d_gizmo_hover_axis >= 0:
 		return
 	var hit := _pick_3d_paint_uv(_paint_3d_pending_motion_position)
 	if hit.is_empty():
 		_hide_3d_brush_preview()
 		_update_3d_paint_cursor(false)
 		if _paint_3d_drawing:
-			_paint_3d_last_stroke_hit.clear()
+			if not _paint_3d_surface_shape_state.is_empty():
+				_invalidate_3d_surface_shape("The pointer is not over the active 3D surface.")
+			else:
+				_paint_3d_last_stroke_hit.clear()
 		return
 	_update_3d_brush_preview(hit)
 	_update_2d_hover_from_3d_hit(hit)
@@ -6833,9 +10707,12 @@ func _update_3d_paint_cursor(has_surface_hit: bool) -> void:
 	if not _paint_3d_view:
 		return
 	var cursor_shape := Control.CURSOR_ARROW
-	if _paint_3d_orbiting or _paint_3d_panning or _paint_3d_freelooking:
+	if _paint_3d_orbiting or _paint_3d_panning or _paint_3d_freelooking or _paint_3d_gizmo_dragging or _paint_3d_gizmo_hover_axis >= 0:
 		cursor_shape = Control.CURSOR_DRAG
-	elif has_surface_hit and _canvas and (_canvas.active_tool == GDDrawCanvasControl.ToolMode.BRUSH or _canvas.active_tool == GDDrawCanvasControl.ToolMode.ERASER):
+	elif has_surface_hit and _canvas and (
+		_canvas.active_tool in [GDDrawCanvasControl.ToolMode.BRUSH, GDDrawCanvasControl.ToolMode.ERASER]
+		or _is_3d_surface_shape_tool(_canvas.active_tool)
+	):
 		cursor_shape = Control.CURSOR_CROSS
 	_paint_3d_view.mouse_default_cursor_shape = cursor_shape
 	# SplitContainer can leave its resize cursor active after the pointer enters
@@ -6845,6 +10722,8 @@ func _update_3d_paint_cursor(has_surface_hit: bool) -> void:
 
 
 func _on_3d_paint_view_mouse_exited() -> void:
+	_cancel_3d_rotation_gizmo_drag(true)
+	_set_3d_rotation_gizmo_hover_axis(-1)
 	Input.set_default_cursor_shape(Input.CURSOR_ARROW)
 
 
@@ -6929,6 +10808,17 @@ func _get_3d_brush_preview_color() -> Color:
 	return color
 
 
+func _refresh_3d_brush_preview_color() -> void:
+	if not _paint_3d_brush_preview:
+		return
+	var material := _paint_3d_brush_preview.material_override as StandardMaterial3D
+	if not material:
+		return
+	var color := _get_3d_brush_preview_color()
+	material.albedo_color = color
+	material.emission = color
+
+
 func _begin_3d_soft_brush_stroke() -> void:
 	if not _canvas or _paint_3d_soft_brush_active:
 		return
@@ -6959,6 +10849,7 @@ func _pan_3d_paint_camera(delta: Vector2) -> void:
 func _start_3d_freelook() -> void:
 	if _paint_3d_freelooking:
 		return
+	_release_3d_editor_camera_basis_override()
 	_paint_3d_freelooking = true
 	_paint_3d_previous_mouse_mode = Input.mouse_mode
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -7009,13 +10900,20 @@ func _move_3d_freelook_camera(forward_axis: float, right_axis: float, vertical_a
 func _update_3d_paint_camera() -> void:
 	if not _paint_3d_camera:
 		return
-	var offset := Vector3(
-		cos(_paint_3d_pitch) * sin(_paint_3d_yaw),
-		sin(_paint_3d_pitch),
-		cos(_paint_3d_pitch) * cos(_paint_3d_yaw)
-	) * _paint_3d_distance
-	var camera_position := _paint_3d_target + offset
-	_paint_3d_camera.look_at_from_position(camera_position, _paint_3d_target, Vector3.UP)
+	if _paint_3d_camera_basis_override_active:
+		var camera_basis := _paint_3d_camera_basis_override.orthonormalized()
+		var camera_position := _paint_3d_target + camera_basis.z * _paint_3d_distance
+		_paint_3d_camera.transform = Transform3D(camera_basis, camera_position)
+	else:
+		var offset := Vector3(
+			cos(_paint_3d_pitch) * sin(_paint_3d_yaw),
+			sin(_paint_3d_pitch),
+			cos(_paint_3d_pitch) * cos(_paint_3d_yaw)
+		) * _paint_3d_distance
+		var camera_position := _paint_3d_target + offset
+		_paint_3d_camera.look_at_from_position(camera_position, _paint_3d_target, Vector3.UP)
+	_update_preview_light_transform()
+	_update_3d_rotation_gizmo_transform()
 	_update_3d_view_readout()
 
 
@@ -7023,8 +10921,10 @@ func _resize_3d_paint_viewport() -> void:
 	if not _paint_3d_viewport or not _paint_3d_view:
 		return
 	if _paint_3d_view.stretch:
+		_update_3d_rotation_gizmo_transform()
 		return
 	_paint_3d_viewport.size = Vector2i(maxi(1, roundi(_paint_3d_view.size.x)), maxi(1, roundi(_paint_3d_view.size.y)))
+	_update_3d_rotation_gizmo_transform()
 
 
 func _connect_editor_selection_changed() -> void:
@@ -7343,6 +11243,14 @@ func _disconnect_window_file_drop() -> void:
 
 
 func _on_window_files_dropped(files: PackedStringArray) -> void:
+	if _is_mouse_over_custom_fill_drop_target():
+		for file in files:
+			var custom_path := _normalize_filesystem_path(file)
+			if _is_supported_filesystem_image_path(custom_path):
+				_set_staged_custom_fill_from_path(custom_path)
+				return
+		_set_status("Drop a supported image file into the Custom fill source area.")
+		return
 	if not _is_mouse_over_canvas_area():
 		return
 	for file in files:
@@ -7351,6 +11259,16 @@ func _on_window_files_dropped(files: PackedStringArray) -> void:
 			_on_canvas_image_drop_requested(path)
 			return
 	_set_status("Drop a supported image file onto the canvas.")
+
+
+func _is_mouse_over_custom_fill_drop_target() -> bool:
+	if not _fill_settings_overlay or not _fill_settings_overlay.visible or not _custom_fill_drop_target or not _custom_fill_drop_target.is_visible_in_tree():
+		return false
+	var window := _file_drop_window if _file_drop_window else get_window()
+	if not window:
+		return _custom_fill_drop_target.get_global_rect().has_point(_custom_fill_drop_target.get_global_mouse_position())
+	var target_screen_position := Vector2(window.position) + _custom_fill_drop_target.get_global_rect().position
+	return Rect2(target_screen_position, _custom_fill_drop_target.size).has_point(Vector2(DisplayServer.mouse_get_position()))
 
 
 func _is_mouse_over_canvas_area() -> bool:
@@ -7378,13 +11296,97 @@ func _create_sprite() -> void:
 	_set_status(str(result.get(GDDrawSpriteCreatorHelper.MESSAGE, "")))
 
 
-func _create_csg_box() -> void:
-	if not _canvas or not _canvas.has_visible_pixels():
-		_set_status("Draw or load visible pixels before creating a CSGBox3D.")
-		_sync_menu_state()
+func _show_create_textured_csg_dialog() -> void:
+	_ensure_helpers()
+	if not _create_textured_csg_overlay:
+		_set_status("The CSG creation dialog is not ready yet.")
 		return
-	var result: Dictionary = _sprite_creator.create_csg_box(_plugin, _canvas.get_image_copy(), _get_default_save_dir())
+	if _settings_overlay:
+		_settings_overlay.visible = false
+	if _fill_settings_overlay:
+		_fill_settings_overlay.visible = false
+	if _update_available_overlay:
+		_update_available_overlay.visible = false
+	var overlay_parent := _create_textured_csg_overlay.get_parent()
+	if overlay_parent:
+		overlay_parent.move_child(_create_textured_csg_overlay, overlay_parent.get_child_count() - 1)
+	_update_create_textured_csg_validation()
+	_create_textured_csg_overlay.visible = true
+	if _create_textured_csg_shape:
+		_create_textured_csg_shape.grab_focus()
+
+
+func _close_create_textured_csg_overlay() -> void:
+	if _create_textured_csg_overlay:
+		_create_textured_csg_overlay.visible = false
+
+
+# Compatibility wrapper for the previous dock entry point.
+func _create_csg_box() -> void:
+	_show_create_textured_csg_dialog()
+
+
+func _get_create_textured_csg_options() -> Dictionary:
+	var shape := GDDrawSpriteCreatorHelper.CSGShape.BOX
+	if _create_textured_csg_shape:
+		shape = _create_textured_csg_shape.get_selected_id()
+	return {
+		GDDrawSpriteCreatorHelper.OPTION_SHAPE: shape,
+		GDDrawSpriteCreatorHelper.OPTION_ASSIGN_CURRENT_IMAGE: (
+			_create_textured_csg_assign_image != null
+			and _create_textured_csg_assign_image.button_pressed
+		),
+		GDDrawSpriteCreatorHelper.OPTION_SELECT_CREATED_NODE: (
+			_create_textured_csg_select_node != null
+			and _create_textured_csg_select_node.button_pressed
+		),
+		GDDrawSpriteCreatorHelper.OPTION_ENABLE_COLLISION: (
+			_create_textured_csg_enable_collision != null
+			and _create_textured_csg_enable_collision.button_pressed
+		),
+	}
+
+
+func _update_create_textured_csg_validation(_unused: Variant = null) -> void:
+	if not _create_textured_csg_validation or not _create_textured_csg_overlay:
+		return
+	_ensure_helpers()
+	var options := _get_create_textured_csg_options()
+	var image: Image
+	if options[GDDrawSpriteCreatorHelper.OPTION_ASSIGN_CURRENT_IMAGE] and _canvas:
+		image = _canvas.get_image_copy()
+	var result: Dictionary = _sprite_creator.validate_csg_creation(
+		_plugin,
+		image,
+		_get_default_save_dir(),
+		options
+	)
+	var valid: bool = result.get(GDDrawSpriteCreatorHelper.SUCCESS, false)
+	_create_textured_csg_validation.text = str(result.get(GDDrawSpriteCreatorHelper.MESSAGE, ""))
+	_create_textured_csg_validation.add_theme_color_override(
+		"font_color",
+		get_theme_color("success_color", "Editor") if valid else get_theme_color("error_color", "Editor")
+	)
+	if _create_textured_csg_create_button:
+		_create_textured_csg_create_button.disabled = not valid
+
+
+func _confirm_create_textured_csg() -> void:
+	var options := _get_create_textured_csg_options()
+	var image: Image
+	if options[GDDrawSpriteCreatorHelper.OPTION_ASSIGN_CURRENT_IMAGE] and _canvas:
+		image = _canvas.get_image_copy()
+	var result: Dictionary = _sprite_creator.create_textured_csg(
+		_plugin,
+		image,
+		_get_default_save_dir(),
+		options
+	)
 	_set_status(str(result.get(GDDrawSpriteCreatorHelper.MESSAGE, "")))
+	if result.get(GDDrawSpriteCreatorHelper.SUCCESS, false):
+		_close_create_textured_csg_overlay()
+	else:
+		_update_create_textured_csg_validation()
 
 
 func _save_png_to_path(path: String) -> void:
@@ -7400,7 +11402,7 @@ func _save_png_to_path(path: String) -> void:
 func _save_2d_document_to_path(path: String) -> bool:
 	var normalized_path := _normalize_png_path(path)
 	if normalized_path.is_empty():
-		_set_status("Choose a PNG path inside res://.")
+		_set_status("Choose a PNG path inside res:// and outside res://addons/GDDraw.")
 		return false
 
 	var save_dir := normalized_path.get_base_dir()
@@ -7409,6 +11411,7 @@ func _save_2d_document_to_path(path: String) -> bool:
 		_set_status("Could not create save folder. Error: " + str(error))
 		return false
 
+	_canvas.finish_text_draft(true)
 	var saved_image: Image = _canvas.get_image_copy()
 	error = saved_image.save_png(normalized_path)
 	if error != OK:
@@ -7454,7 +11457,7 @@ func _set_2d_document_baseline(path: String, image: Image) -> void:
 func _is_2d_document_dirty() -> bool:
 	if not _canvas or not _document_baseline_image:
 		return false
-	return not _images_equal_rgba8(_canvas.get_image_copy(), _document_baseline_image)
+	return _canvas.has_text_draft() or not _images_equal_rgba8(_canvas.get_image_copy(), _document_baseline_image)
 
 
 func _images_equal_rgba8(left: Image, right: Image) -> bool:
@@ -7492,10 +11495,29 @@ func _get_default_save_dir() -> String:
 	return _png_io.get_default_save_dir(_get_editor_settings())
 
 
+func _get_default_font_dir() -> String:
+	return StoragePaths.get_default_font_dir(_get_editor_settings())
+
+
+func _set_default_font_dir(path: String) -> void:
+	StoragePaths.set_default_font_dir(_get_editor_settings(), path)
+
+
+func _font_directory_exists(path: String) -> bool:
+	if path.strip_edges().is_empty():
+		return false
+	var filesystem_path := ProjectSettings.globalize_path(path) if path.begins_with("res://") or path.begins_with("user://") else path
+	return DirAccess.dir_exists_absolute(filesystem_path)
+
+
+func _font_directory_dialog_path(path: String) -> String:
+	return ProjectSettings.globalize_path(path) if path.begins_with("res://") or path.begins_with("user://") else path
+
+
 func _set_default_save_dir(path: String) -> void:
 	var normalized_path := path.strip_edges()
 	if not _png_io.set_default_save_dir(_get_editor_settings(), normalized_path):
-		_set_status("Default save location must be inside res://.")
+		_set_status("Default save location must be inside res:// and outside res://addons/GDDraw.")
 		return
 	if _save_location:
 		_save_location.text = normalized_path
@@ -7540,7 +11562,7 @@ func _parse_canvas_size_string(value: String) -> Vector2i:
 	))
 
 
-func _get_editor_settings() -> EditorSettings:
+func _get_editor_settings() -> Object:
 	if not _plugin:
 		return null
 	return _plugin.get_editor_interface().get_editor_settings()
@@ -7556,17 +11578,13 @@ func _on_save_location_focus_exited() -> void:
 
 
 func _apply_save_location(path: String) -> void:
-	var normalized_path := path.strip_edges()
+	var normalized_path := StoragePaths.normalize_path(path)
 	if normalized_path.is_empty():
 		normalized_path = GDDrawPngIOHelper.DEFAULT_SAVE_DIR
-	if not normalized_path.begins_with("res://"):
-		_set_status("Default save location must be inside res://.")
+	if not StoragePaths.is_writable_project_path(normalized_path):
+		_set_status("Default save location must be inside res:// and outside res://addons/GDDraw.")
 		if _save_location:
 			_save_location.text = _get_default_save_dir()
-		return
-	var error := _ensure_resource_dir(normalized_path)
-	if error != OK:
-		_set_status("Could not create default save folder. Error: " + str(error))
 		return
 	_set_default_save_dir(normalized_path)
 	_set_status("Default save location set to " + normalized_path)
@@ -7576,13 +11594,50 @@ func _show_save_location_dialog() -> void:
 	if not _save_location_dialog:
 		return
 	var save_dir := _get_default_save_dir()
-	_ensure_resource_dir(save_dir)
 	_save_location_dialog.current_dir = save_dir
 	_save_location_dialog.popup_centered_ratio(0.75)
 
 
 func _on_save_location_selected(path: String) -> void:
 	_apply_save_location(path)
+
+
+func _on_font_location_submitted(path: String) -> void:
+	_apply_font_location(path)
+
+
+func _on_font_location_focus_exited() -> void:
+	if _font_location:
+		_apply_font_location(_font_location.text)
+
+
+func _apply_font_location(path: String) -> void:
+	var normalized_path := path.strip_edges().replace("\\", "/")
+	if normalized_path.is_empty():
+		normalized_path = DEFAULT_FONT_DIRECTORY
+	if not _font_directory_exists(normalized_path):
+		_set_status("Font location must be an existing folder.")
+		if _font_location:
+			_font_location.text = _get_default_font_dir()
+		return
+	_set_default_font_dir(normalized_path)
+	if _font_location:
+		_font_location.text = normalized_path
+	_refresh_text_font_selector()
+	_set_status("Custom font location set to " + normalized_path)
+
+
+func _show_font_location_dialog() -> void:
+	if not _font_location_dialog:
+		return
+	var font_dir := _get_default_font_dir()
+	if _font_directory_exists(font_dir):
+		_font_location_dialog.current_dir = _font_directory_dialog_path(font_dir)
+	_font_location_dialog.popup_centered_ratio(0.75)
+
+
+func _on_font_location_selected(path: String) -> void:
+	_apply_font_location(path)
 
 
 func _push_undo(image: Image) -> void:
@@ -7610,10 +11665,13 @@ func _update_selection_action_buttons() -> void:
 	]:
 		if button:
 			button.disabled = not has_selection
+			_update_icon_button_icon(button)
 	if _selection_crop_button:
 		_selection_crop_button.disabled = not has_selection or has_active_texture
+		_update_icon_button_icon(_selection_crop_button)
 	if _selection_paste_button:
 		_selection_paste_button.disabled = not has_paste
+		_update_icon_button_icon(_selection_paste_button)
 	if _selection_rotate_amount:
 		_selection_rotate_amount.editable = has_selection
 	if _selection_commit_separator:
@@ -7636,15 +11694,22 @@ func _has_paste_available() -> bool:
 func _update_tool_options_visibility() -> void:
 	if not _canvas:
 		return
+	_update_text_rotation_controls()
 	var tool: int = _canvas.active_tool
 	var is_shape_tool := tool == GDDrawCanvasControl.ToolMode.LINE or tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE
 	var is_selection_tool := tool == GDDrawCanvasControl.ToolMode.SELECT or tool == GDDrawCanvasControl.ToolMode.LASSO_SELECT
 	var is_stroke_tool := tool == GDDrawCanvasControl.ToolMode.BRUSH or tool == GDDrawCanvasControl.ToolMode.ERASER
-	_move_shared_paint_controls(_shape_options if is_shape_tool else _brush_options)
+	var is_text_tool := tool == GDDrawCanvasControl.ToolMode.TEXT
+	if is_text_tool:
+		_move_shared_color_controls(_text_options)
+	else:
+		_move_shared_paint_controls(_shape_options if is_shape_tool else _brush_options)
 	if _brush_options:
 		_brush_options.visible = tool == GDDrawCanvasControl.ToolMode.BRUSH or tool == GDDrawCanvasControl.ToolMode.ERASER or tool == GDDrawCanvasControl.ToolMode.FILL
 	if _shape_options:
 		_shape_options.visible = is_shape_tool
+	if _text_options:
+		_text_options.visible = is_text_tool
 	if _selection_options:
 		_selection_options.visible = is_selection_tool
 	if _eyedropper_options:
@@ -7661,8 +11726,16 @@ func _update_tool_options_visibility() -> void:
 		_brush_size_label.visible = not is_fill
 	if _brush_size:
 		_brush_size.visible = not is_fill
-	if _paint_color_separator:
-		_paint_color_separator.visible = true
+	if _color_set_separator:
+		_color_set_separator.visible = true
+	if _swap_colors_button:
+		_swap_colors_button.visible = true
+		_swap_colors_button.tooltip_text = "Swap text and text-box colors" if is_text_tool else "Swap foreground and background colors"
+	if _foreground_color_picker:
+		_foreground_color_picker.tooltip_text = "Text color" if is_text_tool else "Foreground color"
+	if _background_color_picker:
+		_background_color_picker.visible = true
+		_background_color_picker.tooltip_text = "Text-box background color" if is_text_tool else "Background color"
 	if _paint_size_separator:
 		_paint_size_separator.visible = not is_fill
 	if _brush_preset:
@@ -7692,19 +11765,42 @@ func _update_tool_options_visibility() -> void:
 		_fill_tolerance.visible = is_fill
 	if _fill_mode:
 		_fill_mode.visible = is_fill
+	if _fill_style:
+		_fill_style.visible = is_fill
+	if _fill_settings_button:
+		_fill_settings_button.visible = is_fill
 	if _fill_end_separator:
 		_fill_end_separator.visible = is_fill
-	if _shape_end_separator:
-		_shape_end_separator.visible = is_shape_tool
+	if _shape_origin_separator:
+		_shape_origin_separator.visible = tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE
+	if _shape_fill_mode:
+		_shape_fill_mode.visible = tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE
+	_update_fill_settings_button()
+
+
+func _move_shared_color_controls(target_row: HBoxContainer) -> void:
+	if not target_row:
+		return
+	for control: Control in [_color_set, _color_set_separator]:
+		if not control:
+			continue
+		var owning_node := control.get_parent()
+		if owning_node != target_row:
+			if owning_node:
+				owning_node.remove_child(control)
+			target_row.add_child(control)
+	if _color_set:
+		target_row.move_child(_color_set, 0)
+	if _color_set_separator:
+		target_row.move_child(_color_set_separator, 1)
 
 
 func _move_shared_paint_controls(target_row: HBoxContainer) -> void:
 	if not target_row:
 		return
 	var shared_controls: Array[Control] = [
-		_color_label,
-		_color_picker,
-		_paint_color_separator,
+		_color_set,
+		_color_set_separator,
 		_brush_size_label,
 		_brush_size,
 		_paint_size_separator,
@@ -7719,43 +11815,45 @@ func _move_shared_paint_controls(target_row: HBoxContainer) -> void:
 			target_row.add_child(control)
 
 	if target_row == _brush_options:
-		_brush_options.move_child(_color_label, 0)
-		_brush_options.move_child(_color_picker, 1)
-		_brush_options.move_child(_paint_color_separator, 2)
+		_brush_options.move_child(_color_set, 0)
+		_brush_options.move_child(_color_set_separator, 1)
 		if _fill_tolerance_label:
-			_brush_options.move_child(_fill_tolerance_label, 3)
+			_brush_options.move_child(_fill_tolerance_label, 2)
 		if _fill_tolerance:
-			_brush_options.move_child(_fill_tolerance, 4)
+			_brush_options.move_child(_fill_tolerance, 3)
 		if _fill_end_separator:
-			_brush_options.move_child(_fill_end_separator, 5)
+			_brush_options.move_child(_fill_end_separator, 4)
 		if _fill_mode:
-			_brush_options.move_child(_fill_mode, 6)
-		_brush_options.move_child(_brush_size_label, 7)
-		_brush_options.move_child(_brush_size, 8)
-		_brush_options.move_child(_paint_size_separator, 9)
+			_brush_options.move_child(_fill_mode, 5)
+		if _fill_style:
+			_brush_options.move_child(_fill_style, 6)
+		if _fill_settings_button:
+			_brush_options.move_child(_fill_settings_button, 7)
+		_brush_options.move_child(_brush_size_label, 8)
+		_brush_options.move_child(_brush_size, 9)
+		_brush_options.move_child(_paint_size_separator, 10)
 		if _brush_head:
-			_brush_options.move_child(_brush_head, 10)
+			_brush_options.move_child(_brush_head, 11)
 		if _brush_head_separator:
-			_brush_options.move_child(_brush_head_separator, 11)
+			_brush_options.move_child(_brush_head_separator, 12)
 		if _pixel_perfect_mode:
-			_brush_options.move_child(_pixel_perfect_mode, 12)
+			_brush_options.move_child(_pixel_perfect_mode, 13)
 		if _tool_brush_hardness_label:
-			_brush_options.move_child(_tool_brush_hardness_label, 13)
+			_brush_options.move_child(_tool_brush_hardness_label, 14)
 		if _tool_brush_hardness:
-			_brush_options.move_child(_tool_brush_hardness, 14)
+			_brush_options.move_child(_tool_brush_hardness, 15)
 	else:
-		_shape_options.move_child(_color_label, 4)
-		_shape_options.move_child(_color_picker, 5)
-		_shape_options.move_child(_paint_color_separator, 6)
-		_shape_options.move_child(_brush_size_label, 7)
-		_shape_options.move_child(_brush_size, 8)
-		_shape_options.move_child(_paint_size_separator, 9)
+		_shape_options.move_child(_color_set, 4)
+		_shape_options.move_child(_color_set_separator, 5)
+		_shape_options.move_child(_brush_size_label, 6)
+		_shape_options.move_child(_brush_size, 7)
+		_shape_options.move_child(_paint_size_separator, 8)
 		if _shape_fill_mode:
-			_shape_options.move_child(_shape_fill_mode, 10)
-		if _shape_end_separator:
-			_shape_options.move_child(_shape_end_separator, 11)
-		if _shape_from_center:
-			_shape_options.move_child(_shape_from_center, 12)
+			_shape_options.move_child(_shape_fill_mode, 9)
+		if _shape_origin_separator:
+			_shape_options.move_child(_shape_origin_separator, 10)
+		if _shape_origin_mode:
+			_shape_options.move_child(_shape_origin_mode, 11)
 
 
 func _record_recent_color(color: Color) -> void:
@@ -7793,12 +11891,7 @@ func _update_recent_color_swatches() -> void:
 
 
 func _on_recent_color_pressed(color: Color) -> void:
-	if _color_picker:
-		_color_picker.set_block_signals(true)
-		_color_picker.color = color
-		_color_picker.set_block_signals(false)
-	if _canvas:
-		_canvas.brush_color = color
+	_set_foreground_color(color)
 	_record_recent_color(color)
 
 
@@ -7818,6 +11911,10 @@ func _shortcut_is_scoped_to_gddraw() -> bool:
 		return false
 	if _save_location_dialog and _save_location_dialog.visible:
 		return false
+	if _font_location_dialog and _font_location_dialog.visible:
+		return false
+	if _text_font_dialog and _text_font_dialog.visible:
+		return false
 
 	var focus_owner := get_viewport().gui_get_focus_owner()
 	if focus_owner and (focus_owner == self or is_ancestor_of(focus_owner)):
@@ -7830,6 +11927,8 @@ func _shortcut_is_scoped_to_gddraw() -> bool:
 
 
 func _select_tool(tool: int) -> void:
+	if _canvas and tool != _canvas.active_tool:
+		_cancel_3d_surface_shape("Canceled 3D shape preview because the tool changed.", true)
 	if tool == GDDrawCanvasControl.ToolMode.LINE or tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE:
 		_active_shape_tool = tool
 	if tool == GDDrawCanvasControl.ToolMode.SELECT or tool == GDDrawCanvasControl.ToolMode.LASSO_SELECT:
@@ -7842,6 +11941,8 @@ func _select_tool(tool: int) -> void:
 		_fill_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.FILL)
 	if _shape_button:
 		_shape_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.LINE or tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE)
+	if _text_button:
+		_text_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.TEXT)
 	if _line_button:
 		_line_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.LINE)
 	if _rectangle_button:
@@ -7870,6 +11971,7 @@ func _has_selected_tool() -> bool:
 		or (_eraser_button and _eraser_button.button_pressed)
 		or (_fill_button and _fill_button.button_pressed)
 		or (_shape_button and _shape_button.button_pressed)
+		or (_text_button and _text_button.button_pressed)
 		or (_line_button and _line_button.button_pressed)
 		or (_rectangle_button and _rectangle_button.button_pressed)
 		or (_ellipse_button and _ellipse_button.button_pressed)
@@ -7894,6 +11996,9 @@ func _update_tool_button_states() -> void:
 	if _shape_button:
 		_update_toggle_button_icon(_shape_button)
 		_shape_button.queue_redraw()
+	if _text_button:
+		_update_toggle_button_icon(_text_button)
+		_text_button.queue_redraw()
 	if _line_button:
 		_update_toggle_button_icon(_line_button)
 		_line_button.queue_redraw()
@@ -7928,11 +12033,28 @@ func _apply_selected_tool_style(button: Button) -> void:
 
 
 func _apply_icon_button_style(button: Button) -> void:
+	for color_name in [
+		"icon_normal_color",
+		"icon_hover_color",
+		"icon_pressed_color",
+		"icon_hover_pressed_color",
+		"icon_focus_color",
+	]:
+		button.add_theme_color_override(color_name, ICON_AUTHORED_COLOR)
+	button.add_theme_color_override("icon_disabled_color", ICON_DISABLED_FALLBACK_COLOR)
 	button.add_theme_stylebox_override("normal", _make_tool_button_style(TOOL_BUTTON_PANEL_COLOR))
 	button.add_theme_stylebox_override("hover", _make_tool_button_style(TOOL_BUTTON_HOVER_COLOR))
 	button.add_theme_stylebox_override("pressed", _make_tool_button_style(TOOL_BUTTON_SELECTED_COLOR))
 	button.add_theme_stylebox_override("hover_pressed", _make_tool_button_style(TOOL_BUTTON_SELECTED_HOVER_COLOR))
 	button.add_theme_stylebox_override("disabled", _make_tool_button_style(TOOL_BUTTON_PANEL_COLOR))
+
+
+func _apply_flat_icon_button_style(button: Button) -> void:
+	button.add_theme_stylebox_override("normal", _make_tool_button_style(Color.TRANSPARENT))
+	button.add_theme_stylebox_override("hover", _make_tool_button_style(TOOL_BUTTON_HOVER_COLOR))
+	button.add_theme_stylebox_override("pressed", _make_tool_button_style(TOOL_BUTTON_SELECTED_COLOR))
+	button.add_theme_stylebox_override("hover_pressed", _make_tool_button_style(TOOL_BUTTON_SELECTED_HOVER_COLOR))
+	button.add_theme_stylebox_override("disabled", _make_tool_button_style(Color.TRANSPARENT))
 
 
 func _apply_destructive_button_style(button: Button) -> void:
@@ -8064,3 +12186,4 @@ func _make_color_swatch_style(color: Color, border_color := Color(0.12, 0.12, 0.
 func _set_status(message: String) -> void:
 	if _status_label:
 		_status_label.text = message
+		_status_label.tooltip_text = message

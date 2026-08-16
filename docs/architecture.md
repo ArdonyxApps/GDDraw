@@ -11,11 +11,14 @@ Unless otherwise noted, source paths in this document are relative to `addons/GD
 - `gddraw_canvas.gd` owns the image data, canvas view state, drawing behavior, and rendering.
 - `gddraw_history.gd` owns the dock undo/redo image stacks.
 - `gddraw_shortcuts.gd` translates raw key events into GDDraw shortcut actions.
+- `gddraw_storage_paths.gd` defines the immutable plugin boundary, canonical project asset paths, reserved update-staging path, and shared metadata access for font and parameter-only brush preferences.
+- `gddraw_update_checker.gd` owns the stable GitHub Release request, semantic version comparison, exact release-asset selection, and release/asset URL validation.
+- `gddraw_updater.gd` owns download progress/cancellation, archive and digest validation, staging manifests, verified backups, transactional replacement, rollback/recovery, and the wrapped restart request.
 - `gddraw_png_io.gd` owns PNG path normalization, default PNG names, resource-directory creation, and default-save-dir metadata access.
 - `gddraw_3d_texture_session.gd` owns active mesh/material/texture identity, UV data, the loaded eraser source, and the equality-based saved baseline.
 - `editor_integration/` contains narrow helpers for editor-scene workflows that need `EditorPlugin` access.
 - `plugin.cfg` registers the plugin.
-- `icons/` contains Lucide SVG assets used by toolbar buttons.
+- `icons/` contains only the Lucide families used by GDDraw. Each family uses `icons/<name>/<name>_0.svg` for its normal state, `_1.svg` for its selected state, and an optional `_2.svg` for its disabled state. SVG colors are authoritative, so shared icon-button styling uses a white theme tint in every authored state. The dock falls back to `_0.svg` with a consistent disabled fade when a requested `_2.svg` is absent.
 
 ## Quick Code Map
 
@@ -49,7 +52,7 @@ Owns editor-facing workflow and controls:
 - Canvas resize controls.
 - Canvas overlay settings panel for pixel-perfect mode, grid controls, checkerboard colors, zoom readout, grid display threshold, default canvas size, and default save location.
 - Undo/redo stacks for image-changing actions.
-- PNG saving through a resource `FileDialog`, defaulting to `res://gddraw`.
+- PNG saving through a resource `FileDialog`, defaulting to `res://gddraw/images`.
 - PNG loading through a resource `FileDialog`, starting from the default save location.
 - Canvas drag/drop accepts image files, texture resources, and Sprite2D nodes with texture paths.
 - Paste routes native clipboard images and text image paths into the same floating-selection workflow as GDDraw selection copies.
@@ -62,6 +65,33 @@ Owns editor-facing workflow and controls:
 The dock should coordinate state, but avoid owning drawing math. If a feature changes canvas pixels or canvas view behavior, prefer exposing a small method/property on `gddraw_canvas.gd`.
 
 Small helper scripts should stay free of editor-node ownership. The dock should continue to own dialogs, status text, canvas calls, and editor-plugin integration.
+
+### Update checker and updater
+
+See [`updater-guide.md`](updater-guide.md) for the maintainer-facing release checklist and the complete user-visible upgrade, rollback, restart, and activation flow.
+
+- `GDDraw.gd`'s `PLUGIN_VERSION` remains the only installed-version authority. The dock reads that script constant when starting a check and when presenting update details.
+- `gddraw_update_checker.gd` queries `https://api.github.com/repos/ArdonyxApps/GDDraw/releases/latest`, rejects draft/prerelease or malformed responses, distinguishes current from an installed build ahead of the release, and accepts only the exact `GDDraw-vX.Y.Z.zip` asset and its GitHub-provided SHA-256 digest from the configured repository.
+- One automatic check is allowed per editor session. Manual checks may run again after completion, simultaneous requests are rejected, and network/HTTP/JSON/version errors return ordinary result data rather than editor errors.
+- `gddraw_updater.gd` uses explicit `IDLE`, `CHECKING`, `CURRENT`, `INSTALLED_AHEAD_OF_RELEASE`, `UPDATE_AVAILABLE`, `DOWNLOADING`, `VERIFYING`, `READY_TO_INSTALL`, `INSTALLING`, `RESTART_REQUIRED`, `RECOVERING`, and `FAILED` states. Network, archive creation, filesystem mutation, restart, and browser opening have test seams; tests never contact GitHub, replace the development plugin, restart Godot, or open a browser.
+- The dock owns the Help badge, user consent, progress controls, action buttons, state-to-copy mapping, and reusable clipped update popup. The popup remains a child of the workspace region, not a native `Window` or dialog.
+- Download and validation write only below `user://gddraw/updates/`. Installation begins only after **Install and Restart**, revalidates the stage, makes and verifies a full backup, records a transaction, builds an exact sibling candidate, and performs a two-rename swap. The short boundary between moving the old directory aside and moving the verified candidate into place is not atomic, but failure deterministically renames the old directory back or restores the verified backup.
+- The official `EditorInterface.restart_editor(true)` API is available throughout Godot 4.4-4.7 and is feature-detected before use. A pending transaction is not called active until the next editor session validates the target version. Startup recovery completes a valid target, rolls an invalid/incomplete target back from its verified backup, or stops without further mutation when neither copy validates.
+- Godot 4.4 `ZIPReader` exposes entry paths and contents but not ZIP external attributes. Link-like names are rejected, all disk extraction is confined after full-list validation, and unexpected native payloads are forbidden, but a symlink encoded only in unavailable external attributes cannot be identified directly. GitHub's externally supplied digest authenticates the downloaded bytes against release metadata; it is not maintainer code signing.
+
+## Storage Boundaries
+
+The installed package and project content have separate lifecycles:
+
+- `res://addons/GDDraw/` is immutable during checks, downloads, validation, popup use, and cancellation. Only the explicitly confirmed installation transaction may replace this package. It contains plugin code, bundled icons/resources, licenses, and notices only; no generated asset, archive, or temporary file is written below it.
+- `res://gddraw/images/` is the new-user PNG default.
+- `res://gddraw/brushes/` is the canonical reserved location for future file-backed brushes. The current parameter-only custom brush dictionaries stay under the `GDDraw/custom_brush_presets` project metadata key; there is no brush-import workflow in 0.2.0.
+- `res://gddraw/fonts/` is the new-user project-font default. The Text tool scans configured project or external folders in place without copying fonts.
+- `user://gddraw/updates/downloads/` contains unique partial/completed archives, `staged/vX.Y.Z/<unique>/` contains extracted candidates and validation manifests, and `backups/vX.Y.Z-<unique>/` contains verified previous packages. A transaction descriptor at the update root coordinates replacement and recovery. These paths are created only by explicit download/install actions or recovery, never by ordinary checking.
+
+Directory creation is write-driven. Plugin enablement, dock construction, Preferences construction/opening, file-dialog opening, and missing font/brush scans are read-only. A resource directory is created only at the immediate PNG write boundary used by 2D Save/Save As, confirmed missing 3D texture creation, 3D texture Save As, or current-image CSG creation. Path validation normalizes resource paths and rejects every write under the plugin package.
+
+Defaults are fallbacks, not migrations. Project-scoped editor metadata remains authoritative when a key already exists, including legacy values such as `res://gddraw` and `res://fonts`. GDDraw does not rewrite those values merely because the 0.2.0 defaults changed, and it never moves, copies, renames, or deletes existing user images, fonts, brushes, or preference data.
 
 ### `gddraw_3d_texture_session.gd`
 
@@ -88,7 +118,12 @@ Small helper scripts should stay free of editor-node ownership. The dock should 
 
 Contains editor-focused helpers for workflows that touch the edited scene or editor undo/redo.
 
-- `gddraw_sprite_creator.gd` creates a `Sprite2D` named `GDDrawSprite` from an `Image` in the current edited scene through Godot editor undo/redo.
+- `gddraw_sprite_creator.gd` creates a `Sprite2D` named `GDDrawSprite`, or a configured `CSGBox3D`, `CSGSphere3D`, or `CSGCylinder3D`, in the current edited scene through Godot editor undo/redo.
+- The dock owns the confined **Create Textured CSG3D…** workspace overlay and passes one options dictionary for shape, current-image assignment, created-node selection, and native collision. It is a clipped dock child rather than a native editor window. The helper owns validation, scene/resource construction, unique PNG paths, and the single editor undo/redo transaction.
+- Textured creation duplicates and normalizes the input to RGBA8 without changing the canvas, writes a unique shape-specific PNG under the configured `res://` folder, and centralizes path-backed `Texture2D` creation. The local-to-scene white `StandardMaterial3D` uses nearest filtering and explicit per-shape UV transforms: Box and Cylinder mirror U around the texture center; Sphere keeps Godot's image-oriented generated UVs unchanged.
+- Creation without current-image assignment does not inspect visible pixels, create a PNG, or allocate a material. Optional selection uses `EditorSelection`; selection-disabled creation never touches the prior selection, and selection-enabled undo removes the created node from selection before removing it from the scene.
+- Undo retains the PNG as a non-destructive project asset while removing the scene node and its scene-owned resource reachability. Redo restores the same node, name, owner, material, texture, collision state, and requested selection.
+- `CSGTorus3D` remains intentionally unexposed. Deterministic generated-mesh validation finds seam triangles whose UVs wrap from near 1 to 0 along both axes, so interpolation and paint hits cross unrelated texture regions at both periodic seams.
 - Helpers in this folder should stay narrow and return status data for the dock to display.
 - The dock keeps ownership of status text, UI controls, dialogs, and canvas state. Avoid broad scene-integration refactors here until the UI overhaul is complete.
 
@@ -131,7 +166,10 @@ Current view behavior:
 - Canvas image mutation methods return or emit the previous image so dock-level undo remains centralized.
 - While a 3D texture session is active, canvas image changes refresh the live preview and recompute dirty state from exact dimensions and RGBA8 bytes. Tool/view/hover/selection-only changes do not affect it.
 - A 3D drag remains one canvas/history stroke, but interpolation between samples is continuity-gated in the dock. Same-triangle hits connect; edge-adjacent triangles connect only across a locally continuous UV boundary. Ray misses, surface changes, nonadjacent triangles, and large UV seams restart with a single stamp so unrelated texture regions are never bridged.
+- The 3D Line, Rectangle, and Ellipse tools capture their starting mesh/material surface, triangle, mesh/texture UV, deterministic image pixel, foreground/background colors, and shape settings. Their endpoint stays valid only on the same surface and geometry-plus-UV-connected island; seams and disconnected geometry cancel with a status reason. A ray-selected, spatially distinct mirrored piece remains usable with the existing shared-UV warning, while coincident interior mappings that the ray cannot disambiguate are rejected. The canvas owns the temporary raster preview and delegates commit to each ordinary 2D shape path, so preview pixels never enter the editable image and a changed result emits exactly one history event.
 - Switching 2D, 3D, Split Horizontal, and Split Vertical changes layout only. It never detects, starts, ends, or replaces a texture session.
+- Editor scene-tab changes also do not own the texture-session lifecycle. The session retains its mesh snapshot, material, texture identity, UV/cache data, source label, and private preview transform when the original source node leaves the active SceneTree or is freed. Painting and normal texture saving continue without a live source scene; Save As updates the retained private material when no scene property remains to assign.
+- Source geometry/transform polling never clears a valid private preview merely because the source scene is inactive. **Scene Transform Link** is automatically unlinked and disabled while the source node is unavailable, then re-enabled if the same live source returns. A view-mode rebuild uses retained session data and never dereferences a freed source node.
 - With no active session, the 3D pane shows an explicit empty state. **Use Selected 3D Surface** and Scene-tree mesh/CSG/parent drops over either the empty pane or active viewport open the same read-only picker.
 - Picker confirmation starts only a supported `StandardMaterial3D.albedo_texture` session. A missing texture opens a separate creation confirmation. A supported CSG node with no material offers one explicit confirmation that creates and assigns both a `StandardMaterial3D` and PNG; opening or canceling the picker never mutates the scene.
 - Texture creation and Save As duplicate an embedded active material into the mesh instance's Surface Material Override, then assign the path-backed PNG there through editor undo/redo. Imported mesh materials remain unchanged.
@@ -176,6 +214,16 @@ Current 3D preview navigation follows Godot's default primary mouse conventions:
 - Keep save/load/create-sprite actions on the top file row.
 - Keep drawing and view tools on the tool row.
 - Avoid adding explanatory text to the dock; prefer tooltips on icon buttons.
+
+Colors:
+
+- Button Active : icon #57A0FF
+- Button Inactive : icon #c4c4c4
+- Button Inaccessible : icon #696969
+- Button Background when Selected : #424242
+- Button Hover Highlight : #383838
+- Toolbar Background : #292929
+- Toolbar Divider / Darker Background for top menu : #141414
 
 ## Maintenance Boundaries
 

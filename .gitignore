@@ -20,6 +20,8 @@ mono_crash.*.json
 
 # Local Godot development and test content
 /local_test/
+/tests/
+/resources/
 
 # Local Godot AI/MCP editor integration
 /addons/godot_ai/

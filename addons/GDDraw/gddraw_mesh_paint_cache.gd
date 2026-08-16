@@ -123,6 +123,79 @@ func get_island_triangles(surface_index: int, source_triangle_index: int) -> Arr
 	return result
 
 
+func validate_surface_shape_endpoints(start_hit: Dictionary, end_hit: Dictionary, overlap_distance_epsilon: float) -> Dictionary:
+	if start_hit.is_empty() or end_hit.is_empty():
+		return _shape_validation(false, "The shape endpoint is not on the active surface.")
+	var start_surface := int(start_hit.get("surface_index", -1))
+	var end_surface := int(end_hit.get("surface_index", -1))
+	if start_surface < 0 or end_surface < 0 or start_surface != end_surface:
+		return _shape_validation(false, "The shape cannot cross material surfaces.")
+	var start_id := _hit_triangle_id(start_hit)
+	var end_id := _hit_triangle_id(end_hit)
+	if start_id < 0 or end_id < 0:
+		return _shape_validation(false, "The shape endpoint no longer belongs to the active mesh.")
+	if _hit_has_ambiguous_uv_mapping(start_hit, overlap_distance_epsilon) or _hit_has_ambiguous_uv_mapping(end_hit, overlap_distance_epsilon):
+		return _shape_validation(false, "The shape crosses an ambiguous mirrored or overlapping UV mapping.")
+	if start_id != end_id:
+		var island: PackedInt32Array = _island_members.get(start_id, PackedInt32Array([start_id]))
+		if not island.has(end_id):
+			return _shape_validation(false, "The shape endpoints are separated by a UV seam or disconnected geometry.")
+	return _shape_validation(true, "")
+
+
+func _hit_triangle_id(hit: Dictionary) -> int:
+	var triangle_id := int(hit.get("cache_triangle_id", -1))
+	if triangle_id >= 0 and triangle_id < _triangles.size():
+		return triangle_id
+	return int(_triangle_by_source.get(
+		Vector2i(int(hit.get("surface_index", -1)), int(hit.get("triangle_index", -1))),
+		-1
+	))
+
+
+func _hit_has_ambiguous_uv_mapping(hit: Dictionary, distance_epsilon: float) -> bool:
+	var hit_id := _hit_triangle_id(hit)
+	if hit_id < 0:
+		return true
+	var uv: Vector2 = hit.get("uv", Vector2.ZERO)
+	var hit_position: Vector3 = hit.get("position", Vector3.ZERO)
+	var query := query_uv_candidates(uv)
+	for other_id in query.get("triangle_ids", PackedInt32Array()):
+		if other_id == hit_id:
+			continue
+		var other_hit := make_uv_hit(other_id, uv)
+		if other_hit.is_empty():
+			continue
+		var other_position: Vector3 = other_hit.get("position", Vector3.ZERO)
+		if hit_position.distance_to(other_position) > distance_epsilon:
+			# The 3D ray has selected a spatially distinct destination. Mirrored
+			# body parts and CSG faces may share these texture pixels, so retain
+			# the shared-UV warning but do not make surface-shape tools inactive.
+			continue
+		# Continuous neighboring triangles legitimately meet at the same 3D/UV
+		# boundary. Coincident interior mappings remain unsafe because the ray
+		# cannot establish which duplicate surface owns the destination.
+		if (
+			_uv_hit_is_on_triangle_boundary(hit_id, uv)
+			and _uv_hit_is_on_triangle_boundary(other_id, uv)
+		):
+			continue
+		return true
+	return false
+
+
+func _uv_hit_is_on_triangle_boundary(triangle_id: int, uv: Vector2) -> bool:
+	if triangle_id < 0 or triangle_id >= _triangles.size():
+		return false
+	var triangle: Dictionary = _triangles[triangle_id]
+	var bary := uv_barycentric(uv, triangle["uv_a"], triangle["uv_b"], triangle["uv_c"])
+	return minf(bary.x, minf(bary.y, bary.z)) <= BARYCENTRIC_TOLERANCE
+
+
+func _shape_validation(valid: bool, reason: String) -> Dictionary:
+	return {"valid": valid, "reason": reason}
+
+
 func query_ray(ray_origin: Vector3, ray_direction: Vector3, ray_length: float) -> Dictionary:
 	var result := {
 		"hit": {},
@@ -355,9 +428,9 @@ func _extract_surface(mesh: Mesh, surface_index: int, edge_members: Dictionary) 
 		}
 		_triangles.push_back(triangle)
 		_triangle_by_source[Vector2i(surface_index, source_triangle_index)] = triangle_id
-		_add_uv_edge_member(edge_members, surface_index, uv_a, uv_b, triangle_id)
-		_add_uv_edge_member(edge_members, surface_index, uv_b, uv_c, triangle_id)
-		_add_uv_edge_member(edge_members, surface_index, uv_c, uv_a, triangle_id)
+		_add_uv_edge_member(edge_members, surface_index, a, b, uv_a, uv_b, triangle_id)
+		_add_uv_edge_member(edge_members, surface_index, b, c, uv_b, uv_c, triangle_id)
+		_add_uv_edge_member(edge_members, surface_index, c, a, uv_c, uv_a, triangle_id)
 
 
 func _indices_are_valid(vertices: PackedVector3Array, uvs: PackedVector2Array, a: int, b: int, c: int) -> bool:
@@ -526,17 +599,28 @@ func _triangle_to_hit(triangle_id: int, uv := Vector2(INF, INF), bary := Vector3
 	}
 
 
-func _add_uv_edge_member(edge_members: Dictionary, surface_index: int, from_uv: Vector2, to_uv: Vector2, triangle_id: int) -> void:
-	var from_key := _quantized_uv(from_uv)
-	var to_key := _quantized_uv(to_uv)
-	var edge_key := Vector4i(from_key.x, from_key.y, to_key.x, to_key.y)
-	if from_key.x > to_key.x or (from_key.x == to_key.x and from_key.y > to_key.y):
-		edge_key = Vector4i(to_key.x, to_key.y, from_key.x, from_key.y)
+func _add_uv_edge_member(edge_members: Dictionary, surface_index: int, from_position: Vector3, to_position: Vector3, from_uv: Vector2, to_uv: Vector2, triangle_id: int) -> void:
+	# A continuous island edge must be the same geometric edge and map to the
+	# same UV edge. UV-only matching incorrectly joins disconnected or stacked
+	# geometry; position-only matching incorrectly joins across texture seams.
+	var from_key := _surface_edge_endpoint_key(from_position, from_uv)
+	var to_key := _surface_edge_endpoint_key(to_position, to_uv)
+	var edge_key := from_key + ">" + to_key if from_key <= to_key else to_key + ">" + from_key
 	var surface_edges: Dictionary = edge_members.get(surface_index, {})
 	var members: PackedInt32Array = surface_edges.get(edge_key, PackedInt32Array())
 	members.push_back(triangle_id)
 	surface_edges[edge_key] = members
 	edge_members[surface_index] = surface_edges
+
+
+func _surface_edge_endpoint_key(position: Vector3, uv: Vector2) -> String:
+	return "%d,%d,%d@%d,%d" % [
+		roundi(position.x * 1000000.0),
+		roundi(position.y * 1000000.0),
+		roundi(position.z * 1000000.0),
+		roundi(uv.x * 1000000.0),
+		roundi(uv.y * 1000000.0),
+	]
 
 
 func _build_uv_islands(edge_members: Dictionary) -> void:

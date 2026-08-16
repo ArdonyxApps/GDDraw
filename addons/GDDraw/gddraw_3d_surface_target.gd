@@ -8,6 +8,8 @@ const STATUS_OK := "ok"
 const STATUS_ERROR := "error"
 
 var source_node: Node3D
+var source_name := "3D Surface"
+var source_class_name := "Node3D"
 var mesh_snapshot: Mesh
 var source_transform := Transform3D.IDENTITY
 var is_csg := false
@@ -53,8 +55,12 @@ func refresh_geometry() -> Dictionary:
 
 func get_source_label() -> String:
 	if not is_instance_valid(source_node):
-		return "3D surface"
+		return "%s (%s)" % [source_name, source_class_name]
 	return "%s (%s)" % [source_node.name, source_node.get_class()]
+
+
+func get_source_name() -> String:
+	return str(source_node.name) if is_instance_valid(source_node) else source_name
 
 
 func get_mesh_label() -> String:
@@ -235,6 +241,8 @@ func _capture(node: Node3D) -> Dictionary:
 	preview_surface_slots = PackedInt32Array()
 	if not is_instance_valid(source_node):
 		return _result(STATUS_ERROR, "Select or drop an editable MeshInstance3D or CSG shape.")
+	source_name = str(source_node.name)
+	source_class_name = source_node.get_class()
 	is_csg = source_node is CSGShape3D
 	# The preview lives in an isolated World3D, so it needs the complete scene
 	# transform rather than the node-local transform. This preserves authored

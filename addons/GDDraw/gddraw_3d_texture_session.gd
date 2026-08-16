@@ -18,6 +18,7 @@ const CHANNEL_ALBEDO := "albedo"
 const DEFAULT_TEXTURE_SIZE := Vector2i(1024, 1024)
 const UV_OVERLAY_SCRIPT_PATH := "res://addons/GDDraw/gddraw_uv_overlay.gd"
 const SURFACE_TARGET_SCRIPT_PATH := "res://addons/GDDraw/gddraw_3d_surface_target.gd"
+const StoragePaths := preload("res://addons/GDDraw/gddraw_storage_paths.gd")
 
 var target
 var source_node: Node3D
@@ -33,6 +34,12 @@ var baseline_image: Image
 var uv_edges: Array = []
 var uv_vertices := PackedVector2Array()
 var preview_orientation_adjustment := Transform3D.IDENTITY
+var preview_translation_adjustment := Vector3.ZERO
+var session_start_source_transform := Transform3D.IDENTITY
+var live_source_transform := Transform3D.IDENTITY
+var imported_source_transform := Transform3D.IDENTITY
+var scene_transform_linked := false
+var _preview_transform_state_initialized := false
 
 var _uv_overlay
 
@@ -56,11 +63,11 @@ func discover_target(node: Node) -> Dictionary:
 	}
 
 
-func begin_from_mesh(mesh: MeshInstance3D, editor_plugin: EditorPlugin, create_if_missing := false, create_dir := "res://gddraw", texture_size := DEFAULT_TEXTURE_SIZE, material_slot_index := 0) -> Dictionary:
+func begin_from_mesh(mesh: MeshInstance3D, editor_plugin: EditorPlugin, create_if_missing := false, create_dir := StoragePaths.DEFAULT_IMAGE_DIR, texture_size := DEFAULT_TEXTURE_SIZE, material_slot_index := 0) -> Dictionary:
 	return begin_from_target(mesh, editor_plugin, create_if_missing, create_dir, texture_size, material_slot_index)
 
 
-func begin_from_target(node: Node, editor_plugin: EditorPlugin, create_if_missing := false, create_dir := "res://gddraw", texture_size := DEFAULT_TEXTURE_SIZE, material_slot_index := 0) -> Dictionary:
+func begin_from_target(node: Node, editor_plugin: EditorPlugin, create_if_missing := false, create_dir := StoragePaths.DEFAULT_IMAGE_DIR, texture_size := DEFAULT_TEXTURE_SIZE, material_slot_index := 0) -> Dictionary:
 	_ensure_uv_overlay()
 	clear()
 	target = _make_target()
@@ -79,6 +86,7 @@ func begin_from_target(node: Node, editor_plugin: EditorPlugin, create_if_missin
 		clear()
 		return selection
 	material = target.material
+	_capture_preview_transform_state()
 	texture = material.albedo_texture if material else null
 	texture_path = _get_editable_texture_path(texture)
 	if texture_path.is_empty() and material and material.has_meta("gddraw_texture_path"):
@@ -195,9 +203,11 @@ func assign_saved_image_as(image: Image, path: String, next_texture: Texture2D, 
 
 
 func has_active_session() -> bool:
-	if target:
-		return is_instance_valid(source_node) and material != null
-	return mesh_instance != null and material != null
+	# The private session owns a retained mesh snapshot, material, texture, and
+	# editable image. Scene-tab switches can temporarily detach the source node,
+	# and closing its scene can free it permanently; neither event invalidates
+	# the independent painting session.
+	return material != null and mesh_snapshot != null
 
 
 func is_dirty(image: Image) -> bool:
@@ -228,24 +238,99 @@ func rotate_preview_orientation(axis: Vector3, angle_radians: float) -> void:
 	preview_orientation_adjustment = adjustment * rotation
 
 
-func reset_preview_orientation() -> void:
-	preview_orientation_adjustment = Transform3D.IDENTITY
+func set_preview_orientation(adjustment: Transform3D) -> void:
+	# Preview orientation is intentionally plain session state. Interactive gizmo
+	# updates must never participate in image or editor undo history.
+	preview_orientation_adjustment = Transform3D(adjustment.basis.orthonormalized(), Vector3.ZERO)
 
 
-func use_scene_orientation() -> bool:
-	reset_preview_orientation()
-	return target != null and target.refresh_source_transform()
-
-
-func get_preview_transform() -> Transform3D:
-	if not target:
-		return Transform3D.IDENTITY
-	var adjustment: Transform3D = (
+func get_preview_orientation() -> Transform3D:
+	return (
 		preview_orientation_adjustment
 		if preview_orientation_adjustment is Transform3D
 		else Transform3D.IDENTITY
 	)
-	return target.get_transform() * adjustment
+
+
+func reset_preview_orientation() -> void:
+	preview_orientation_adjustment = Transform3D.IDENTITY
+
+
+func set_preview_translation(adjustment: Vector3) -> void:
+	preview_translation_adjustment = adjustment
+
+
+func get_preview_translation() -> Vector3:
+	return preview_translation_adjustment
+
+
+func get_preview_adjustment() -> Transform3D:
+	return Transform3D(get_preview_orientation().basis, preview_translation_adjustment)
+
+
+func set_preview_adjustment(adjustment: Transform3D) -> void:
+	set_preview_orientation(adjustment)
+	set_preview_translation(adjustment.origin)
+
+
+func ensure_preview_transform_state() -> void:
+	if not _preview_transform_state_initialized:
+		_capture_preview_transform_state()
+
+
+func _capture_preview_transform_state() -> void:
+	var source_transform: Transform3D = target.get_transform() if target else Transform3D.IDENTITY
+	session_start_source_transform = source_transform
+	live_source_transform = source_transform
+	imported_source_transform = source_transform
+	preview_orientation_adjustment = Transform3D.IDENTITY
+	preview_translation_adjustment = Vector3.ZERO
+	scene_transform_linked = false
+	_preview_transform_state_initialized = true
+
+
+func update_live_source_transform(source_transform: Transform3D) -> bool:
+	ensure_preview_transform_state()
+	live_source_transform = source_transform
+	if not scene_transform_linked or imported_source_transform.is_equal_approx(source_transform):
+		return false
+	imported_source_transform = source_transform
+	return true
+
+
+func set_scene_transform_linked(linked: bool, source_transform := Transform3D.IDENTITY) -> bool:
+	ensure_preview_transform_state()
+	scene_transform_linked = linked
+	if not linked:
+		return false
+	live_source_transform = source_transform
+	var changed := (
+		not imported_source_transform.is_equal_approx(source_transform)
+		or not get_preview_adjustment().is_equal_approx(Transform3D.IDENTITY)
+	)
+	imported_source_transform = source_transform
+	# Re-linking is an explicit request to mirror the live scene exactly. Any
+	# private edits remain isolated, but are discarded for this new link epoch.
+	preview_orientation_adjustment = Transform3D.IDENTITY
+	preview_translation_adjustment = Vector3.ZERO
+	return changed
+
+
+func is_scene_transform_linked() -> bool:
+	return scene_transform_linked
+
+
+func reset_preview_transform() -> void:
+	ensure_preview_transform_state()
+	scene_transform_linked = false
+	imported_source_transform = session_start_source_transform
+	preview_orientation_adjustment = Transform3D.IDENTITY
+	preview_translation_adjustment = Vector3.ZERO
+
+
+func get_preview_transform() -> Transform3D:
+	ensure_preview_transform_state()
+	return imported_source_transform * get_preview_adjustment()
 
 
 func refresh_geometry() -> Dictionary:
@@ -274,7 +359,13 @@ func clear() -> void:
 	baseline_image = null
 	uv_edges.clear()
 	uv_vertices = PackedVector2Array()
-	reset_preview_orientation()
+	preview_orientation_adjustment = Transform3D.IDENTITY
+	preview_translation_adjustment = Vector3.ZERO
+	session_start_source_transform = Transform3D.IDENTITY
+	live_source_transform = Transform3D.IDENTITY
+	imported_source_transform = Transform3D.IDENTITY
+	scene_transform_linked = false
+	_preview_transform_state_initialized = false
 
 
 func _create_and_assign_albedo_texture(editor_plugin: EditorPlugin, create_dir: String, texture_size: Vector2i) -> Dictionary:
@@ -330,6 +421,14 @@ func _make_target():
 
 func _assign_active_texture(editor_plugin: EditorPlugin, next_texture: Texture2D) -> bool:
 	if target:
+		if not is_instance_valid(target.source_node):
+			# A closed source scene has no live scene property to participate in
+			# editor undo/redo. Keep Save As useful by updating only the retained
+			# private-session material; reopening the old scene is intentionally
+			# treated as a new source until the user chooses it again.
+			material.albedo_texture = next_texture
+			target.material = material
+			return material.albedo_texture == next_texture
 		var previous_material := material
 		var assigned: bool = target.assign_texture(editor_plugin, next_texture)
 		var active_material := target.get_material_for_slot(material_slot) as StandardMaterial3D
@@ -437,6 +536,8 @@ func _save_image_to_texture_path(image: Image, path: String) -> int:
 func _write_image(image: Image, path: String) -> Dictionary:
 	if not image or image.is_empty():
 		return _result(STATUS_ERROR, "Canvas image is empty.")
+	if not StoragePaths.is_writable_project_path(path):
+		return _result(STATUS_ERROR, "Texture writes must stay outside the GDDraw plugin package.")
 	var editable_image := _make_editable_image(image)
 	if not editable_image:
 		return _result(STATUS_ERROR, "Canvas image could not be converted to editable RGBA8 pixels.")
@@ -458,9 +559,9 @@ func _scan_filesystem(editor_plugin: EditorPlugin) -> void:
 
 
 func _ensure_resource_dir(path: String) -> int:
-	if path.is_empty() or not path.begins_with("res://"):
+	if not StoragePaths.is_writable_project_path(path):
 		return ERR_INVALID_PARAMETER
-	return DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(path))
+	return DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(StoragePaths.normalize_path(path)))
 
 
 func _make_unique_texture_path(dir_path: String, source_name: String) -> String:

@@ -2,7 +2,7 @@
 extends EditorPlugin
 
 const DOCK_SCENE_PATH := "res://addons/GDDraw/gddraw_dock.tscn"
-const PLUGIN_VERSION := "0.1.0"
+const PLUGIN_VERSION := "0.2.0"
 const DOCK_META_KEY := "gddraw_bottom_panel_dock"
 const ADDON_PATH_PREFIX := "res://addons/GDDraw/"
 const MINIMUM_BOTTOM_PANEL_HEIGHT := 360.0

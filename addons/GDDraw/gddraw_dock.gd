@@ -86,8 +86,9 @@ class ImageDropTarget:
 
 const ICON_DIR := "res://addons/GDDraw/icons"
 enum IconState { NORMAL, SELECTED, DISABLED }
-const ICON_REFRESH_MAX_ATTEMPTS := 12
-const ICON_REFRESH_RETRY_DELAY := 0.1
+const ICON_REFRESH_MAX_ATTEMPTS := 180
+const ICON_REFRESH_RETRY_DELAY := 1.0
+const ICON_REFRESH_MAX_DURATION_MSEC := 180000
 const CANVAS_SCRIPT_PATH := "res://addons/GDDraw/gddraw_canvas.gd"
 const HISTORY_SCRIPT_PATH := "res://addons/GDDraw/gddraw_history.gd"
 const PNG_IO_SCRIPT_PATH := "res://addons/GDDraw/gddraw_png_io.gd"
@@ -401,9 +402,19 @@ var _icon_resource_filesystem: Object
 var _icon_resource_filesystem_override: Object
 var _icon_exists_override := Callable()
 var _icon_load_override := Callable()
-var _icon_refresh_scheduled := false
-var _icon_refresh_attempts_remaining := 0
-var _icon_refresh_generation := 0
+var _icon_clock_override := Callable()
+var _icon_scheduler_override := Callable()
+var _icon_recovery_cycle := {
+	"generation": 0,
+	"active": false,
+	"start_msec": 0,
+	"deadline_msec": 0,
+	"attempts": 0,
+	"callback_scheduled": false,
+	"callback_token": 0,
+	"scheduled_due_msec": 0,
+	"pending_count": 0,
+}
 var _icon_import_recovery_torn_down := false
 var _brush_button: Button
 var _fill_button: Button
@@ -724,6 +735,7 @@ func initialize() -> void:
 	focus_mode = Control.FOCUS_CLICK
 	add_theme_constant_override("separation", 8)
 	_build_ui()
+	_start_icon_recovery_cycle()
 	_set_2d_document_baseline("", _canvas.get_image_copy())
 	call_deferred("_recover_update_transaction")
 
@@ -3444,26 +3456,36 @@ func _disconnect_icon_import_signals() -> void:
 
 func _teardown_icon_import_recovery() -> void:
 	_icon_import_recovery_torn_down = true
-	_icon_refresh_generation += 1
-	_icon_refresh_scheduled = false
-	_icon_refresh_attempts_remaining = 0
+	_icon_recovery_cycle.generation = int(_icon_recovery_cycle.generation) + 1
+	_icon_recovery_cycle.active = false
+	_icon_recovery_cycle.callback_scheduled = false
+	_icon_recovery_cycle.callback_token = int(_icon_recovery_cycle.callback_token) + 1
+	_icon_recovery_cycle.pending_count = 0
 	_disconnect_icon_import_signals()
 	_icon_resource_filesystem = null
 
 
-func set_icon_import_adapters_for_tests(filesystem: Object, exists_adapter := Callable(), load_adapter := Callable()) -> void:
+func set_icon_import_adapters_for_tests(
+	filesystem: Object,
+	exists_adapter := Callable(),
+	load_adapter := Callable(),
+	clock_adapter := Callable(),
+	scheduler_adapter := Callable()
+) -> void:
 	_disconnect_icon_import_signals()
 	_icon_resource_filesystem = null
 	_icon_resource_filesystem_override = filesystem
 	_icon_exists_override = exists_adapter
 	_icon_load_override = load_adapter
+	_icon_clock_override = clock_adapter
+	_icon_scheduler_override = scheduler_adapter
 	_setup_icon_import_recovery()
 
 
 func _on_icon_filesystem_changed() -> void:
-	# This signal has no paths. Only react when at least one registered icon did
-	# not reach its intended imported texture during the previous attempt.
-	if _has_pending_icon_controls():
+	# This signal has no paths, so keep it relevant throughout the bounded cycle
+	# whenever a registered icon is still pending.
+	if _icon_recovery_is_pending():
 		_schedule_icon_refresh()
 
 
@@ -3476,54 +3498,146 @@ func _on_icon_resources_reloaded(paths: PackedStringArray) -> void:
 
 
 func _on_icon_resource_paths_changed(paths: PackedStringArray) -> void:
-	if _icon_import_recovery_torn_down or not _contains_gddraw_icon_path(paths):
+	if not _icon_recovery_is_pending() or not _contains_gddraw_icon_path(paths):
 		return
 	_schedule_icon_refresh()
 
 
 func _contains_gddraw_icon_path(paths: PackedStringArray) -> bool:
 	var icon_prefix := ICON_DIR + "/"
+	if paths.is_empty():
+		return true
 	for path in paths:
-		if str(path).replace("\\", "/").begins_with(icon_prefix):
+		var normalized := str(path).replace("\\", "/")
+		if normalized.begins_with(icon_prefix):
 			return true
+		# Godot may report the generated cache artifact rather than its SVG
+		# source. Match only cache entries whose basename identifies a family
+		# currently registered by this dock.
+		if normalized.contains("/.godot/imported/"):
+			for family_name in _registered_icon_family_names():
+				if normalized.get_file().begins_with("%s_" % family_name):
+					return true
 	return false
 
 
-func _schedule_icon_refresh() -> void:
+func _registered_icon_family_names() -> PackedStringArray:
+	var families := PackedStringArray()
+	for button in _icon_buttons:
+		if not is_instance_valid(button):
+			continue
+		for key in ["inactive_icon_name", "active_icon_name"]:
+			var family := _get_icon_family_name(str(button.get_meta(key, "")))
+			if not family.is_empty() and not families.has(family):
+				families.append(family)
+	for icon in _static_icons:
+		if not is_instance_valid(icon):
+			continue
+		var family := _get_icon_family_name(str(icon.get_meta("gddraw_icon_name", "")))
+		if not family.is_empty() and not families.has(family):
+			families.append(family)
+	return families
+
+
+func _start_icon_recovery_cycle() -> void:
 	if _icon_import_recovery_torn_down:
 		return
-	_icon_refresh_attempts_remaining = ICON_REFRESH_MAX_ATTEMPTS
-	if _icon_refresh_scheduled:
-		return
-	_icon_refresh_scheduled = true
-	_icon_refresh_generation += 1
-	call_deferred("_run_icon_refresh_attempt", _icon_refresh_generation)
+	var now := _icon_recovery_now_msec()
+	_icon_recovery_cycle.generation = int(_icon_recovery_cycle.generation) + 1
+	_icon_recovery_cycle.active = true
+	_icon_recovery_cycle.start_msec = now
+	_icon_recovery_cycle.deadline_msec = now + ICON_REFRESH_MAX_DURATION_MSEC
+	_icon_recovery_cycle.attempts = 0
+	_icon_recovery_cycle.callback_scheduled = false
+	_icon_recovery_cycle.callback_token = int(_icon_recovery_cycle.callback_token) + 1
+	_icon_recovery_cycle.scheduled_due_msec = now
+	_icon_recovery_cycle.pending_count = _count_pending_icon_controls()
+	_schedule_icon_refresh()
 
 
-func _run_icon_refresh_attempt(generation: int) -> void:
-	if generation != _icon_refresh_generation or not _icon_refresh_scheduled or _icon_import_recovery_torn_down or not is_instance_valid(self):
+func _schedule_icon_refresh() -> void:
+	if _icon_import_recovery_torn_down or not bool(_icon_recovery_cycle.active):
 		return
-	if _icon_refresh_attempts_remaining <= 0:
-		_icon_refresh_scheduled = false
-		return
-	_icon_refresh_attempts_remaining -= 1
-	var pending := true
-	if not _icon_filesystem_is_busy():
-		pending = _refresh_registered_icons(true) > 0
-	if not pending or _icon_refresh_attempts_remaining <= 0:
-		_icon_refresh_scheduled = false
-		return
-	_queue_icon_refresh_retry(generation)
+	_queue_icon_refresh_callback(0.0)
 
 
-func _queue_icon_refresh_retry(generation: int) -> void:
-	if is_inside_tree() and get_tree():
-		get_tree().create_timer(ICON_REFRESH_RETRY_DELAY).timeout.connect(
-			Callable(self, "_run_icon_refresh_attempt").bind(generation),
+func _run_icon_refresh_attempt(generation: int, callback_token := -1) -> void:
+	if (
+		generation != int(_icon_recovery_cycle.generation)
+		or (callback_token >= 0 and callback_token != int(_icon_recovery_cycle.callback_token))
+		or _icon_import_recovery_torn_down
+		or not is_instance_valid(self)
+	):
+		return
+	_icon_recovery_cycle.callback_scheduled = false
+	if not bool(_icon_recovery_cycle.active):
+		return
+	var now := _icon_recovery_now_msec()
+	if int(_icon_recovery_cycle.attempts) >= ICON_REFRESH_MAX_ATTEMPTS or now >= int(_icon_recovery_cycle.deadline_msec):
+		_end_icon_recovery_cycle()
+		return
+	_icon_recovery_cycle.attempts = int(_icon_recovery_cycle.attempts) + 1
+	if _icon_filesystem_is_busy():
+		_icon_recovery_cycle.pending_count = _count_pending_icon_controls()
+	else:
+		_icon_recovery_cycle.pending_count = _refresh_registered_icons(true)
+	if int(_icon_recovery_cycle.pending_count) <= 0:
+		_end_icon_recovery_cycle()
+		return
+	if int(_icon_recovery_cycle.attempts) >= ICON_REFRESH_MAX_ATTEMPTS:
+		_end_icon_recovery_cycle()
+		return
+	_queue_icon_refresh_callback(ICON_REFRESH_RETRY_DELAY)
+
+
+func _queue_icon_refresh_callback(delay_seconds: float) -> void:
+	if _icon_import_recovery_torn_down or not bool(_icon_recovery_cycle.active):
+		return
+	var due_msec := _icon_recovery_now_msec() + int(round(delay_seconds * 1000.0))
+	if bool(_icon_recovery_cycle.callback_scheduled):
+		if due_msec >= int(_icon_recovery_cycle.scheduled_due_msec):
+			return
+		# The prior timer cannot always be cancelled, so invalidate its token and
+		# leave it as a harmless no-op while scheduling this earlier pass.
+	_icon_recovery_cycle.callback_scheduled = true
+	_icon_recovery_cycle.callback_token = int(_icon_recovery_cycle.callback_token) + 1
+	_icon_recovery_cycle.scheduled_due_msec = due_msec
+	var callback := Callable(self, "_run_icon_refresh_attempt").bind(
+		int(_icon_recovery_cycle.generation),
+		int(_icon_recovery_cycle.callback_token)
+	)
+	if _icon_scheduler_override.is_valid():
+		_icon_scheduler_override.call(callback, delay_seconds)
+	elif delay_seconds <= 0.0:
+		callback.call_deferred()
+	elif is_inside_tree() and get_tree():
+		get_tree().create_timer(delay_seconds).timeout.connect(
+			callback,
 			CONNECT_ONE_SHOT
 		)
 	else:
-		call_deferred("_run_icon_refresh_attempt", generation)
+		callback.call_deferred()
+
+
+func _end_icon_recovery_cycle() -> void:
+	_icon_recovery_cycle.generation = int(_icon_recovery_cycle.generation) + 1
+	_icon_recovery_cycle.active = false
+	_icon_recovery_cycle.callback_scheduled = false
+	_icon_recovery_cycle.callback_token = int(_icon_recovery_cycle.callback_token) + 1
+
+
+func _icon_recovery_now_msec() -> int:
+	if _icon_clock_override.is_valid():
+		return int(_icon_clock_override.call())
+	return Time.get_ticks_msec()
+
+
+func _icon_recovery_is_pending() -> bool:
+	return (
+		not _icon_import_recovery_torn_down
+		and bool(_icon_recovery_cycle.active)
+		and int(_icon_recovery_cycle.pending_count) > 0
+	)
 
 
 func _icon_filesystem_is_busy() -> bool:
@@ -3557,13 +3671,18 @@ func _refresh_registered_icons(force_replace: bool) -> int:
 
 
 func _has_pending_icon_controls() -> bool:
+	return _count_pending_icon_controls() > 0
+
+
+func _count_pending_icon_controls() -> int:
+	var pending := 0
 	for button in _icon_buttons:
 		if is_instance_valid(button) and not bool(button.get_meta("gddraw_icon_ready", false)):
-			return true
+			pending += 1
 	for icon in _static_icons:
 		if is_instance_valid(icon) and not bool(icon.get_meta("gddraw_icon_ready", false)):
-			return true
-	return false
+			pending += 1
+	return pending
 
 
 func _get_active_icon_name(icon_name: String, selected_icon_name: String) -> String:

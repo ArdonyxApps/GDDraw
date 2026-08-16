@@ -19,6 +19,7 @@ Unless otherwise noted, source paths in this document are relative to `addons/GD
 - `editor_integration/` contains narrow helpers for editor-scene workflows that need `EditorPlugin` access.
 - `plugin.cfg` registers the plugin.
 - `icons/` contains only the Lucide families used by GDDraw. Each family uses `icons/<name>/<name>_0.svg` for its normal state, `_1.svg` for its selected state, and an optional `_2.svg` for its disabled state. SVG colors are authoritative, so shared icon-button styling uses a white theme tint in every authored state. The dock falls back to `_0.svg` with a consistent disabled fade when a requested `_2.svg` is absent.
+- Release packages intentionally exclude generated `.import` metadata and `.godot/` content. The dock records each button, menu-button, and static `TextureRect` icon's intended family/state, listens for relevant `EditorFileSystem` reimport/reload completion, and reloads textures with cache replacement after scanning/importing becomes idle. A twelve-attempt, 100 ms retry budget covers signals that arrive just before imported textures become loadable without rebuilding the dock or changing workspace state. `is_importing()` is feature-detected because Godot 4.4 exposes `is_scanning()` but not the newer import-state method.
 
 ## Quick Code Map
 

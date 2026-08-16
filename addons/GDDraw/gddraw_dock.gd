@@ -86,6 +86,8 @@ class ImageDropTarget:
 
 const ICON_DIR := "res://addons/GDDraw/icons"
 enum IconState { NORMAL, SELECTED, DISABLED }
+const ICON_REFRESH_MAX_ATTEMPTS := 12
+const ICON_REFRESH_RETRY_DELAY := 0.1
 const CANVAS_SCRIPT_PATH := "res://addons/GDDraw/gddraw_canvas.gd"
 const HISTORY_SCRIPT_PATH := "res://addons/GDDraw/gddraw_history.gd"
 const PNG_IO_SCRIPT_PATH := "res://addons/GDDraw/gddraw_png_io.gd"
@@ -394,6 +396,15 @@ var _paint_3d_hover_debug_state := ""
 var _paint_3d_last_2d_hover_pixel := Vector2i(-1, -1)
 var _paint_3d_last_mouse_position := Vector2.ZERO
 var _icon_buttons: Array[Button] = []
+var _static_icons: Array[TextureRect] = []
+var _icon_resource_filesystem: Object
+var _icon_resource_filesystem_override: Object
+var _icon_exists_override := Callable()
+var _icon_load_override := Callable()
+var _icon_refresh_scheduled := false
+var _icon_refresh_attempts_remaining := 0
+var _icon_refresh_generation := 0
+var _icon_import_recovery_torn_down := false
 var _brush_button: Button
 var _fill_button: Button
 var _shape_button: Button
@@ -688,6 +699,7 @@ var _canvas_has_visible_pixels := false
 
 func setup(plugin: EditorPlugin) -> void:
 	_plugin = plugin
+	_setup_icon_import_recovery()
 
 
 func _ready() -> void:
@@ -699,6 +711,7 @@ func _ready() -> void:
 
 
 func initialize() -> void:
+	_setup_icon_import_recovery()
 	if _ui_built:
 		return
 	_ui_built = true
@@ -1477,6 +1490,7 @@ func _set_menu_item_tooltip(menu: PopupMenu, command_id: int, tooltip: String) -
 
 
 func _exit_tree() -> void:
+	_teardown_icon_import_recovery()
 	_disconnect_window_file_drop()
 	_disconnect_editor_selection_changed()
 
@@ -3366,14 +3380,10 @@ func _make_icon_menu_button(icon_name: String, tooltip: String) -> MenuButton:
 	button.add_theme_constant_override("icon_max_width", TOOL_ICON_MAX_WIDTH)
 	button.add_theme_constant_override("h_separation", 0)
 	_apply_icon_button_style(button)
-	var icon_path := _resolve_icon_path(icon_name)
-	if ResourceLoader.exists(icon_path):
-		# Contextual menu icons may be added while the editor is already open.
-		# Replace the cached texture so a newly imported SVG cannot display a
-		# previously cached icon after the plugin dock is rebuilt.
-		button.icon = ResourceLoader.load(icon_path, "Texture2D", ResourceLoader.CACHE_MODE_REPLACE)
-	else:
-		button.text = tooltip.substr(0, 1)
+	button.set_meta("inactive_icon_name", icon_name)
+	button.set_meta("active_icon_name", icon_name)
+	_icon_buttons.append(button)
+	_update_icon_button_icon(button)
 	return button
 
 
@@ -3383,10 +3393,177 @@ func _make_static_icon(icon_name: String, tooltip: String) -> TextureRect:
 	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	icon.tooltip_text = tooltip
-	var icon_path := _resolve_icon_path(icon_name)
-	if ResourceLoader.exists(icon_path):
-		icon.texture = load(icon_path)
+	icon.set_meta("gddraw_icon_name", icon_name)
+	_static_icons.append(icon)
+	_update_static_icon(icon)
 	return icon
+
+
+func _setup_icon_import_recovery() -> void:
+	_icon_import_recovery_torn_down = false
+	var filesystem := _icon_resource_filesystem_override
+	if not filesystem and _plugin:
+		var editor_interface = _plugin.get_editor_interface()
+		if editor_interface:
+			filesystem = editor_interface.get_resource_filesystem()
+	if filesystem == _icon_resource_filesystem:
+		_connect_icon_import_signals()
+		return
+	_disconnect_icon_import_signals()
+	_icon_resource_filesystem = filesystem
+	_connect_icon_import_signals()
+
+
+func _connect_icon_import_signals() -> void:
+	if not is_instance_valid(_icon_resource_filesystem):
+		return
+	var filesystem_changed := Callable(self, "_on_icon_filesystem_changed")
+	if _icon_resource_filesystem.has_signal("filesystem_changed") and not _icon_resource_filesystem.is_connected("filesystem_changed", filesystem_changed):
+		_icon_resource_filesystem.connect("filesystem_changed", filesystem_changed)
+	var resources_reimported := Callable(self, "_on_icon_resources_reimported")
+	if _icon_resource_filesystem.has_signal("resources_reimported") and not _icon_resource_filesystem.is_connected("resources_reimported", resources_reimported):
+		_icon_resource_filesystem.connect("resources_reimported", resources_reimported)
+	var resources_reload := Callable(self, "_on_icon_resources_reloaded")
+	if _icon_resource_filesystem.has_signal("resources_reload") and not _icon_resource_filesystem.is_connected("resources_reload", resources_reload):
+		_icon_resource_filesystem.connect("resources_reload", resources_reload)
+
+
+func _disconnect_icon_import_signals() -> void:
+	if not is_instance_valid(_icon_resource_filesystem):
+		return
+	for connection in [
+		["filesystem_changed", Callable(self, "_on_icon_filesystem_changed")],
+		["resources_reimported", Callable(self, "_on_icon_resources_reimported")],
+		["resources_reload", Callable(self, "_on_icon_resources_reloaded")],
+	]:
+		var signal_name: StringName = connection[0]
+		var callback: Callable = connection[1]
+		if _icon_resource_filesystem.has_signal(signal_name) and _icon_resource_filesystem.is_connected(signal_name, callback):
+			_icon_resource_filesystem.disconnect(signal_name, callback)
+
+
+func _teardown_icon_import_recovery() -> void:
+	_icon_import_recovery_torn_down = true
+	_icon_refresh_generation += 1
+	_icon_refresh_scheduled = false
+	_icon_refresh_attempts_remaining = 0
+	_disconnect_icon_import_signals()
+	_icon_resource_filesystem = null
+
+
+func set_icon_import_adapters_for_tests(filesystem: Object, exists_adapter := Callable(), load_adapter := Callable()) -> void:
+	_disconnect_icon_import_signals()
+	_icon_resource_filesystem = null
+	_icon_resource_filesystem_override = filesystem
+	_icon_exists_override = exists_adapter
+	_icon_load_override = load_adapter
+	_setup_icon_import_recovery()
+
+
+func _on_icon_filesystem_changed() -> void:
+	# This signal has no paths. Only react when at least one registered icon did
+	# not reach its intended imported texture during the previous attempt.
+	if _has_pending_icon_controls():
+		_schedule_icon_refresh()
+
+
+func _on_icon_resources_reimported(paths: PackedStringArray) -> void:
+	_on_icon_resource_paths_changed(paths)
+
+
+func _on_icon_resources_reloaded(paths: PackedStringArray) -> void:
+	_on_icon_resource_paths_changed(paths)
+
+
+func _on_icon_resource_paths_changed(paths: PackedStringArray) -> void:
+	if _icon_import_recovery_torn_down or not _contains_gddraw_icon_path(paths):
+		return
+	_schedule_icon_refresh()
+
+
+func _contains_gddraw_icon_path(paths: PackedStringArray) -> bool:
+	var icon_prefix := ICON_DIR + "/"
+	for path in paths:
+		if str(path).replace("\\", "/").begins_with(icon_prefix):
+			return true
+	return false
+
+
+func _schedule_icon_refresh() -> void:
+	if _icon_import_recovery_torn_down:
+		return
+	_icon_refresh_attempts_remaining = ICON_REFRESH_MAX_ATTEMPTS
+	if _icon_refresh_scheduled:
+		return
+	_icon_refresh_scheduled = true
+	_icon_refresh_generation += 1
+	call_deferred("_run_icon_refresh_attempt", _icon_refresh_generation)
+
+
+func _run_icon_refresh_attempt(generation: int) -> void:
+	if generation != _icon_refresh_generation or not _icon_refresh_scheduled or _icon_import_recovery_torn_down or not is_instance_valid(self):
+		return
+	if _icon_refresh_attempts_remaining <= 0:
+		_icon_refresh_scheduled = false
+		return
+	_icon_refresh_attempts_remaining -= 1
+	var pending := true
+	if not _icon_filesystem_is_busy():
+		pending = _refresh_registered_icons(true) > 0
+	if not pending or _icon_refresh_attempts_remaining <= 0:
+		_icon_refresh_scheduled = false
+		return
+	_queue_icon_refresh_retry(generation)
+
+
+func _queue_icon_refresh_retry(generation: int) -> void:
+	if is_inside_tree() and get_tree():
+		get_tree().create_timer(ICON_REFRESH_RETRY_DELAY).timeout.connect(
+			Callable(self, "_run_icon_refresh_attempt").bind(generation),
+			CONNECT_ONE_SHOT
+		)
+	else:
+		call_deferred("_run_icon_refresh_attempt", generation)
+
+
+func _icon_filesystem_is_busy() -> bool:
+	if not is_instance_valid(_icon_resource_filesystem):
+		return false
+	if _icon_resource_filesystem.has_method("is_scanning") and bool(_icon_resource_filesystem.call("is_scanning")):
+		return true
+	# is_importing() is absent in Godot 4.4 and available in newer releases.
+	return _icon_resource_filesystem.has_method("is_importing") and bool(_icon_resource_filesystem.call("is_importing"))
+
+
+func _refresh_registered_icons(force_replace: bool) -> int:
+	var pending := 0
+	var live_buttons: Array[Button] = []
+	for button in _icon_buttons:
+		if not is_instance_valid(button):
+			continue
+		live_buttons.append(button)
+		if not _update_icon_button_icon(button, force_replace):
+			pending += 1
+	_icon_buttons = live_buttons
+	var live_static_icons: Array[TextureRect] = []
+	for icon in _static_icons:
+		if not is_instance_valid(icon):
+			continue
+		live_static_icons.append(icon)
+		if not _update_static_icon(icon, force_replace):
+			pending += 1
+	_static_icons = live_static_icons
+	return pending
+
+
+func _has_pending_icon_controls() -> bool:
+	for button in _icon_buttons:
+		if is_instance_valid(button) and not bool(button.get_meta("gddraw_icon_ready", false)):
+			return true
+	for icon in _static_icons:
+		if is_instance_valid(icon) and not bool(icon.get_meta("gddraw_icon_ready", false)):
+			return true
+	return false
 
 
 func _get_active_icon_name(icon_name: String, selected_icon_name: String) -> String:
@@ -3419,14 +3596,50 @@ func _resolve_icon_path(icon_name: String, state_override := -1) -> String:
 	if state_override >= IconState.NORMAL:
 		resolved_name = _get_icon_state_name(resolved_name, state_override)
 	var icon_path := _get_icon_path(resolved_name)
-	if ResourceLoader.exists(icon_path):
+	if _icon_resource_exists(icon_path):
 		return icon_path
 	if state_override != IconState.NORMAL:
 		var fallback_name := _get_icon_state_name(resolved_name, IconState.NORMAL)
 		var fallback_path := _get_icon_path(fallback_name)
-		if ResourceLoader.exists(fallback_path):
+		if _icon_resource_exists(fallback_path):
 			return fallback_path
 	return icon_path
+
+
+func _icon_resource_exists(path: String) -> bool:
+	if _icon_exists_override.is_valid():
+		return bool(_icon_exists_override.call(path, "Texture2D"))
+	return ResourceLoader.exists(path, "Texture2D")
+
+
+func _load_icon_texture(path: String, replace_cache: bool) -> Texture2D:
+	if not _icon_resource_exists(path):
+		return null
+	var cache_mode := ResourceLoader.CACHE_MODE_REPLACE if replace_cache else ResourceLoader.CACHE_MODE_REUSE
+	var resource
+	if _icon_load_override.is_valid():
+		resource = _icon_load_override.call(path, "Texture2D", cache_mode)
+	else:
+		resource = ResourceLoader.load(path, "Texture2D", cache_mode)
+	return resource as Texture2D
+
+
+func _load_icon_for_state(icon_name: String, state_override: int, replace_cache: bool) -> Dictionary:
+	var resolved_name := icon_name.get_file()
+	if state_override >= IconState.NORMAL:
+		resolved_name = _get_icon_state_name(resolved_name, state_override)
+	var intended_path := _get_icon_path(resolved_name)
+	var texture := _load_icon_texture(intended_path, replace_cache)
+	if texture:
+		return {"texture": texture, "path": intended_path, "ready": true, "authored_state": true}
+	if state_override != IconState.NORMAL:
+		var fallback_name := _get_icon_state_name(resolved_name, IconState.NORMAL)
+		var fallback_path := _get_icon_path(fallback_name)
+		if fallback_path != intended_path:
+			var fallback_texture := _load_icon_texture(fallback_path, replace_cache)
+			if fallback_texture:
+				return {"texture": fallback_texture, "path": fallback_path, "ready": not _icon_resource_exists(intended_path), "authored_state": false}
+	return {"texture": null, "path": intended_path, "ready": false, "authored_state": false}
 
 
 func _on_toggle_button_icon_toggled(_enabled: bool, button: Button) -> void:
@@ -3437,30 +3650,50 @@ func _update_toggle_button_icon(button: Button) -> void:
 	_update_icon_button_icon(button)
 
 
-func _update_icon_button_icon(button: Button) -> void:
+func _update_icon_button_icon(button: Button, force_replace := false) -> bool:
 	if not button:
-		return
+		return true
 	var icon_name := str(button.get_meta("active_icon_name" if button.button_pressed else "inactive_icon_name", ""))
 	if icon_name.is_empty():
-		return
-	if button.disabled:
-		var disabled_icon_name := _get_icon_state_name(icon_name, IconState.DISABLED)
-		var disabled_icon_color := (
-			ICON_AUTHORED_COLOR
-			if ResourceLoader.exists(_get_icon_path(disabled_icon_name))
-			else ICON_DISABLED_FALLBACK_COLOR
-		)
-		if button.get_theme_color("icon_disabled_color") != disabled_icon_color:
-			button.add_theme_color_override("icon_disabled_color", disabled_icon_color)
-	var icon_path := _resolve_icon_path(icon_name, IconState.DISABLED if button.disabled else -1)
-	if str(button.get_meta("applied_icon_path", "")) == icon_path:
-		return
-	if ResourceLoader.exists(icon_path):
-		button.icon = load(icon_path)
+		return true
+	var state_override := IconState.DISABLED if button.disabled else -1
+	var intent := "%s:%d" % [icon_name, state_override]
+	if not force_replace and str(button.get_meta("gddraw_icon_intent", "")) == intent:
+		return bool(button.get_meta("gddraw_icon_ready", false))
+	var loaded := _load_icon_for_state(icon_name, state_override, force_replace)
+	var texture := loaded.get("texture") as Texture2D
+	var ready := bool(loaded.get("ready", false))
+	if texture:
+		button.icon = texture
 		button.text = ""
-		button.set_meta("applied_icon_path", icon_path)
+		button.set_meta("applied_icon_path", str(loaded.get("path", "")))
 	elif button.text.is_empty():
 		button.text = button.tooltip_text.substr(0, 1)
+	if button.disabled:
+		var disabled_icon_color := ICON_AUTHORED_COLOR if bool(loaded.get("authored_state", false)) else ICON_DISABLED_FALLBACK_COLOR
+		if button.get_theme_color("icon_disabled_color") != disabled_icon_color:
+			button.add_theme_color_override("icon_disabled_color", disabled_icon_color)
+	button.set_meta("gddraw_icon_intent", intent)
+	button.set_meta("gddraw_icon_ready", ready)
+	return ready
+
+
+func _update_static_icon(icon: TextureRect, force_replace := false) -> bool:
+	if not icon:
+		return true
+	var icon_name := str(icon.get_meta("gddraw_icon_name", ""))
+	if icon_name.is_empty():
+		return true
+	if not force_replace and icon.has_meta("gddraw_icon_ready"):
+		return bool(icon.get_meta("gddraw_icon_ready", false))
+	var loaded := _load_icon_for_state(icon_name, -1, force_replace)
+	var texture := loaded.get("texture") as Texture2D
+	if texture:
+		icon.texture = texture
+	var ready := bool(loaded.get("ready", false))
+	icon.set_meta("applied_icon_path", str(loaded.get("path", "")))
+	icon.set_meta("gddraw_icon_ready", ready)
+	return ready
 
 
 func _refresh_icon_button_states() -> void:

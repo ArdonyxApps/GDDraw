@@ -1,11 +1,29 @@
 # GDDraw
 
-GDDraw 0.2.0 is a Godot editor plugin for drawing prototype PNG assets and painting albedo textures on supported 3D surfaces without leaving the editor.
+GDDraw 0.3.0 is a Godot editor plugin for layered prototype art and multi-object albedo texture painting on supported 3D surfaces without leaving the editor.
 
 ## Requirements
 
-- Godot 4.4 or later. GDDraw 0.2.0 has been tested across Godot 4.4 through 4.7.
+- Godot 4.4 or later. GDDraw 0.3.0 has been tested across Godot 4.4 through 4.7.
 - A desktop editor build. Clipboard and native file-dialog behavior can vary by operating system.
+
+## Documentation
+
+GDDraw includes an offline user manual under **Help > Documentation**. The same canonical Markdown pages render directly on GitHub:
+
+- [Getting Started](addons/GDDraw/docs/getting-started.md)
+- [Interface](addons/GDDraw/docs/interface.md)
+- [Preferences](addons/GDDraw/docs/preferences.md)
+- [Tools](addons/GDDraw/docs/tools.md)
+- [Layers](addons/GDDraw/docs/layers.md)
+- [2D Drawing](addons/GDDraw/docs/2d-drawing.md)
+- [Painting in 3D](addons/GDDraw/docs/3d-painting.md)
+- [Saving and Files](addons/GDDraw/docs/saving-and-files.md)
+- [Shortcuts](addons/GDDraw/docs/shortcuts.md)
+- [Troubleshooting](addons/GDDraw/docs/troubleshooting.md)
+- [Known Limitations](addons/GDDraw/docs/known-limitations.md)
+
+Repository-level [`docs`](docs) remain developer and maintainer references. User documentation lives inside `addons/GDDraw/docs` so it is version-matched and included with every installed release.
 
 ## Installation
 
@@ -21,7 +39,8 @@ For an Asset Store package, `addons/GDDraw` is the package boundary. Do not incl
 - 2D drawing with brush, eraser, fill, line, rectangle, ellipse, raster text with installed/custom-directory fonts and text-box backgrounds, eyedropper, selection, lasso, transforms, crop, scale, mirror, grid, and tile preview tools.
 - PNG new/open/save/save-as workflows plus `Sprite2D` and configurable textured `CSGBox3D`, `CSGSphere3D`, and `CSGCylinder3D` creation.
 - Undo/redo and exact dirty-state tracking for independent 2D documents.
-- Texture-painting sessions for `MeshInstance3D` and supported single-material CSG geometry with triangle UVs.
+- A shared, collapsible Layers panel with paint layers, nested groups, thumbnails, visibility, opacity, locking, reordering, and lossless `.gddraw` project files.
+- Scoped multi-object texture-painting sessions for `MeshInstance3D` and supported single-material CSG geometry with triangle UVs.
 - 2D, 3D, and linked split views with UV overlays and editor-style 3D navigation.
 - Protected session replacement, save/discard/cancel flows, 2D workspace restoration, and editor undo/redo for material or texture assignment.
 - A staged stable-release updater in the Help menu with explicit download and Install and Restart consent.
@@ -29,7 +48,7 @@ For an Asset Store package, `addons/GDDraw` is the package boundary. Do not incl
 ## Quick Start: 2D
 
 1. Open the GDDraw bottom panel and draw on the canvas.
-2. Use **File > New**, **Open**, **Save**, or **Save As** for PNG documents.
+2. Use the Layers panel for non-destructive paint layers and groups. **File > Save Layered Project** preserves the editable stack; **Save As** exports its merged PNG.
 3. Use **Godot > Create Sprite2D** to add the current saved image to the edited 2D scene.
 
 The default save folder is `res://gddraw/images`, and it can be changed in Preferences.
@@ -71,14 +90,16 @@ Node creation, ownership, material/texture assignment, collision configuration, 
 ## Quick Start: Paint a 3D Surface Texture
 
 1. Select a `MeshInstance3D`, a supported material-bearing CSG shape, or a parent containing one.
-2. Switch GDDraw to 3D or Split view and choose **Use Selected 3D Surface**. You can also drag the Scene-tree node into the 3D pane.
-3. Choose an editable material slot. Missing materials or textures are created only after explicit confirmation.
-4. Paint the albedo texture. The eraser restores pixels from the texture loaded at session start.
-5. Use **Save**, **Save As**, or **Stop Editing**. A successful Save As assigns the new PNG through Godot's editor undo/redo system.
+2. Switch GDDraw to 3D or Split view and choose **Use Selected 3D Object**. You can also drag a Scene-tree node into the 3D pane.
+3. Choose one surface, the selected hierarchy, or all selected objects. GDDraw previews the compatible targets before opening them; missing materials or textures are created only after explicit confirmation.
+4. Paint any imported object. Hits activate the owning target unless Target Lock is enabled, and a stroke never crosses target boundaries.
+5. Use **Save** or **Save As** for flattened target PNGs and **Save Layered Project** for the complete editable multi-object session.
 
 Starting a 3D session preserves the independent 2D workspace. Unsaved 2D or 3D changes are guarded by save/discard/cancel prompts.
 
 An active 3D session also survives editor scene-tab changes. GDDraw retains its private mesh snapshot, material, paint cache, and editable PNG when the source scene becomes inactive or is closed, so the model remains visible and paintable. **Scene Transform Link** is greyed out while no live source node is available and becomes usable again if the same source scene returns.
+
+Layered 3D `.gddraw` files keep paint data in the archive while referencing their Godot source scene externally. If the recorded scene is not active when a document is opened, GDDraw can open it, relink compatible saved object paths in the current scene, or open the embedded layers without a 3D preview. A missing source scene is reported before the current workspace is replaced; mesh geometry is never silently duplicated into the layered file.
 
 The 3D preview's lighting, perspective grid, transform gizmo, and transform reset controls affect only GDDraw's private preview. They never modify the source scene, mesh, material, or painted texture. **Scene Transform Link** is one-way from the live source transform into the private preview.
 
@@ -90,18 +111,19 @@ The 3D preview's lighting, perspective grid, transform gizmo, and transform rese
 - 3D: left drag paints with Brush/Eraser or previews and commits Line, Rectangle, and Ellipse tools across compatible UV-connected surface triangles; middle drag orbits, Shift+middle drag pans, and the mouse wheel zooms.
 - 3D freelook: hold right mouse and use WASD; Q/E move vertically; Shift/Alt adjust speed.
 - Press F to frame the active 3D surface.
-- Use **Help > Controls** in the plugin for selection shortcuts and the complete compact reference.
+- Use **Help > Documentation** and select **Shortcuts** in the left navigation for the complete compact reference.
 
 ## Known Limitations
 
 - Overlapping UV shells can make linked 2D-to-3D hover highlight a hidden or rear surface.
 - 3D painting is limited to albedo textures on `StandardMaterial3D` targets and supported single-material CSG generated geometry with usable triangle UVs.
+- Scene objects or material slots using the same existing PNG share one coordinated paint target and layer stack, so the shared destination is saved once and every bound preview updates together.
 - `CSGTorus3D` creation is deferred: Godot's generated torus seam triangles wrap from near 1 back to 0 on both UV axes, causing interpolation across unrelated texture regions and unsafe deterministic paint hits at those seams.
 - Unsupported shader materials, texture channels, and multi-material CSG results must be prepared outside GDDraw.
 - Spatially distinct mirrored/shared UV pieces can be painted from a ray-selected 3D surface and may display the same pixels on every sharing piece; coincident mappings that cannot be ray-disambiguated are rejected.
 - Split mode and Preferences can crowd narrow bottom-panel layouts.
 - Active 3D texture sessions lock canvas resizing to protect the source texture.
-- Independent 2D document Save/Save As output is PNG.
+- PNG export is flattened by design; use `.gddraw` layered projects to preserve editable layers, groups, target bindings, and eraser sources.
 
 See [`docs/feature-backlog.md`](docs/feature-backlog.md) for non-blocking follow-up work and [`docs/architecture.md`](docs/architecture.md) for implementation boundaries.
 
@@ -111,7 +133,7 @@ Stable updater releases use this maintainer contract:
 
 1. Update `GDDraw.gd` `PLUGIN_VERSION` to `X.Y.Z`.
 2. Update `plugin.cfg` `version` to the same value.
-3. Build a ZIP containing `addons/GDDraw/plugin.cfg` at that exact root-relative path. Ship only the `addons/GDDraw` package, keep source `.gd.uid` files, and exclude generated `.import` sidecars, editor caches, repository documentation/development metadata, native binaries, and project-owned `res://gddraw/` content.
+3. Build a ZIP containing `addons/GDDraw/plugin.cfg` at that exact root-relative path. Ship only the `addons/GDDraw` package, including `addons/GDDraw/docs`, and keep source `.gd.uid` files. Exclude generated `.import` sidecars, editor caches, repository-level documentation/development metadata, native binaries, and project-owned `res://gddraw/` content.
 4. Name the uploaded asset `GDDraw-vX.Y.Z.zip`.
 5. Ensure GitHub publishes the asset's `sha256:<64 lowercase hex digits>` digest in the Release API metadata.
 6. Create a non-draft, non-prerelease GitHub Release tagged exactly `vX.Y.Z`.

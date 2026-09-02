@@ -10,13 +10,17 @@ const STATUS_ERROR := "error"
 var source_node: Node3D
 var source_name := "3D Surface"
 var source_class_name := "Node3D"
+var source_mesh: Mesh
 var mesh_snapshot: Mesh
+var source_skeleton: Skeleton3D
+var skeleton_pose_baked := false
 var source_transform := Transform3D.IDENTITY
 var is_csg := false
 var material_slot := 0
 var material: StandardMaterial3D
 var geometry_signature := ""
 var preview_surface_slots := PackedInt32Array()
+var _skeleton_pose_dirty := false
 
 
 static func from_node(node: Node) -> GDDraw3DSurfaceTarget:
@@ -50,7 +54,29 @@ func refresh_geometry() -> Dictionary:
 		STATUS: STATUS_OK,
 		MESSAGE: "",
 		"changed": previous_signature != geometry_signature,
+		"skeleton_pose_baked": skeleton_pose_baked,
 	}
+
+
+func has_source_mesh_changed() -> bool:
+	return (
+		not is_csg
+		and is_instance_valid(source_node)
+		and source_node is MeshInstance3D
+		and (source_node as MeshInstance3D).mesh != source_mesh
+	)
+
+
+func has_pending_skeleton_pose_refresh() -> bool:
+	return is_instance_valid(source_skeleton) and _skeleton_pose_dirty
+
+
+func is_skeleton_pose_baked() -> bool:
+	return skeleton_pose_baked
+
+
+func release() -> void:
+	_bind_source_skeleton(null)
 
 
 func get_source_label() -> String:
@@ -64,10 +90,11 @@ func get_source_name() -> String:
 
 
 func get_mesh_label() -> String:
-	if not mesh_snapshot:
+	var label_mesh := source_mesh if source_mesh else mesh_snapshot
+	if not label_mesh:
 		return "generated mesh" if is_csg else "mesh"
-	if not mesh_snapshot.resource_name.is_empty():
-		return mesh_snapshot.resource_name
+	if not label_mesh.resource_name.is_empty():
+		return label_mesh.resource_name
 	return "generated CSG mesh" if is_csg else "mesh"
 
 
@@ -106,13 +133,13 @@ func discover_material_slots() -> Array[Dictionary]:
 		choices.push_back(_make_choice(0, "CSG Material", candidate, configuration_error, candidate == null))
 		return choices
 	var mesh_instance := source_node as MeshInstance3D
-	var surface_count := mesh_snapshot.get_surface_count()
+	var surface_count := source_mesh.get_surface_count() if source_mesh else mesh_snapshot.get_surface_count()
 	if surface_count == 0:
 		choices.push_back(_make_choice(-1, "Material Override", mesh_instance.material_override, "", false))
 		return choices
 	for slot in range(surface_count):
 		var slot_name := "Material %d" % slot
-		var surface_name: String = mesh_snapshot.surface_get_name(slot)
+		var surface_name: String = source_mesh.surface_get_name(slot) if source_mesh else mesh_snapshot.surface_get_name(slot)
 		if not surface_name.is_empty():
 			slot_name += " (%s)" % surface_name
 		choices.push_back(_make_choice(slot, slot_name, mesh_instance.get_active_material(slot), "", false))
@@ -236,6 +263,7 @@ func assign_new_material_and_texture(editor_plugin: EditorPlugin, next_texture: 
 
 func _capture(node: Node3D) -> Dictionary:
 	source_node = node
+	source_mesh = null
 	mesh_snapshot = null
 	material = null
 	preview_surface_slots = PackedInt32Array()
@@ -250,8 +278,12 @@ func _capture(node: Node3D) -> Dictionary:
 	# without touching the source hierarchy.
 	source_transform = _get_source_scene_transform()
 	if source_node is MeshInstance3D:
-		mesh_snapshot = (source_node as MeshInstance3D).mesh
+		var mesh_instance := source_node as MeshInstance3D
+		source_mesh = mesh_instance.mesh
+		_bind_source_skeleton(_resolve_source_skeleton(mesh_instance))
+		mesh_snapshot = _make_mesh_snapshot(mesh_instance)
 	elif is_csg:
+		_bind_source_skeleton(null)
 		if not source_node.has_method("get_material") or not source_node.has_method("set_material"):
 			return _result(
 				STATUS_ERROR,
@@ -263,6 +295,200 @@ func _capture(node: Node3D) -> Dictionary:
 		return _result(STATUS_ERROR, "%s has no readable generated mesh snapshot." % get_source_label())
 	geometry_signature = _make_geometry_signature(mesh_snapshot)
 	return validate_geometry()
+
+
+func _resolve_source_skeleton(mesh_instance: MeshInstance3D) -> Skeleton3D:
+	if not mesh_instance or mesh_instance.skeleton.is_empty():
+		return null
+	return mesh_instance.get_node_or_null(mesh_instance.skeleton) as Skeleton3D
+
+
+func _bind_source_skeleton(next_skeleton: Skeleton3D) -> void:
+	if source_skeleton == next_skeleton:
+		return
+	if is_instance_valid(source_skeleton) and source_skeleton.skeleton_updated.is_connected(_on_source_skeleton_updated):
+		source_skeleton.skeleton_updated.disconnect(_on_source_skeleton_updated)
+	source_skeleton = next_skeleton
+	# Imported skins may not receive a valid RenderingServer skeleton RID until
+	# the scene has advanced once. Keep the initial pose pending so the dock's
+	# geometry poll retries instead of retaining bind-space vertices forever.
+	_skeleton_pose_dirty = is_instance_valid(source_skeleton)
+	if is_instance_valid(source_skeleton) and not source_skeleton.skeleton_updated.is_connected(_on_source_skeleton_updated):
+		source_skeleton.skeleton_updated.connect(_on_source_skeleton_updated)
+
+
+func _on_source_skeleton_updated() -> void:
+	_skeleton_pose_dirty = true
+
+
+func _make_mesh_snapshot(mesh_instance: MeshInstance3D) -> Mesh:
+	skeleton_pose_baked = false
+	if not source_mesh:
+		_skeleton_pose_dirty = false
+		return null
+	if not _has_skeleton_pose_data(mesh_instance):
+		_skeleton_pose_dirty = false
+		return source_mesh
+	var baked: ArrayMesh
+	if _can_use_native_skeleton_pose_bake(mesh_instance):
+		baked = mesh_instance.bake_mesh_from_current_skeleton_pose()
+	if not baked:
+		baked = _bake_current_skeleton_pose_on_cpu(mesh_instance)
+	if not baked or baked.get_surface_count() != source_mesh.get_surface_count():
+		_skeleton_pose_dirty = is_instance_valid(source_skeleton)
+		return source_mesh
+	# Godot's native pose bake intentionally omits materials and may omit
+	# imported surface names. GDDraw owns preview materials separately, but the
+	# original names remain useful in the material picker.
+	for surface_index in range(baked.get_surface_count()):
+		baked.surface_set_name(surface_index, source_mesh.surface_get_name(surface_index))
+	skeleton_pose_baked = true
+	_skeleton_pose_dirty = false
+	return baked
+
+
+func _has_skeleton_pose_data(mesh_instance: MeshInstance3D) -> bool:
+	if (
+		not mesh_instance
+		or not mesh_instance.is_inside_tree()
+		or not source_mesh is ArrayMesh
+		or not is_instance_valid(source_skeleton)
+		or not source_skeleton.is_inside_tree()
+	):
+		return false
+	if mesh_instance.skin:
+		return true
+	for surface_index in range(source_mesh.get_surface_count()):
+		var arrays := source_mesh.surface_get_arrays(surface_index)
+		if (
+			arrays.size() > Mesh.ARRAY_WEIGHTS
+			and arrays[Mesh.ARRAY_BONES] is PackedInt32Array
+			and arrays[Mesh.ARRAY_WEIGHTS] is PackedFloat32Array
+			and not (arrays[Mesh.ARRAY_BONES] as PackedInt32Array).is_empty()
+		):
+			return true
+	return false
+
+
+func _can_use_native_skeleton_pose_bake(mesh_instance: MeshInstance3D) -> bool:
+	var skin_reference := mesh_instance.get_skin_reference()
+	return skin_reference != null and skin_reference.get_skeleton().is_valid()
+
+
+func _bake_current_skeleton_pose_on_cpu(mesh_instance: MeshInstance3D) -> ArrayMesh:
+	var source_array_mesh := source_mesh as ArrayMesh
+	if not source_array_mesh or not is_instance_valid(source_skeleton):
+		return null
+	var skin: Skin = mesh_instance.skin
+	var skeleton_to_mesh := mesh_instance.global_transform.affine_inverse() * source_skeleton.global_transform
+	var baked := ArrayMesh.new()
+	for surface_index in range(source_array_mesh.get_surface_count()):
+		var source_arrays := source_array_mesh.surface_get_arrays(surface_index)
+		var baked_arrays := source_arrays.duplicate(true)
+		var vertices: PackedVector3Array = source_arrays[Mesh.ARRAY_VERTEX]
+		var bones: PackedInt32Array = (
+			source_arrays[Mesh.ARRAY_BONES]
+			if source_arrays[Mesh.ARRAY_BONES] is PackedInt32Array
+			else PackedInt32Array()
+		)
+		var weights: PackedFloat32Array = (
+			source_arrays[Mesh.ARRAY_WEIGHTS]
+			if source_arrays[Mesh.ARRAY_WEIGHTS] is PackedFloat32Array
+			else PackedFloat32Array()
+		)
+		if not vertices.is_empty() and bones.size() == weights.size() and bones.size() % vertices.size() == 0:
+			var influences_per_vertex := bones.size() / vertices.size()
+			var normals: PackedVector3Array = (
+				source_arrays[Mesh.ARRAY_NORMAL]
+				if source_arrays[Mesh.ARRAY_NORMAL] is PackedVector3Array
+				else PackedVector3Array()
+			)
+			var tangents: PackedFloat32Array = (
+				source_arrays[Mesh.ARRAY_TANGENT]
+				if source_arrays[Mesh.ARRAY_TANGENT] is PackedFloat32Array
+				else PackedFloat32Array()
+			)
+			var baked_vertices := PackedVector3Array()
+			baked_vertices.resize(vertices.size())
+			var baked_normals := PackedVector3Array()
+			if normals.size() == vertices.size():
+				baked_normals.resize(normals.size())
+			var baked_tangents := PackedFloat32Array()
+			if tangents.size() == vertices.size() * 4:
+				baked_tangents.resize(tangents.size())
+			var transform_cache: Dictionary = {}
+			for vertex_index in range(vertices.size()):
+				var posed_vertex := Vector3.ZERO
+				var posed_normal := Vector3.ZERO
+				var posed_tangent := Vector3.ZERO
+				var total_weight := 0.0
+				for influence_index in range(influences_per_vertex):
+					var array_index := vertex_index * influences_per_vertex + influence_index
+					var weight := weights[array_index]
+					if is_zero_approx(weight):
+						continue
+					var bind_index := bones[array_index]
+					var pose_transform: Transform3D = transform_cache.get(bind_index, Transform3D())
+					if not transform_cache.has(bind_index):
+						pose_transform = _get_skin_pose_transform(skin, bind_index, skeleton_to_mesh)
+						transform_cache[bind_index] = pose_transform
+					posed_vertex += (pose_transform * vertices[vertex_index]) * weight
+					if not baked_normals.is_empty():
+						posed_normal += (pose_transform.basis * normals[vertex_index]) * weight
+					if not baked_tangents.is_empty():
+						var tangent_offset := vertex_index * 4
+						var tangent := Vector3(
+							tangents[tangent_offset],
+							tangents[tangent_offset + 1],
+							tangents[tangent_offset + 2]
+						)
+						posed_tangent += (pose_transform.basis * tangent) * weight
+					total_weight += weight
+				if total_weight > 0.0:
+					baked_vertices[vertex_index] = posed_vertex / total_weight
+					if not baked_normals.is_empty():
+						baked_normals[vertex_index] = (posed_normal / total_weight).normalized()
+					if not baked_tangents.is_empty():
+						var tangent_offset := vertex_index * 4
+						var normalized_tangent := (posed_tangent / total_weight).normalized()
+						baked_tangents[tangent_offset] = normalized_tangent.x
+						baked_tangents[tangent_offset + 1] = normalized_tangent.y
+						baked_tangents[tangent_offset + 2] = normalized_tangent.z
+						baked_tangents[tangent_offset + 3] = tangents[tangent_offset + 3]
+				else:
+					baked_vertices[vertex_index] = vertices[vertex_index]
+					if not baked_normals.is_empty():
+						baked_normals[vertex_index] = normals[vertex_index]
+					if not baked_tangents.is_empty():
+						var tangent_offset := vertex_index * 4
+						for component in range(4):
+							baked_tangents[tangent_offset + component] = tangents[tangent_offset + component]
+			baked_arrays[Mesh.ARRAY_VERTEX] = baked_vertices
+			if not baked_normals.is_empty():
+				baked_arrays[Mesh.ARRAY_NORMAL] = baked_normals
+			if not baked_tangents.is_empty():
+				baked_arrays[Mesh.ARRAY_TANGENT] = baked_tangents
+			# The preview snapshot already contains the posed vertices and must not
+			# be skinned a second time if it is reused by another MeshInstance3D.
+			baked_arrays[Mesh.ARRAY_BONES] = null
+			baked_arrays[Mesh.ARRAY_WEIGHTS] = null
+		baked.add_surface_from_arrays(source_array_mesh.surface_get_primitive_type(surface_index), baked_arrays)
+	return baked
+
+
+func _get_skin_pose_transform(skin: Skin, bind_index: int, skeleton_to_mesh: Transform3D) -> Transform3D:
+	var skeleton_bone := bind_index
+	var bind_pose := Transform3D.IDENTITY
+	if skin and bind_index >= 0 and bind_index < skin.get_bind_count():
+		skeleton_bone = skin.get_bind_bone(bind_index)
+		if skeleton_bone < 0:
+			var bind_name := skin.get_bind_name(bind_index)
+			if not bind_name.is_empty():
+				skeleton_bone = source_skeleton.find_bone(bind_name)
+		bind_pose = skin.get_bind_pose(bind_index)
+	if skeleton_bone < 0 or skeleton_bone >= source_skeleton.get_bone_count():
+		return Transform3D.IDENTITY
+	return skeleton_to_mesh * source_skeleton.get_bone_global_pose(skeleton_bone) * bind_pose
 
 
 func _get_source_scene_transform() -> Transform3D:

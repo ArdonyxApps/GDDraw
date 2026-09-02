@@ -2,6 +2,13 @@
 
 This document is a compact handoff for future work on the GDDraw Godot editor plugin.
 
+The active 0.3.0 layer-system design and phased migration plan live in
+[`0.3.0-layer-architecture.md`](0.3.0-layer-architecture.md). Its distinction
+between object groups, paint targets, and composited layer nodes is authoritative
+for layer work. The live implementation checkpoint is
+[`0.3.0-current-handoff.md`](0.3.0-current-handoff.md); the older sections below
+remain useful for unchanged 0.2.0-era subsystems.
+
 Unless otherwise noted, source paths in this document are relative to `addons/GDDraw/`.
 
 ## Plugin Shape
@@ -10,6 +17,16 @@ Unless otherwise noted, source paths in this document are relative to `addons/GD
 - `gddraw_dock.gd` builds and owns the editor dock UI.
 - `gddraw_canvas.gd` owns the image data, canvas view state, drawing behavior, and rendering.
 - `gddraw_history.gd` owns the dock undo/redo image stacks.
+- `gddraw_layer_node.gd` owns recursive paint-layer/group state and deep snapshots.
+- `gddraw_paint_target.gd` owns one compatible layer stack, selection invariants,
+  CPU compositing, per-layer eraser sources, and target-local binding metadata.
+- `gddraw_layer_session.gd` owns object groups, paint targets, active-target
+  selection, target-lock routing, and complete in-memory session snapshots.
+- `gddraw_layer_document.gd` owns validated, versioned `.gddraw` ZIP
+  persistence and atomic replacement.
+- `gddraw_3d_layer_discovery.gd` owns read-only scoped scene discovery, while
+  `gddraw_3d_layer_coordinator.gd` binds the resulting targets to one shared
+  layer session and the existing per-texture session implementation.
 - `gddraw_shortcuts.gd` translates raw key events into GDDraw shortcut actions.
 - `gddraw_storage_paths.gd` defines the immutable plugin boundary, canonical project asset paths, reserved update-staging path, and shared metadata access for font and parameter-only brush preferences.
 - `gddraw_update_checker.gd` owns the stable GitHub Release request, semantic version comparison, exact release-asset selection, and release/asset URL validation.
@@ -26,6 +43,12 @@ Unless otherwise noted, source paths in this document are relative to `addons/GD
 - Start with `GDDraw.gd` for plugin lifecycle and bottom-panel registration.
 - Read `gddraw_dock.gd` when changing menus, dialogs, toolbar controls, preferences, status text, 3D viewport orchestration, save prompts, or editor-scene integration.
 - Read `gddraw_canvas.gd` when changing pixels, tools, selection behavior, canvas input, zoom/pan, drawing previews, crop/scale, fill, brush stamping, or image mutation.
+- Read `gddraw_layer_node.gd`, `gddraw_paint_target.gd`, and
+  `gddraw_layer_session.gd` before changing 0.3.0 layer hierarchy,
+  compositing, object ownership, paint-target routing, or snapshots.
+- Read `gddraw_layer_document.gd` before changing layered save/load or dirty
+  baselines. Read the 3D discovery and coordinator helpers before changing
+  import scopes, multi-object previews, target routing, or scene reattachment.
 - Read `gddraw_3d_surface_target.gd` when changing which 3D/CSG nodes are supported, how material slots are discovered, or how scene materials/textures are assigned.
 - Read `gddraw_3d_texture_session.gd` when changing 3D texture-session lifecycle, dirty-state tracking, source texture loading, Save/Save As, eraser baseline behavior, or UV data handoff.
 - Read `gddraw_png_io.gd`, `gddraw_history.gd`, and `gddraw_shortcuts.gd` for small focused helpers that should stay easy to reason about.

@@ -1,0 +1,38 @@
+{
+  "version": "0.3.0",
+  "home": "index.md",
+  "sections": [
+    {
+      "title": "Getting Started",
+      "pages": [
+        {"title": "Welcome to GDDraw", "path": "index.md", "description": "Overview of GDDraw and this manual."},
+        {"title": "Getting Started", "path": "getting-started.md", "description": "Install GDDraw and create the first 2D or 3D session."},
+        {"title": "Interface", "path": "interface.md", "description": "Learn the menus, tool rail, canvas, and workspace panels."},
+        {"title": "Preferences", "path": "preferences.md", "description": "Configure brush, view, canvas, save-folder, and font settings."}
+      ]
+    },
+    {
+      "title": "Drawing and Editing",
+      "pages": [
+        {"title": "Tools", "path": "tools.md", "description": "Complete reference for every drawing and editing tool."},
+        {"title": "Layers", "path": "layers.md", "description": "Paint layers, groups, visibility, locking, filtering, and hierarchy actions."},
+        {"title": "2D Drawing", "path": "2d-drawing.md", "description": "Canvas navigation, image operations, selections, and layered 2D workflows."}
+      ]
+    },
+    {
+      "title": "3D Texture Painting",
+      "pages": [
+        {"title": "Painting in 3D", "path": "3d-painting.md", "description": "Import a hierarchy, paint UV textures, use Scene Sync, and save changes."}
+      ]
+    },
+    {
+      "title": "Files and Reference",
+      "pages": [
+        {"title": "Saving and Files", "path": "saving-and-files.md", "description": "PNG export, layered projects, closing sessions, and project storage."},
+        {"title": "Shortcuts", "path": "shortcuts.md", "description": "Keyboard and mouse reference."},
+        {"title": "Troubleshooting", "path": "troubleshooting.md", "description": "Solutions for common 2D, layer, and 3D workflow questions."},
+        {"title": "Known Limitations", "path": "known-limitations.md", "description": "Current boundaries of GDDraw 0.3.0."}
+      ]
+    }
+  ]
+}

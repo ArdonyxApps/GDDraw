@@ -84,7 +84,129 @@ class ImageDropTarget:
 		return false
 
 
+class LayerHierarchyTree:
+	extends Tree
+
+	signal selected_row_reclicked(context: Dictionary)
+	signal lock_slot_hover_changed(context: Dictionary, hovered: bool)
+
+	var can_drop_callback := Callable()
+	var drop_callback := Callable()
+	var stable_selected_context: Dictionary = {}
+	var _reclick_candidate: Dictionary = {}
+	var _reclick_press_position := Vector2.ZERO
+	var _hovered_lock_context: Dictionary = {}
+
+	func _gui_input(event: InputEvent) -> void:
+		if event is InputEventMouseMotion:
+			if not _reclick_candidate.is_empty() and event.position.distance_to(_reclick_press_position) > 4.0:
+				_reclick_candidate.clear()
+			_update_lock_slot_hover(event.position)
+			return
+		if not event is InputEventMouseButton or event.button_index != MOUSE_BUTTON_LEFT:
+			return
+		if event.pressed:
+			_reclick_candidate.clear()
+			var item := get_item_at_position(event.position)
+			if not item or item != get_selected() or get_column_at_position(event.position) != 0:
+				return
+			if get_button_id_at_position(event.position) >= 0:
+				return
+			# The disclosure arrow sits before the native item content rectangle.
+			# Excluding that area keeps expand/collapse clicks from starting rename.
+			if _is_disclosure_arrow_position(item, event.position):
+				return
+			var metadata: Variant = item.get_metadata(0)
+			if (
+				metadata is Dictionary
+				and str(metadata.get("kind", "")) in ["paint", "group"]
+				and _context_matches(metadata, stable_selected_context)
+			):
+				_reclick_candidate = metadata.duplicate(true)
+				_reclick_press_position = event.position
+		elif not _reclick_candidate.is_empty():
+			var context := _reclick_candidate.duplicate(true)
+			_reclick_candidate.clear()
+			if event.position.distance_to(_reclick_press_position) <= 4.0:
+				selected_row_reclicked.emit(context)
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_MOUSE_EXIT:
+			clear_lock_slot_hover()
+
+	func clear_lock_slot_hover() -> void:
+		if _hovered_lock_context.is_empty():
+			return
+		var previous := _hovered_lock_context.duplicate(true)
+		_hovered_lock_context.clear()
+		lock_slot_hover_changed.emit(previous, false)
+
+	func _update_lock_slot_hover(position: Vector2) -> void:
+		var next_context: Dictionary = {}
+		var item := get_item_at_position(position)
+		if item and get_column_at_position(position) == 1:
+			var metadata: Variant = item.get_metadata(0)
+			if metadata is Dictionary and str(metadata.get("kind", "")) in ["paint", "group"]:
+				next_context = metadata.duplicate(true)
+		if _context_matches(next_context, _hovered_lock_context):
+			return
+		if not _hovered_lock_context.is_empty():
+			lock_slot_hover_changed.emit(_hovered_lock_context.duplicate(true), false)
+		_hovered_lock_context = next_context
+		if not _hovered_lock_context.is_empty():
+			lock_slot_hover_changed.emit(_hovered_lock_context.duplicate(true), true)
+
+	func _is_disclosure_arrow_position(item: TreeItem, position: Vector2) -> bool:
+		if not item.get_first_child():
+			return false
+		var depth := 0
+		var ancestor := item.get_parent()
+		while ancestor and ancestor != get_root():
+			depth += 1
+			ancestor = ancestor.get_parent()
+		var indentation := maxi(12, get_theme_constant("indentation"))
+		var arrow := get_theme_icon("arrow_collapsed")
+		var arrow_width := arrow.get_width() if arrow else 12
+		return position.x < float(depth * indentation + arrow_width + 4)
+
+	func _context_matches(left: Dictionary, right: Dictionary) -> bool:
+		return (
+			not right.is_empty()
+			and str(left.get("kind", "")) == str(right.get("kind", ""))
+			and str(left.get("target_id", "")) == str(right.get("target_id", ""))
+			and str(left.get("node_id", "")) == str(right.get("node_id", ""))
+			and (
+				not right.has("group_id")
+				or str(left.get("group_id", "")) == str(right.get("group_id", ""))
+			)
+		)
+
+	func _get_drag_data(at_position: Vector2) -> Variant:
+		_reclick_candidate.clear()
+		clear_lock_slot_hover()
+		var item := get_item_at_position(at_position)
+		if not item:
+			return null
+		var metadata: Variant = item.get_metadata(0)
+		if not metadata is Dictionary or str(metadata.get("kind", "")) not in ["paint", "group"]:
+			return null
+		var preview := Label.new()
+		preview.text = item.get_text(0)
+		preview.modulate = Color(1.0, 1.0, 1.0, 0.9)
+		set_drag_preview(preview)
+		return {"gddraw_layer_node": metadata.duplicate(true)}
+
+	func _can_drop_data(at_position: Vector2, data: Variant) -> bool:
+		set_drop_mode_flags(Tree.DROP_MODE_ON_ITEM | Tree.DROP_MODE_INBETWEEN)
+		return can_drop_callback.is_valid() and bool(can_drop_callback.call(at_position, data))
+
+	func _drop_data(at_position: Vector2, data: Variant) -> void:
+		if drop_callback.is_valid():
+			drop_callback.call(at_position, data)
+
+
 const ICON_DIR := "res://addons/GDDraw/icons"
+const GODOT_ICON_DIR := ICON_DIR + "/godot"
 enum IconState { NORMAL, SELECTED, DISABLED }
 const ICON_REFRESH_MAX_ATTEMPTS := 180
 const ICON_REFRESH_RETRY_DELAY := 1.0
@@ -93,7 +215,14 @@ const CANVAS_SCRIPT_PATH := "res://addons/GDDraw/gddraw_canvas.gd"
 const HISTORY_SCRIPT_PATH := "res://addons/GDDraw/gddraw_history.gd"
 const PNG_IO_SCRIPT_PATH := "res://addons/GDDraw/gddraw_png_io.gd"
 const SHORTCUTS_SCRIPT_PATH := "res://addons/GDDraw/gddraw_shortcuts.gd"
+const LAYER_SESSION_SCRIPT_PATH := "res://addons/GDDraw/gddraw_layer_session.gd"
+const LAYER_DOCUMENT_SCRIPT_PATH := "res://addons/GDDraw/gddraw_layer_document.gd"
 const TEXTURE_3D_SESSION_SCRIPT_PATH := "res://addons/GDDraw/gddraw_3d_texture_session.gd"
+const BATCH_SAVE_3D_DIALOG_SCRIPT_PATH := "res://addons/GDDraw/gddraw_3d_batch_save_dialog.gd"
+const LAYER_3D_DISCOVERY_SCRIPT_PATH := "res://addons/GDDraw/gddraw_3d_layer_discovery.gd"
+const LAYER_3D_COORDINATOR_SCRIPT_PATH := "res://addons/GDDraw/gddraw_3d_layer_coordinator.gd"
+const DOCUMENTATION_BROWSER_SCRIPT_PATH := "res://addons/GDDraw/gddraw_documentation_browser.gd"
+const DOCUMENTATION_MANIFEST_PATH := "res://addons/GDDraw/docs/navigation.json"
 const MESH_PAINT_CACHE_SCRIPT_PATH := "res://addons/GDDraw/gddraw_mesh_paint_cache.gd"
 const SPRITE_CREATOR_SCRIPT_PATH := "res://addons/GDDraw/editor_integration/gddraw_sprite_creator.gd"
 const UPDATE_CHECKER_SCRIPT_PATH := "res://addons/GDDraw/gddraw_update_checker.gd"
@@ -103,6 +232,9 @@ const PLUGIN_SCRIPT_PATH := "res://addons/GDDraw/GDDraw.gd"
 const StoragePaths := preload("res://addons/GDDraw/gddraw_storage_paths.gd")
 const TOOL_BUTTON_SIZE := Vector2(28, 28)
 const TOOL_ICON_MAX_WIDTH := 18
+const SESSION_PICKER_NAME_COLUMN := 0
+const SESSION_PICKER_INCLUDE_COLUMN := 1
+const SESSION_PICKER_INCLUDE_COLUMN_WIDTH := 32
 const COMPACT_ROTATION_BUTTON_SIZE := Vector2(20, 14)
 const COMPACT_ROTATION_ICON_MAX_WIDTH := 12
 const TOOLBAR_SEPARATION := 2
@@ -123,7 +255,9 @@ const PAINT_3D_STAGE_MIN_SIZE := 8.0
 const PAINT_3D_STAGE_PADDING := 1.8
 const PAINT_3D_STAGE_GRID_LINES := 8
 const PAINT_3D_STAGE_GRID_EXTENT_MULTIPLIER := 6
+const LAYERED_3D_SCENE_OPEN_TIMEOUT := 60.0
 const PAINT_3D_TRANSFORM_POLL_INTERVAL := 0.05
+const PAINT_3D_LIVE_TEXTURE_REFRESH_INTERVAL := 0.05
 const PAINT_3D_PREVIEW_LOD_BIAS := 128.0
 const PAINT_3D_BRUSH_PREVIEW_SEGMENTS := 48
 const PAINT_3D_PREVIEW_LIGHT_MIN := 0.0
@@ -157,8 +291,62 @@ const DEBUG_MESH_PAINT_PERFORMANCE := false
 const HOVER_2D_TO_3D_MARKER_COLOR := Color(0.35, 0.75, 1.0, 0.92)
 const PAINT_3D_INITIAL_YAW := PI * 0.5
 const PAINT_3D_INITIAL_PITCH := 0.35
+const EMPTY_3D_CAMERA_DISTANCE := 6.0
+const EMPTY_3D_CAMERA_YAW := 0.65
+const EMPTY_3D_CAMERA_PITCH := 0.45
 const SETTINGS_SECTION := "GDDraw"
 const DEFAULT_CANVAS_SIZE_KEY := "default_canvas_size"
+const LAYERS_PANEL_EXPANDED_KEY := "layers_panel_expanded"
+const LAYERS_PANEL_WIDTH_KEY := "layers_panel_width"
+const LAYERS_PANEL_COLLAPSED_WIDTH := 34.0
+const LAYERS_PANEL_MIN_WIDTH := 280.0
+const LAYERS_PANEL_DEFAULT_WIDTH := 280.0
+const LAYERS_PANEL_MAX_WIDTH := 520.0
+const LAYERS_PANEL_BORDER_WIDTH := 3
+const LAYER_STATUS_COLUMN_WIDTH := 22
+const LAYER_VISIBILITY_COLUMN_WIDTH := 22
+const LAYER_TREE_NAME_MIN_WIDTH := 112
+const LAYER_TREE_LABEL_MAX_CHARACTERS := 64
+const LAYER_THUMBNAIL_SIZE := 24
+const LAYER_ROW_STATUS_ICON_SIZE := 16
+const LAYER_BUTTON_VISIBILITY := 1
+const LAYER_BUTTON_LOCK_STATUS := 2
+const LAYER_CONTEXT_RENAME := 1
+const LAYER_CONTEXT_LOCK := 2
+const LAYER_CONTEXT_VISIBILITY := 3
+const LAYER_CONTEXT_MOVE_UP := 4
+const LAYER_CONTEXT_MOVE_DOWN := 5
+const LAYER_CONTEXT_MOVE_INTO := 6
+const LAYER_CONTEXT_MOVE_OUT := 7
+const LAYER_CONTEXT_DELETE := 8
+const LAYER_CONTEXT_DUPLICATE := 9
+const LAYER_CONTEXT_HIDE_OTHERS := 10
+const LAYER_CONTEXT_SHOW_ALL := 11
+const LAYER_CONTEXT_MERGE_DOWN := 12
+const LAYER_CONTEXT_MERGE_VISIBLE := 13
+const LAYER_CONTEXT_NEW_PAINT := 14
+const LAYER_CONTEXT_NEW_GROUP := 15
+const LAYER_CONTEXT_SELECT_PARENT := 16
+const LAYER_CONTEXT_CUT := 17
+const LAYER_CONTEXT_COPY := 18
+const LAYER_CONTEXT_PASTE := 19
+const DOCUMENT_CONTEXT_RESIZE_CANVAS := 100
+const DOCUMENT_CONTEXT_SCALE := 101
+const DOCUMENT_CONTEXT_FIT_CONTENT := 102
+const DOCUMENT_CONTEXT_EXPORT_PNG := 103
+const DOCUMENT_CONTEXT_PROPERTIES := 104
+const OBJECT_CONTEXT_SELECT_SCENE := 200
+const OBJECT_CONTEXT_FRAME_3D := 201
+const OBJECT_CONTEXT_VISIBILITY := 202
+const OBJECT_CONTEXT_RESIZE_ALL_TEXTURES := 203
+const OBJECT_CONTEXT_SAVE_ALL_TEXTURES := 204
+const OBJECT_CONTEXT_CREATE_MISSING_TEXTURES := 205
+const TARGET_CONTEXT_RESIZE_TEXTURE := 300
+const TARGET_CONTEXT_MATCH_LAYER_SIZE := 301
+const TARGET_CONTEXT_SAVE := 302
+const TARGET_CONTEXT_SAVE_AS := 303
+const TARGET_CONTEXT_REVEAL_TEXTURE := 304
+const TARGET_CONTEXT_SELECT_MATERIAL := 305
 const DEFAULT_FONT_DIRECTORY_KEY := "default_font_directory"
 const CHECKER_LIGHT_KEY := "checker_light"
 const CHECKER_DARK_KEY := "checker_dark"
@@ -197,6 +385,10 @@ const DEFAULT_CANVAS_SIZE := Vector2i(128, 128)
 const CANVAS_MODE_2D := 0
 const CANVAS_MODE_3D := 1
 const CANVAS_MODE_SPLIT := 2
+const EMPTY_3D_SESSION_INSTRUCTIONS := (
+	"Select a 3D object or scene root to load all compatible textures in its hierarchy,\n"
+	+ "or select an individual mesh to edit only that surface. You can also drag either from the Scene tree."
+)
 const NAVIGATION_3D_NONE := 0
 const NAVIGATION_3D_ORBIT := 1
 const NAVIGATION_3D_PAN := 2
@@ -212,6 +404,8 @@ enum MenuCommand {
 	FILE_OPEN,
 	FILE_SAVE,
 	FILE_SAVE_AS,
+	FILE_SAVE_LAYERED,
+	FILE_CLOSE,
 	FILE_STOP_3D_SESSION,
 	FILE_CREATE_SPRITE,
 	EDIT_UNDO,
@@ -250,12 +444,14 @@ enum MenuCommand {
 	VIEW_MODE_SPLIT,
 	VIEW_MODE_SPLIT_HORIZONTAL,
 	VIEW_MODE_SPLIT_VERTICAL,
+	VIEW_LAYERS_PANEL,
 	VIEW_GRID_2D,
 	VIEW_GRID_3D,
 	VIEW_SNAP_TO_GRID,
 	VIEW_UV_OVERLAY,
 	VIEW_LINKED,
 	VIEW_TILE_PREVIEW,
+	VIEW_NAVIGATOR,
 	VIEW_MIRROR_OFF,
 	VIEW_MIRROR_HORIZONTAL,
 	VIEW_MIRROR_VERTICAL,
@@ -266,19 +462,22 @@ enum MenuCommand {
 	GODOT_USE_SELECTED_MESH,
 	GODOT_SAVE_ACTIVE_TEXTURE,
 	GODOT_CREATE_CSG_BOX,
-	HELP_CONTROLS,
-	HELP_KNOWN_LIMITATIONS,
+	HELP_DOCUMENTATION,
 	HELP_ABOUT,
 	HELP_CHECK_UPDATES,
 	HELP_UPDATE_AVAILABLE,
 }
 enum SessionTransition {
 	NONE,
+	NEW_DOCUMENT,
+	CLOSE_DOCUMENT,
 	LOAD_IMAGE_PATH,
 	LOAD_IMAGE,
 	LOAD_MESH,
 	STOP_SESSION,
 	START_3D_SESSION,
+	START_3D_LAYER_SESSION,
+	LOAD_LAYER_DOCUMENT,
 }
 enum TextureSaveStage {
 	IDLE,
@@ -288,6 +487,13 @@ enum TextureSaveStage {
 	SAVE_AS_WRITTEN,
 	WAITING_IMPORTED_TEXTURE,
 }
+enum BatchTextureSaveStage {
+	IDLE,
+	WRITING,
+	WAITING_TO_SCAN,
+	WAITING_FOR_IMPORTS,
+}
+const RESOURCE_FILESYSTEM_SCAN_DELAY_FRAMES := 2
 var _plugin: EditorPlugin
 var _menu_bar_background: PanelContainer
 var _menu_bar: MenuBar
@@ -301,6 +507,7 @@ var _recent_brush_size_menu: PopupMenu
 var _view_menu: PopupMenu
 var _godot_menu: PopupMenu
 var _help_menu: PopupMenu
+var _documentation_browser
 var _help_dialog: AcceptDialog
 var _help_content: VBoxContainer
 var _help_update_badge: PanelContainer
@@ -319,18 +526,58 @@ var _update_progress: ProgressBar
 var _update_progress_label: Label
 var _workspace_region: Control
 var _workspace_content: VBoxContainer
+var _workspace_layers_split: HSplitContainer
 var _canvas_region: Control
 var _canvas_area: Control
 var _canvas_split: SplitContainer
 var _canvas_2d_host: Control
 var _canvas_3d_host: Control
 var _canvas: Control
+var _layers_panel_root: PanelContainer
+var _layers_panel_content: VBoxContainer
+var _layers_panel_toggle: Button
+var _layers_panel_surface: PanelContainer
+var _layers_tab_strip: PanelContainer
+var _layers_panel_tabs: TabBar
+var _layers_tree: Tree
+var _layers_opacity_label: Label
+var _layers_opacity_field: SpinBox
+var _layers_filter_field: LineEdit
+var _layers_filter_search_icon: Texture2D
+var _layers_target_lock: CheckButton
+var _layers_lock_button: Button
+var _layers_add_button: Button
+var _layers_group_button: Button
+var _layers_delete_button: Button
+var _layers_context_menu: PopupMenu
+var _layers_context_menu_context: Dictionary = {}
+var _layer_node_clipboard: Dictionary = {}
+var _layers_lock_hover_context: Dictionary = {}
+var _document_properties_dialog: AcceptDialog
+var _layer_thumbnail_cache: Dictionary = {}
+var _layer_thumbnail_revisions: Dictionary = {}
+var _layers_delete_dialog: ConfirmationDialog
+var _pending_layer_delete_context: Dictionary = {}
+var _layers_rename_context: Dictionary = {}
+var _dropped_layer_import_context: Dictionary = {}
 var _paint_3d_view: SubViewportContainer
 var _paint_3d_viewport: SubViewport
 var _paint_3d_root: Node3D
 var _paint_3d_camera: Camera3D
 var _paint_3d_preview_light: DirectionalLight3D
 var _paint_3d_mesh: MeshInstance3D
+var _paint_3d_context_meshes: Array[MeshInstance3D] = []
+var _paint_3d_context_materials: Array[StandardMaterial3D] = []
+var _paint_3d_context_textures: Array[ImageTexture] = []
+var _paint_3d_context_caches: Dictionary = {}
+var _paint_3d_context_material_by_target: Dictionary = {}
+var _paint_3d_target_display_cache: Dictionary = {}
+var _paint_3d_observed_context_meshes: Dictionary = {}
+var _paint_3d_context_geometry_dirty: Dictionary = {}
+var _paint_3d_scene_visibility_cache: Dictionary = {}
+var _paint_3d_object_group_scene_visibility_cache: Dictionary = {}
+var _scene_hierarchy_sync_enabled := false
+var _paint_3d_hidden_surface_material: StandardMaterial3D
 var _paint_3d_wire_mesh: MeshInstance3D
 var _paint_3d_brush_preview: MeshInstance3D
 var _paint_3d_hover_debug_marker: MeshInstance3D
@@ -376,8 +623,11 @@ var _paint_3d_panning := false
 var _paint_3d_freelooking := false
 var _paint_3d_freelook_speed_multiplier := 1.0
 var _paint_3d_previous_mouse_mode := Input.MOUSE_MODE_VISIBLE
+var _paint_3d_surface_cursor_hidden := false
+var _paint_3d_surface_cursor_previous_mouse_mode := Input.MOUSE_MODE_VISIBLE
 var _paint_3d_drawing := false
 var _paint_3d_last_stroke_hit: Dictionary = {}
+var _paint_3d_pending_accessory_refresh := false
 var _paint_3d_surface_shape_state: Dictionary = {}
 var _paint_3d_triangle_cache: Dictionary = {}
 var _paint_3d_island_cache: Dictionary = {}
@@ -388,6 +638,8 @@ var _paint_3d_source_available := false
 var _paint_3d_pending_motion := false
 var _paint_3d_pending_motion_position := Vector2.ZERO
 var _paint_3d_pending_2d_hover := false
+var _paint_3d_live_texture_refresh_pending := false
+var _paint_3d_live_texture_refresh_elapsed := 0.0
 var _paint_3d_pending_2d_hover_uv := Vector2.ZERO
 var _paint_3d_pending_2d_hover_visible := false
 var _paint_3d_saved_pixel_perfect := true
@@ -501,7 +753,7 @@ var _syncing_fill_settings := false
 var _fill_settings_style := GDDrawCanvasControl.FillStyle.SOLID
 var _mirror_mode: OptionButton
 var _mirror_options: HBoxContainer
-var _shape_fill_mode: OptionButton
+var _shape_fill_toggle: Button
 var _shape_origin_mode: OptionButton
 var _canvas_width: SpinBox
 var _canvas_height: SpinBox
@@ -558,9 +810,15 @@ var _status_label: Label
 var _session_status_label: Label
 var _stop_3d_session_button: Button
 var _empty_3d_state: Control
+var _empty_3d_state_title: Label
+var _empty_3d_state_instructions: Label
+var _empty_3d_relink_button: Button
 var _session_picker_dialog: ConfirmationDialog
 var _session_picker_target_label: Label
-var _session_picker_options: ItemList
+var _session_picker_tree: Tree
+var _session_picker_summary_label: Label
+var _session_picker_select_all_button: Button
+var _session_picker_select_none_button: Button
 var _session_picker_reason_label: Label
 var _recent_colors_row: HBoxContainer
 var _brush_options: HBoxContainer
@@ -568,6 +826,7 @@ var _shape_options: HBoxContainer
 var _text_options: HBoxContainer
 var _text_font_selector: OptionButton
 var _text_font_size: SpinBox
+var _text_fill_toggle: Button
 var _text_alignment_buttons: Array[Button] = []
 var _text_wrap_button: Button
 var _text_rotate_left_button: Button
@@ -607,6 +866,7 @@ var _custom_brush_presets: Array[Dictionary] = []
 var _applying_brush_preset := false
 var _open_dialog: FileDialog
 var _save_dialog: FileDialog
+var _save_layered_dialog: FileDialog
 var _save_3d_as_dialog: FileDialog
 var _brush_preset_dialog: ConfirmationDialog
 var _brush_preset_name: LineEdit
@@ -614,7 +874,6 @@ var _save_location: LineEdit
 var _save_location_dialog: FileDialog
 var _font_location: LineEdit
 var _font_location_dialog: FileDialog
-var _drop_replace_dialog: ConfirmationDialog
 var _create_textured_csg_overlay: PanelContainer
 var _create_textured_csg_shape: OptionButton
 var _create_textured_csg_assign_image: CheckBox
@@ -625,10 +884,18 @@ var _create_textured_csg_create_button: Button
 var _create_textured_csg_cancel_button: Button
 var _create_3d_texture_dialog: ConfirmationDialog
 var _save_3d_texture_dialog: ConfirmationDialog
+var _save_3d_batch_dialog
 var _session_replace_dialog: ConfirmationDialog
 var _document_session_dialog: ConfirmationDialog
 var _document_session_preview: TextureRect
 var _document_session_preview_label: Label
+var _document_session_prompt: Label
+var _document_session_discard_button: Button
+var _layered_3d_source_dialog: ConfirmationDialog
+var _layered_3d_source_path_label: Label
+var _layered_3d_source_warning_label: Label
+var _layered_3d_source_relink_button: Button
+var _layered_3d_source_layers_only_button: Button
 var _clipboard_paste_resize_dialog: ConfirmationDialog
 var _canvas_resize_dialog: ConfirmationDialog
 var _crop_rectangle_dialog: ConfirmationDialog
@@ -646,7 +913,10 @@ var _file_drop_window: Window
 var _history
 var _png_io
 var _shortcuts
+var _layer_session
+var _layer_document
 var _texture_3d_session
+var _texture_3d_layer_coordinator
 var _sprite_creator
 var _update_checker
 var _updater
@@ -661,6 +931,10 @@ var _split_vertical := false
 var _split_horizontal_ratio := 0.5
 var _split_vertical_ratio := 0.5
 var _linked_view_enabled := true
+var _layers_panel_expanded := false
+var _layers_panel_width := LAYERS_PANEL_DEFAULT_WIDTH
+var _syncing_layers_ui := false
+var _layers_content_background_color := TOOL_BUTTON_PANEL_COLOR
 var _preview_light_enabled := true
 var _preview_light_intensity_value := PAINT_3D_PREVIEW_LIGHT_DEFAULT
 var _preview_light_camera_linked := true
@@ -671,40 +945,61 @@ var _syncing_default_canvas_size := false
 var _active_shape_tool := GDDrawCanvasControl.ToolMode.RECTANGLE
 var _active_selection_tool := GDDrawCanvasControl.ToolMode.SELECT
 var _foreground_color_picker_has_pending_recent_color := false
-var _pending_drop_image_path := ""
-var _pending_drop_image: Image
-var _pending_drop_label := ""
-var _load_after_save_path := ""
-var _load_after_save_image: Image
-var _load_after_save_label := ""
 var _pending_clipboard_paste_image: Image
 var _pending_clipboard_paste_label := ""
 var _pending_3d_mesh: Node3D
 var _pending_3d_session_candidate
 var _pending_3d_material_slot := 0
-var _session_picker_mesh: Node3D
-var _session_picker_choices: Array[Dictionary] = []
+var _session_picker_roots: Array[Node] = []
+var _session_picker_layer_discovery: Dictionary = {}
+var _session_picker_rebuilding := false
+var _pending_3d_layer_discovery: Dictionary = {}
 var _saved_2d_workspace: Dictionary = {}
 var _saved_2d_history: Dictionary = {}
+var _saved_2d_layer_session: Dictionary = {}
+var _saved_2d_layer_document_path := ""
+var _syncing_layer_session := false
 var _document_path := ""
+var _layer_document_path := ""
 var _document_baseline_image: Image
 var _save_2d_for_3d_transition := false
+var _save_layered_for_3d_transition := false
+var _layered_save_transition := SessionTransition.NONE
 var _texture_save_stage := TextureSaveStage.IDLE
 var _texture_save_context: Dictionary = {}
+var _batch_texture_save_stage := BatchTextureSaveStage.IDLE
+var _batch_texture_save_context: Dictionary = {}
+var _batch_texture_save_rows: Array[Dictionary] = []
+var _batch_texture_save_filter := PackedStringArray()
+var _batch_texture_save_show_unchanged := false
+var _batch_texture_save_force_all := false
+var _resource_filesystem_override: Object
+var _resource_filesystem_scan_pending := false
+var _resource_filesystem_scan_wait_frames := 0
 var _pending_session_transition := SessionTransition.NONE
 var _pending_session_path := ""
 var _pending_session_image: Image
 var _pending_session_label := ""
 var _pending_session_mesh: Node3D
+var _pending_layered_3d_candidate
+var _pending_layered_3d_document_path := ""
+var _pending_layered_3d_source_scene_path := ""
+var _pending_layered_3d_warning := ""
+var _pending_layered_3d_scene_open_elapsed := 0.0
+var _pending_layered_3d_waiting_for_scene := false
 var _active_target_refresh_elapsed := 0.0
 var _active_target_transform_refresh_elapsed := 0.0
 var _editor_selection: EditorSelection
+var _syncing_editor_selection_from_target := false
+var _active_3d_binding_key := ""
 var _ui_built := false
 var _crop_workflow_active := false
 var _syncing_crop_controls := false
 var _scale_workflow_active := false
 var _syncing_scale_controls := false
 var _scale_source_size := Vector2i.ONE
+var _scale_context_target_ids := PackedStringArray()
+var _scale_context_allows_3d := false
 var _canvas_has_visible_pixels := false
 
 
@@ -735,8 +1030,9 @@ func initialize() -> void:
 	focus_mode = Control.FOCUS_CLICK
 	add_theme_constant_override("separation", 8)
 	_build_ui()
+	_reset_layer_session_for_image(_canvas.get_image_copy(), "2d", "2D Document", "RGBA", "rgba")
 	_start_icon_recovery_cycle()
-	_set_2d_document_baseline("", _canvas.get_image_copy())
+	_set_2d_document_baseline("", _get_canvas_output_image())
 	call_deferred("_recover_update_transaction")
 
 
@@ -748,6 +1044,12 @@ func _load_split_view_preferences() -> void:
 	_split_vertical_ratio = clampf(float(editor_settings.get_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_RATIO_KEY, 0.5)), 0.2, 0.8)
 	_split_vertical = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_KEY, false))
 	_linked_view_enabled = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, LINKED_VIEW_KEY, true))
+	_layers_panel_expanded = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, LAYERS_PANEL_EXPANDED_KEY, false))
+	_layers_panel_width = clampf(float(editor_settings.get_project_metadata(
+		SETTINGS_SECTION,
+		LAYERS_PANEL_WIDTH_KEY,
+		LAYERS_PANEL_DEFAULT_WIDTH
+	)), LAYERS_PANEL_MIN_WIDTH, LAYERS_PANEL_MAX_WIDTH)
 	_preview_light_enabled = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, PREVIEW_LIGHT_ENABLED_KEY, true))
 	_preview_light_intensity_value = _clamp_preview_light_intensity(float(editor_settings.get_project_metadata(
 		SETTINGS_SECTION,
@@ -767,6 +1069,8 @@ func _save_split_view_preferences() -> void:
 	editor_settings.set_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_RATIO_KEY, _split_vertical_ratio)
 	editor_settings.set_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_KEY, _split_vertical)
 	editor_settings.set_project_metadata(SETTINGS_SECTION, LINKED_VIEW_KEY, _linked_view_enabled)
+	editor_settings.set_project_metadata(SETTINGS_SECTION, LAYERS_PANEL_EXPANDED_KEY, _layers_panel_expanded)
+	editor_settings.set_project_metadata(SETTINGS_SECTION, LAYERS_PANEL_WIDTH_KEY, _layers_panel_width)
 
 
 func _save_preview_light_preferences() -> void:
@@ -794,19 +1098,32 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
 		queue_redraw()
 		call_deferred("_reposition_help_update_badge")
+		call_deferred("_apply_layers_panel_width")
 		_resize_3d_paint_viewport()
 		if _canvas_mode == CANVAS_MODE_SPLIT:
 			call_deferred("_apply_split_ratio")
 	elif what == NOTIFICATION_EXIT_TREE:
+		_set_3d_surface_cursor_hidden(false)
 		_cancel_3d_rotation_gizmo_drag(false)
 		_stop_3d_freelook()
+	elif what == NOTIFICATION_VISIBILITY_CHANGED and not is_visible_in_tree():
+		_hide_3d_brush_preview()
 
 
 func _process(delta: float) -> void:
 	_refresh_icon_button_states()
 	_advance_3d_texture_save_workflow()
+	_advance_3d_batch_save_workflow()
+	_advance_resource_filesystem_scan()
+	_advance_pending_layered_3d_scene_open(delta)
 	_process_pending_3d_pointer_motion()
 	_process_pending_2d_hover()
+	if _paint_3d_live_texture_refresh_pending:
+		_paint_3d_live_texture_refresh_elapsed += delta
+		if _paint_3d_live_texture_refresh_elapsed >= PAINT_3D_LIVE_TEXTURE_REFRESH_INTERVAL:
+			_paint_3d_live_texture_refresh_pending = false
+			_paint_3d_live_texture_refresh_elapsed = 0.0
+			_sync_3d_paint_texture()
 	_active_target_transform_refresh_elapsed += delta
 	if _active_target_transform_refresh_elapsed >= PAINT_3D_TRANSFORM_POLL_INTERVAL:
 		_active_target_transform_refresh_elapsed = 0.0
@@ -830,6 +1147,16 @@ func _draw() -> void:
 
 func _input(event: InputEvent) -> void:
 	_ensure_helpers()
+	if not _layers_rename_context.is_empty() and event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_ESCAPE:
+			# Defer the rebuild until the Tree's native editor has finished this
+			# input dispatch; the rename context contains stable model IDs.
+			call_deferred("_cancel_layer_inline_rename")
+			get_viewport().set_input_as_handled()
+			return
+		if event.keycode in [KEY_ENTER, KEY_KP_ENTER]:
+			# The Tree's native editor owns commit and emits item_edited.
+			return
 	var action: String = _shortcuts.get_action(event)
 	if action.is_empty() or not _shortcut_is_scoped_to_gddraw():
 		return
@@ -879,6 +1206,10 @@ func _ensure_helpers() -> void:
 		_png_io = _make_script_instance(PNG_IO_SCRIPT_PATH, RefCounted.new())
 	if not _shortcuts:
 		_shortcuts = _make_script_instance(SHORTCUTS_SCRIPT_PATH, RefCounted.new())
+	if not _layer_session:
+		_layer_session = _make_script_instance(LAYER_SESSION_SCRIPT_PATH, RefCounted.new())
+	if not _layer_document:
+		_layer_document = _make_script_instance(LAYER_DOCUMENT_SCRIPT_PATH, RefCounted.new())
 	if not _texture_3d_session:
 		_texture_3d_session = _make_script_instance(TEXTURE_3D_SESSION_SCRIPT_PATH, RefCounted.new())
 	if not _sprite_creator:
@@ -913,6 +1244,242 @@ func _make_script_instance(script_path: String, fallback: Object) -> Object:
 	return fallback
 
 
+func _reset_layer_session_for_image(
+	image: Image,
+	kind := "2d",
+	object_label := "2D Document",
+	target_label := "RGBA",
+	channel := "rgba",
+	binding: Dictionary = {}
+) -> bool:
+	if not _canvas or not image or image.is_empty():
+		return false
+	_ensure_helpers()
+	if not _layer_session or not _layer_session.has_method("initialize_2d"):
+		return false
+	_layer_thumbnail_cache.clear()
+	_syncing_layer_session = true
+	var initialized: bool = _layer_session.initialize_2d(image.get_size(), image, object_label)
+	if initialized:
+		_layer_session.session_kind = kind
+		var target = _layer_session.get_active_target()
+		if target:
+			target.label = target_label
+			target.channel_id = channel
+			target.binding = binding.duplicate(true)
+		_canvas.set_display_compositor(
+			Callable(self, "_compose_active_layer_for_canvas"),
+			Callable(self, "_compose_active_layer_region_for_canvas")
+		)
+		_canvas.editing_enabled = true
+	_syncing_layer_session = false
+	if initialized:
+		_refresh_layers_tree()
+	return initialized
+
+
+func _replace_canvas_layer_session(
+	image: Image,
+	kind := "2d",
+	object_label := "2D Document",
+	target_label := "RGBA",
+	channel := "rgba",
+	binding: Dictionary = {}
+) -> bool:
+	if not _canvas or not image or image.is_empty():
+		return false
+	_syncing_layer_session = true
+	_canvas.clear_display_compositor()
+	_canvas.set_image(image)
+	_syncing_layer_session = false
+	return _reset_layer_session_for_image(image, kind, object_label, target_label, channel, binding)
+
+
+func _restore_layer_session(state: Dictionary) -> bool:
+	if state.is_empty() or not _layer_session or not _layer_session.has_method("restore_state"):
+		return false
+	_layer_thumbnail_cache.clear()
+	_syncing_layer_session = true
+	var restored: bool = _layer_session.restore_state(state)
+	if restored and _canvas:
+		_canvas.set_display_compositor(
+			Callable(self, "_compose_active_layer_for_canvas"),
+			Callable(self, "_compose_active_layer_region_for_canvas")
+		)
+	_syncing_layer_session = false
+	if restored:
+		_refresh_layers_tree()
+		_apply_3d_object_group_visibility()
+	return restored
+
+
+func _compose_active_layer_for_canvas(editable_image: Image) -> Image:
+	if not _layer_session or not _layer_session.has_method("get_active_target"):
+		return editable_image.duplicate()
+	var target = _layer_session.get_active_target()
+	if not target or not target.has_method("composite_workspace"):
+		return editable_image.duplicate()
+	var workspace_origin: Vector2i = _canvas.get_workspace_origin() if _canvas and _canvas.has_method("get_workspace_origin") else Vector2i.ZERO
+	return target.composite_workspace(editable_image.get_size(), workspace_origin, editable_image)
+
+
+func _compose_active_layer_region_for_canvas(region: Rect2i, editable_image: Image) -> Image:
+	if not _layer_session or not _layer_session.has_method("get_active_target"):
+		return editable_image.get_region(region)
+	var target = _layer_session.get_active_target()
+	if not target or not target.has_method("composite_workspace_region"):
+		return editable_image.get_region(region)
+	var workspace_origin: Vector2i = _canvas.get_workspace_origin() if _canvas and _canvas.has_method("get_workspace_origin") else Vector2i.ZERO
+	return target.composite_workspace_region(
+		region,
+		editable_image.get_size(),
+		workspace_origin,
+		editable_image
+	)
+
+
+func _get_canvas_output_image() -> Image:
+	if not _canvas:
+		return null
+	if _canvas.has_method("get_document_display_image_copy"):
+		return _canvas.get_document_display_image_copy()
+	return _canvas.get_image_copy()
+
+
+func _select_paint_layer(
+	target_id: String,
+	layer_id: String,
+	preserve_same_target_display := false,
+	fast_3d_binding_key := ""
+) -> bool:
+	if not _layer_session or not _canvas:
+		return false
+	var previous_target_id := str(_layer_session.active_target_id)
+	if not _layer_session.activate_target(target_id):
+		return false
+	var target = _layer_session.get_active_target()
+	if not target or not target.select_layer(layer_id):
+		return false
+	var use_fast_3d_switch := false
+	if previous_target_id != target_id and not fast_3d_binding_key.is_empty():
+		use_fast_3d_switch = _promote_cached_3d_preview(target_id, fast_3d_binding_key)
+		if use_fast_3d_switch:
+			_active_3d_binding_key = fast_3d_binding_key
+	return _sync_canvas_to_active_layer(
+		preserve_same_target_display and previous_target_id == target_id,
+		use_fast_3d_switch
+	)
+
+
+func _sync_canvas_to_active_layer(
+	preserve_same_target_display := false,
+	fast_3d_target_switch := false
+) -> bool:
+	if not _layer_session or not _canvas:
+		return false
+	var coordinated_target_changed := _sync_active_coordinated_texture_session()
+	var target = _layer_session.get_active_target()
+	if not target:
+		return false
+	var layer_image: Image = (
+		target.get_selected_layer_image_reference()
+		if target.has_method("get_selected_layer_image_reference")
+		else target.get_selected_layer_image()
+	)
+	if not layer_image:
+		return false
+	var prepared_display: Image
+	var prepared_texture: ImageTexture
+	if fast_3d_target_switch:
+		var cached_display: Variant = _paint_3d_target_display_cache.get(target.target_id)
+		if cached_display is Image and not cached_display.is_empty():
+			prepared_display = cached_display
+			prepared_texture = _paint_3d_texture
+	_syncing_layer_session = true
+	if _canvas.has_method("set_layer_workspace_shared"):
+		_canvas.set_layer_workspace_shared(
+			layer_image,
+			target.get_selected_layer_origin(),
+			target.size,
+			preserve_same_target_display,
+			prepared_display,
+			prepared_texture
+		)
+	elif _canvas.has_method("set_layer_workspace"):
+		_canvas.set_layer_workspace(layer_image, target.get_selected_layer_origin(), target.size)
+	else:
+		_canvas.set_image(layer_image)
+	if _layer_session.session_kind == "3d":
+		if _canvas.has_method("set_eraser_restore_image_reference") and target.has_method("get_selected_eraser_source_reference"):
+			_canvas.set_eraser_restore_image_reference(target.get_selected_eraser_source_reference())
+		else:
+			_canvas.set_eraser_restore_image(target.get_selected_eraser_source())
+	else:
+		_canvas.clear_eraser_restore_image()
+	_canvas.editing_enabled = not target.is_node_effectively_locked(target.selected_layer_id)
+	_syncing_layer_session = false
+	if _layer_session.session_kind == "3d":
+		_sync_active_3d_uv_overlay()
+	if _canvas.has_method("get_display_image_reference"):
+		var live_display: Image = _canvas.get_display_image_reference()
+		if live_display:
+			_paint_3d_target_display_cache[target.target_id] = live_display
+	var has_active_3d_session: bool = (
+		_texture_3d_session != null
+		and _texture_3d_session.has_active_session()
+	)
+	# Selecting another layer in the same target does not alter the flattened
+	# output. Keep the existing canvas/3D texture and visible-pixel result instead
+	# of copying and scanning the complete high-resolution image again.
+	var refresh_composite_consumers: bool = (
+		(not preserve_same_target_display or coordinated_target_changed)
+		and not fast_3d_target_switch
+	)
+	if has_active_3d_session and refresh_composite_consumers:
+		var output_image: Image = _get_canvas_output_image()
+		if coordinated_target_changed:
+			_sync_3d_paint_view(true, output_image)
+		else:
+			_sync_3d_paint_texture(output_image)
+		_update_3d_session_status(output_image)
+	elif not has_active_3d_session:
+		_update_3d_session_status()
+	if refresh_composite_consumers:
+		_refresh_canvas_visible_pixels_state()
+	_sync_layers_tree_selection({
+		"kind": "paint",
+		"target_id": target.target_id,
+		"node_id": target.selected_layer_id,
+	})
+	return true
+
+
+func _sync_active_coordinated_texture_session() -> bool:
+	if not _texture_3d_layer_coordinator or not _layer_session:
+		return false
+	if _texture_3d_layer_coordinator.layer_session != _layer_session:
+		_texture_3d_layer_coordinator.layer_session = _layer_session
+	var next_session = _texture_3d_layer_coordinator.get_active_texture_session()
+	if not next_session:
+		return false
+	var changed: bool = next_session != _texture_3d_session
+	if changed:
+		_cancel_3d_surface_shape("Changed the active 3D paint target.", false, false)
+		_texture_3d_session = next_session
+		_paint_3d_source_available = _is_active_3d_source_available()
+	return changed
+
+
+func _sync_active_3d_uv_overlay() -> void:
+	if not _canvas:
+		return
+	if _texture_3d_session and _texture_3d_session.has_active_session():
+		_canvas.set_uv_overlay_data(_texture_3d_session.uv_edges, _texture_3d_session.uv_vertices)
+		_canvas.uv_overlay_visible = _canvas_mode_3d and _uv_overlay_toggle and _uv_overlay_toggle.button_pressed
+	else:
+		_canvas.clear_uv_overlay_data()
+
+
 func _build_ui() -> void:
 	_build_menu_bar()
 	_build_workspace()
@@ -925,7 +1492,7 @@ func _build_ui() -> void:
 	_workspace_content.add_child(body)
 
 	_build_tool_rail(body)
-	_build_canvas_region(body)
+	_build_layer_workspace(body)
 	_build_settings_menu()
 	_build_update_available_overlay()
 	_build_status_bar()
@@ -934,21 +1501,25 @@ func _build_ui() -> void:
 	_build_custom_fill_image_dialog()
 	_build_text_font_dialog()
 	_build_save_dialog()
+	_build_save_layered_dialog()
+	_build_layers_delete_dialog()
 	_build_save_3d_as_dialog()
 	_build_brush_preset_dialog()
 	_build_save_location_dialog()
 	_build_font_location_dialog()
-	_build_drop_replace_dialog()
 	_build_create_textured_csg_dialog()
 	_build_3d_session_picker()
 	_build_create_3d_texture_dialog()
 	_build_save_3d_texture_dialog()
+	_build_save_3d_batch_dialog()
 	_build_session_replace_dialog()
 	_build_document_session_dialog()
+	_build_layered_3d_source_dialog()
 	_build_clipboard_paste_resize_dialog()
 	_build_canvas_resize_dialog()
 	_build_crop_rectangle_dialog()
 	_build_scale_image_dialog()
+	_build_documentation_browser()
 	_build_help_dialog()
 	_build_clipboard_poll_timer()
 	_on_canvas_size_changed(_canvas.get_canvas_size())
@@ -996,6 +1567,9 @@ func _build_menu_bar() -> void:
 	_file_menu.add_separator()
 	_file_menu.add_item("Save", MenuCommand.FILE_SAVE, KEY_MASK_CTRL | KEY_S)
 	_file_menu.add_item("Save As…", MenuCommand.FILE_SAVE_AS, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_S)
+	_file_menu.add_item("Save Layered Project…", MenuCommand.FILE_SAVE_LAYERED, KEY_MASK_CTRL | KEY_MASK_ALT | KEY_S)
+	_file_menu.add_separator()
+	_file_menu.add_item("Close", MenuCommand.FILE_CLOSE, KEY_MASK_CTRL | KEY_W)
 
 	_edit_menu = _add_menu("Edit")
 	_edit_menu.add_item("Undo", MenuCommand.EDIT_UNDO, KEY_MASK_CTRL | KEY_Z)
@@ -1065,12 +1639,15 @@ func _build_menu_bar() -> void:
 	_view_menu.add_radio_check_item("Split Horizontal", MenuCommand.VIEW_MODE_SPLIT_HORIZONTAL)
 	_view_menu.add_radio_check_item("Split Vertical", MenuCommand.VIEW_MODE_SPLIT_VERTICAL)
 	_view_menu.add_separator()
+	_view_menu.add_check_item("Layers Panel", MenuCommand.VIEW_LAYERS_PANEL)
+	_view_menu.add_separator()
 	_view_menu.add_check_item("Show 2D Grid", MenuCommand.VIEW_GRID_2D)
 	_view_menu.add_check_item("Show 3D Grid", MenuCommand.VIEW_GRID_3D)
 	_view_menu.add_check_item("Snap to Grid", MenuCommand.VIEW_SNAP_TO_GRID)
 	_view_menu.add_check_item("Show UV Overlay", MenuCommand.VIEW_UV_OVERLAY)
 	_view_menu.add_check_item("Link Split Hover", MenuCommand.VIEW_LINKED)
 	_view_menu.add_check_item("Tile Preview", MenuCommand.VIEW_TILE_PREVIEW)
+	_view_menu.add_check_item("Navigator", MenuCommand.VIEW_NAVIGATOR)
 	_view_menu.add_separator()
 	_view_menu.add_radio_check_item("Mirror: Off", MenuCommand.VIEW_MIRROR_OFF)
 	_view_menu.add_radio_check_item("Mirror: Horizontal (Top to Bottom)", MenuCommand.VIEW_MIRROR_HORIZONTAL)
@@ -1085,7 +1662,7 @@ func _build_menu_bar() -> void:
 	_godot_menu.add_item("Create Sprite2D", MenuCommand.FILE_CREATE_SPRITE)
 	_godot_menu.add_item("Create Textured CSG3D…", MenuCommand.GODOT_CREATE_CSG_BOX)
 	_godot_menu.add_separator()
-	_godot_menu.add_item("Use Selected Mesh", MenuCommand.GODOT_USE_SELECTED_MESH)
+	_godot_menu.add_item("Use Selected 3D Object", MenuCommand.GODOT_USE_SELECTED_MESH)
 	_godot_menu.add_item("Save Active Texture", MenuCommand.GODOT_SAVE_ACTIVE_TEXTURE)
 
 	_help_menu = _add_menu("Help")
@@ -1129,10 +1706,9 @@ func _populate_help_menu(show_update := false) -> void:
 		)
 		_help_menu.set_item_tooltip(0, "Open details for GDDraw v%s" % _latest_available_version)
 		_help_menu.add_separator()
-	_help_menu.add_item("Check for Updates...", MenuCommand.HELP_CHECK_UPDATES)
+	_help_menu.add_item("Documentation...", MenuCommand.HELP_DOCUMENTATION)
 	_help_menu.add_separator()
-	_help_menu.add_item("Controls", MenuCommand.HELP_CONTROLS)
-	_help_menu.add_item("Known Limitations", MenuCommand.HELP_KNOWN_LIMITATIONS)
+	_help_menu.add_item("Check for Updates...", MenuCommand.HELP_CHECK_UPDATES)
 	_help_menu.add_separator()
 	_help_menu.add_item("About GDDraw", MenuCommand.HELP_ABOUT)
 
@@ -1200,6 +1776,10 @@ func _on_menu_command(command_id: int) -> void:
 			_save_png()
 		MenuCommand.FILE_SAVE_AS:
 			_save_as()
+		MenuCommand.FILE_SAVE_LAYERED:
+			_save_layered_project()
+		MenuCommand.FILE_CLOSE:
+			_close_current_document()
 		MenuCommand.FILE_STOP_3D_SESSION:
 			_stop_3d_texture_session()
 		MenuCommand.FILE_CREATE_SPRITE:
@@ -1284,6 +1864,9 @@ func _on_menu_command(command_id: int) -> void:
 			_set_split_layout(false)
 		MenuCommand.VIEW_MODE_SPLIT_VERTICAL:
 			_set_split_layout(true)
+		MenuCommand.VIEW_LAYERS_PANEL:
+			if _layers_panel_toggle:
+				_layers_panel_toggle.button_pressed = not _layers_panel_expanded
 		MenuCommand.VIEW_GRID_2D:
 			_on_grid_button_toggled(not _canvas.show_grid)
 		MenuCommand.VIEW_GRID_3D:
@@ -1297,6 +1880,9 @@ func _on_menu_command(command_id: int) -> void:
 		MenuCommand.VIEW_TILE_PREVIEW:
 			_canvas.tile_preview_enabled = not _canvas.tile_preview_enabled
 			_set_status("Tile preview %s." % ("enabled" if _canvas.tile_preview_enabled else "disabled"))
+		MenuCommand.VIEW_NAVIGATOR:
+			_canvas.navigator_enabled = not _canvas.navigator_enabled
+			_set_status("Navigator %s." % ("enabled" if _canvas.navigator_enabled else "disabled"))
 		MenuCommand.VIEW_MIRROR_OFF:
 			_set_mirror_mode(GDDrawCanvasControl.MirrorMode.OFF)
 		MenuCommand.VIEW_MIRROR_HORIZONTAL:
@@ -1315,51 +1901,12 @@ func _on_menu_command(command_id: int) -> void:
 			_load_selected_3d_mesh_texture()
 		MenuCommand.GODOT_SAVE_ACTIVE_TEXTURE:
 			_save_3d_texture()
+		MenuCommand.HELP_DOCUMENTATION:
+			_open_documentation("index.md")
 		MenuCommand.HELP_CHECK_UPDATES:
 			_check_for_updates(false)
 		MenuCommand.HELP_UPDATE_AVAILABLE:
 			_show_update_available_overlay()
-		MenuCommand.HELP_CONTROLS:
-			_show_help_dialog(
-				"GDDraw Controls",
-				"Tools and 2D canvas:\n"
-				+ "• Use the left rail for Brush, Eraser, Fill, Shape, Eyedropper, Selection, Lasso, and Pan.\n"
-				+ "• Left drag uses the active tool. Mouse wheel zooms. Middle drag pans.\n"
-				+ "• Shape Origin supports Corner to Corner, From Start Point, and From Canvas Center; hold Shift to constrain angles, squares, and circles.\n"
-				+ "• Ctrl+Z/Y undo and redo. Ctrl+S saves. Ctrl+Shift+S opens Save As.\n"
-				+ "• Ctrl+A/X/C/V select all, cut, copy, and paste.\n"
-				+ "• While editing text, Ctrl+C copies highlighted characters; with none highlighted, it copies the rendered text box as an image selection.\n"
-				+ "• Ctrl+D duplicates the selection. Enter commits a floating selection.\n"
-				+ "• Arrow keys nudge a selection. Shift+Arrow nudges 10 pixels.\n"
-				+ "• Delete removes a selection. Escape deselects or cancels the active transform.\n\n"
-				+ "3D texture sessions:\n"
-				+ "• Switch to 3D or Split to show the 3D workspace; it will not load a mesh automatically.\n"
-				+ "• Choose Godot > Use Selected Mesh, click Use Selected Mesh, or drag a MeshInstance3D, supported CSG shape, or parent from the Scene tree.\n"
-				+ "• The material picker opens before editing. Missing albedo textures are created only after confirmation.\n"
-				+ "• Unsaved 2D changes are protected before a 3D session starts.\n"
-				+ "• Left drag paints the active albedo texture. Eraser restores pixels from the texture loaded at session start.\n"
-				+ "• Middle drag orbits. Shift+Middle drag pans. Mouse wheel zooms.\n"
-				+ "• Hold Right Mouse with WASD to freelook; Q/E move down/up; Shift speeds up; Alt slows down.\n"
-				+ "• Press F to frame the active surface.\n"
-				+ "• Stop Editing restores the independent 2D workspace. Unsaved 3D sessions offer Save, Save As, Discard, or Cancel.\n\n"
-				+ "Split View:\n"
-				+ "• Use the View selector or View menu to choose 2D, 3D, Split Horizontal, or Split Vertical.\n"
-				+ "• Link Split Hover keeps 2D hover points and 3D UV island previews in sync."
-			)
-		MenuCommand.HELP_KNOWN_LIMITATIONS:
-			_show_help_dialog(
-				"Known Limitations",
-				"Current scope:\n"
-				+ "• GDDraw paints PNG images and StandardMaterial3D albedo textures. Other material types or texture channels should be prepared in the Inspector.\n"
-				+ "• 3D editing supports MeshInstance3D targets and supported single-material CSG geometry with usable triangle UVs.\n"
-				+ "• Missing materials, unsupported CSG output, or multi-material CSG results are disabled with an explanation instead of being changed automatically.\n"
-				+ "\n"
-				+ "Things to double-check:\n"
-				+ "• Overlapping UV shells can make linked 2D-to-3D hover previews choose a hidden or rear surface.\n"
-				+ "• Dense seams, mirrored UVs, tiny UV islands, and heavy UV overlap may need manual checking after paint strokes.\n"
-				+ "• Very busy textures or models can make the 3D brush and hover previews harder to read.\n"
-				+ "• Split View and Preferences can feel cramped in narrow bottom-panel docks; widening the dock helps."
-			)
 		MenuCommand.HELP_ABOUT:
 			_show_help_dialog(
 				"About GDDraw",
@@ -1372,26 +1919,93 @@ func _on_menu_command(command_id: int) -> void:
 	_sync_menu_state()
 
 
+func _close_current_document() -> void:
+	if not _canvas:
+		return
+	if _texture_3d_session and _texture_3d_session.has_active_session():
+		if _request_session_transition(SessionTransition.CLOSE_DOCUMENT):
+			if _session_replace_dialog:
+				_session_replace_dialog.dialog_text = "Save %s before closing this document?" % _get_active_3d_paint_session_identity()
+			return
+		_close_current_document_now()
+		return
+	if _is_2d_document_dirty():
+		_pending_session_transition = SessionTransition.CLOSE_DOCUMENT
+		_configure_document_transition_dialog(SessionTransition.CLOSE_DOCUMENT)
+		_update_document_session_preview()
+		if _document_session_dialog:
+			_document_session_dialog.call_deferred("popup_centered")
+		return
+	_close_current_document_now()
+
+
+func _close_current_document_now() -> void:
+	if not _canvas:
+		return
+	if not _dropped_layer_import_context.is_empty():
+		_canvas.cancel_imported_floating_selection()
+	if _texture_3d_session and _texture_3d_session.has_active_session():
+		_clear_3d_texture_session_state(false)
+	_reset_2d_workspace_after_3d_session()
+	_reset_view()
+	_update_3d_context_control_visibility()
+	_set_status("Closed the current document. GDDraw is ready for a new drawing.")
+
+
 func _sync_menu_state() -> void:
 	if not _menu_bar or not _canvas:
 		return
 	_update_canvas_resize_control_availability()
 	var has_selection: bool = _canvas.has_active_selection()
 	var has_active_texture: bool = _texture_3d_session != null and _texture_3d_session.has_active_session()
+	var has_3d_hierarchy := _has_coordinated_3d_hierarchy()
 	var has_uv_data: bool = (
 		has_active_texture
 		and not _texture_3d_session.uv_vertices.is_empty()
 		and _canvas_mode_3d
 	)
-	_set_menu_item_disabled(_file_menu, MenuCommand.FILE_NEW, has_active_texture)
+	_set_menu_item_disabled(_file_menu, MenuCommand.FILE_NEW, false)
+	_set_menu_item_disabled(_file_menu, MenuCommand.FILE_SAVE, false)
 	_set_menu_item_disabled(_file_menu, MenuCommand.FILE_SAVE_AS, false)
+	_set_menu_item_text(
+		_file_menu,
+		MenuCommand.FILE_SAVE,
+		"Save Hierarchy" if has_3d_hierarchy else ("Save Texture" if has_active_texture else "Save")
+	)
+	_set_menu_item_text(
+		_file_menu,
+		MenuCommand.FILE_SAVE_AS,
+		"Save Hierarchy As…" if has_3d_hierarchy else ("Save Texture As…" if has_active_texture else "Save As…")
+	)
+	_sync_layered_file_menu_item(has_3d_hierarchy)
 	_sync_stop_3d_file_menu_item(has_active_texture)
+	_sync_close_file_menu_item()
+	_set_menu_item_tooltip(
+		_file_menu,
+		MenuCommand.FILE_SAVE,
+		"Review changed textures and save the 3D hierarchy layer document."
+		if has_3d_hierarchy
+		else (
+			"Save the active material texture."
+			if has_active_texture
+			else "Save the current 2D document."
+		)
+	)
 	_set_menu_item_tooltip(
 		_file_menu,
 		MenuCommand.FILE_SAVE_AS,
-		"Save the current texture to a new PNG and assign it to the active material."
-		if has_active_texture
-		else "Save the current 2D canvas to a new PNG."
+		"Review changed textures and save the hierarchy layer document to a new .gddraw path."
+		if has_3d_hierarchy
+		else (
+			"Save the current texture to a new PNG and assign it to the active material."
+			if has_active_texture
+			else "Save the current 2D canvas to a new PNG."
+		)
+	)
+	_set_menu_item_tooltip(
+		_file_menu,
+		MenuCommand.FILE_CLOSE,
+		"Close the current drawing or 3D hierarchy, prompting before discarding unsaved work."
 	)
 	_set_menu_item_disabled(_edit_menu, MenuCommand.EDIT_UNDO, not _history.can_undo())
 	_set_menu_item_disabled(_edit_menu, MenuCommand.EDIT_REDO, not _history.can_redo())
@@ -1428,12 +2042,14 @@ func _sync_menu_state() -> void:
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MODE_3D, _canvas_mode == CANVAS_MODE_3D)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MODE_SPLIT_HORIZONTAL, _canvas_mode == CANVAS_MODE_SPLIT and not _split_vertical)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MODE_SPLIT_VERTICAL, _canvas_mode == CANVAS_MODE_SPLIT and _split_vertical)
+	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_LAYERS_PANEL, _layers_panel_expanded)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_GRID_2D, _canvas.show_grid)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_GRID_3D, _preview_3d_grid_visible)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_SNAP_TO_GRID, _canvas.snap_to_grid)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_UV_OVERLAY, _canvas.uv_overlay_visible)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_LINKED, _linked_view_enabled)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_TILE_PREVIEW, _canvas.tile_preview_enabled)
+	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_NAVIGATOR, _canvas.navigator_enabled)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MIRROR_OFF, _canvas.mirror_mode == GDDrawCanvasControl.MirrorMode.OFF)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MIRROR_HORIZONTAL, _canvas.mirror_mode == GDDrawCanvasControl.MirrorMode.HORIZONTAL)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MIRROR_VERTICAL, _canvas.mirror_mode == GDDrawCanvasControl.MirrorMode.VERTICAL)
@@ -1468,6 +2084,14 @@ func _set_menu_item_disabled(menu: PopupMenu, command_id: int, disabled: bool) -
 		menu.set_item_disabled(index, disabled)
 
 
+func _set_menu_item_text(menu: PopupMenu, command_id: int, text: String) -> void:
+	if not menu:
+		return
+	var index := menu.get_item_index(command_id)
+	if index >= 0:
+		menu.set_item_text(index, text)
+
+
 func _sync_stop_3d_file_menu_item(has_active_texture: bool) -> void:
 	if not _file_menu:
 		return
@@ -1483,6 +2107,34 @@ func _sync_stop_3d_file_menu_item(has_active_texture: bool) -> void:
 		return
 
 	_file_menu.set_item_tooltip(index, "Stop the active 3D texture session and restore the complete 2D workspace.")
+
+
+func _sync_layered_file_menu_item(has_3d_hierarchy: bool) -> void:
+	if not _file_menu:
+		return
+	var index := _file_menu.get_item_index(MenuCommand.FILE_SAVE_LAYERED)
+	if has_3d_hierarchy:
+		if index >= 0:
+			_file_menu.remove_item(index)
+		return
+	if index < 0:
+		_file_menu.add_item(
+			"Save Layered Project…",
+			MenuCommand.FILE_SAVE_LAYERED,
+			KEY_MASK_CTRL | KEY_MASK_ALT | KEY_S
+		)
+
+
+func _sync_close_file_menu_item() -> void:
+	if not _file_menu:
+		return
+	var index := _file_menu.get_item_index(MenuCommand.FILE_CLOSE)
+	if index >= 0:
+		_file_menu.remove_item(index)
+		if index > 0 and _file_menu.is_item_separator(index - 1):
+			_file_menu.remove_item(index - 1)
+	_file_menu.add_separator()
+	_file_menu.add_item("Close", MenuCommand.FILE_CLOSE, KEY_MASK_CTRL | KEY_W)
 
 
 func _set_menu_item_checked(menu: PopupMenu, command_id: int, checked: bool) -> void:
@@ -1627,7 +2279,8 @@ func _build_options_bar() -> void:
 	_brush_size.max_value = 96
 	_brush_size.step = 1
 	_brush_size.value = 12
-	_brush_size.custom_minimum_size.x = 76
+	_brush_size.suffix = " px"
+	_brush_size.custom_minimum_size.x = 84
 	_brush_size.tooltip_text = "Brush size"
 	_brush_size.value_changed.connect(_on_brush_size_changed)
 	_brush_options.add_child(_brush_size)
@@ -1726,11 +2379,12 @@ func _build_options_bar() -> void:
 
 	_fill_tolerance = SpinBox.new()
 	_fill_tolerance.min_value = 0
-	_fill_tolerance.max_value = 255
+	_fill_tolerance.max_value = 100
 	_fill_tolerance.step = 1
 	_fill_tolerance.value = 0
-	_fill_tolerance.custom_minimum_size.x = 70
-	_fill_tolerance.tooltip_text = "Maximum RGBA8 difference per channel (0 matches exact color only)"
+	_fill_tolerance.suffix = "%"
+	_fill_tolerance.custom_minimum_size.x = 76
+	_fill_tolerance.tooltip_text = "Maximum per-channel color difference as a percentage (0% matches exact color only)"
 	_fill_tolerance.value_changed.connect(_on_fill_tolerance_changed)
 	_brush_options.add_child(_fill_tolerance)
 
@@ -1940,16 +2594,12 @@ func _build_options_bar() -> void:
 
 	_shape_tool_separator = _add_tool_options_separator(_shape_options, "Shape Tool Separator")
 
-	_shape_fill_mode = OptionButton.new()
-	_shape_fill_mode.add_item("No fill", GDDrawCanvasControl.ShapeFillMode.NONE)
-	_shape_fill_mode.add_item("Background fill", GDDrawCanvasControl.ShapeFillMode.BACKGROUND)
-	_shape_fill_mode.add_item("Foreground fill", GDDrawCanvasControl.ShapeFillMode.FOREGROUND)
-	_shape_fill_mode.selected = 0
-	_shape_fill_mode.custom_minimum_size.x = 124
-	_shape_fill_mode.fit_to_longest_item = false
-	_update_shape_fill_tooltip(GDDrawCanvasControl.ShapeFillMode.NONE)
-	_shape_fill_mode.item_selected.connect(_on_shape_fill_mode_selected)
-	_shape_options.add_child(_shape_fill_mode)
+	_shape_fill_toggle = _make_icon_button("paint-bucket_0.svg", "", true)
+	_shape_fill_toggle.name = "Shape Fill Toggle"
+	_shape_fill_toggle.set_pressed_no_signal(false)
+	_update_shape_fill_tooltip(false)
+	_shape_fill_toggle.toggled.connect(_on_shape_fill_toggled)
+	_shape_options.add_child(_shape_fill_toggle)
 
 	_shape_origin_separator = _add_tool_options_separator(_shape_options, "Shape Origin Separator")
 	_shape_origin_separator.visible = false
@@ -2000,6 +2650,13 @@ func _build_options_bar() -> void:
 	_text_font_size.value_changed.connect(_on_text_font_size_changed)
 	_text_font_size.get_line_edit().text_submitted.connect(_on_text_option_text_submitted)
 	_text_options.add_child(_text_font_size)
+
+	_add_tool_options_separator(_text_options, "Text Fill Separator")
+	_text_fill_toggle = _make_icon_button("paint-bucket_0.svg", "", true)
+	_text_fill_toggle.name = "Text Fill Toggle"
+	_update_text_fill_tooltip(false)
+	_text_fill_toggle.toggled.connect(_on_text_fill_toggled)
+	_text_options.add_child(_text_fill_toggle)
 
 
 	_add_tool_options_separator(_text_options, "Text Alignment Separator")
@@ -2180,6 +2837,2508 @@ func _build_options_bar() -> void:
 	options_bar.add_child(_linked_view_toggle)
 
 
+func _build_layer_workspace(parent: Container) -> void:
+	_workspace_layers_split = HSplitContainer.new()
+	_workspace_layers_split.name = "Workspace And Layers Split"
+	_workspace_layers_split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_workspace_layers_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_workspace_layers_split.dragger_visibility = (
+		SplitContainer.DRAGGER_VISIBLE
+		if _layers_panel_expanded
+		else SplitContainer.DRAGGER_HIDDEN_COLLAPSED
+	)
+	_workspace_layers_split.dragged.connect(_on_layers_panel_dragged)
+	parent.add_child(_workspace_layers_split)
+	_build_canvas_region(_workspace_layers_split)
+	_build_layers_panel(_workspace_layers_split)
+	call_deferred("_apply_layers_panel_width")
+
+
+func _build_layers_panel(parent: Container) -> void:
+	_layers_panel_root = PanelContainer.new()
+	_layers_panel_root.name = "Layers Panel"
+	_layers_panel_root.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# The root also owns the narrow toggle rail, so it must not draw the Layers
+	# surface outline around both regions.
+	_layers_panel_root.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
+	_layers_panel_root.custom_minimum_size.x = (
+		LAYERS_PANEL_MIN_WIDTH if _layers_panel_expanded else LAYERS_PANEL_COLLAPSED_WIDTH
+	)
+	parent.add_child(_layers_panel_root)
+
+	var panel_row := HBoxContainer.new()
+	panel_row.add_theme_constant_override("separation", 4)
+	_layers_panel_root.add_child(panel_row)
+	var toggle_rail := VBoxContainer.new()
+	toggle_rail.custom_minimum_size.x = LAYERS_PANEL_COLLAPSED_WIDTH - 4.0
+	toggle_rail.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	panel_row.add_child(toggle_rail)
+	var rail_divider := HSeparator.new()
+	rail_divider.name = "Layers Rail Divider"
+	rail_divider.custom_minimum_size.y = 6
+	toggle_rail.add_child(rail_divider)
+	_layers_panel_toggle = _make_icon_button(
+		"layers_0.svg",
+		"Show or hide the shared Layers panel",
+		true,
+		"layers_1.svg"
+	)
+	_layers_panel_toggle.set_pressed_no_signal(_layers_panel_expanded)
+	_update_toggle_button_icon(_layers_panel_toggle)
+	_layers_panel_toggle.toggled.connect(_on_layers_panel_toggled)
+	toggle_rail.add_child(_layers_panel_toggle)
+
+	_layers_content_background_color = _get_layers_tab_background_color()
+	_layers_panel_surface = PanelContainer.new()
+	_layers_panel_surface.name = "Layers Expanded Surface"
+	_layers_panel_surface.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_layers_panel_surface.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var panel_surface_style := _make_layers_panel_outline_style()
+	panel_surface_style.bg_color = _layers_content_background_color
+	# Keep every child inside the perimeter so controls never paint over it.
+	panel_surface_style.set_content_margin(SIDE_LEFT, LAYERS_PANEL_BORDER_WIDTH)
+	panel_surface_style.set_content_margin(SIDE_TOP, LAYERS_PANEL_BORDER_WIDTH)
+	panel_surface_style.set_content_margin(SIDE_RIGHT, LAYERS_PANEL_BORDER_WIDTH)
+	panel_surface_style.set_content_margin(SIDE_BOTTOM, LAYERS_PANEL_BORDER_WIDTH)
+	_layers_panel_surface.add_theme_stylebox_override("panel", panel_surface_style)
+	_layers_panel_surface.visible = _layers_panel_expanded
+	panel_row.add_child(_layers_panel_surface)
+
+	_layers_panel_content = VBoxContainer.new()
+	_layers_panel_content.name = "Layers Panel Content"
+	_layers_panel_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_layers_panel_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_layers_panel_content.add_theme_constant_override("separation", 3)
+	_layers_panel_content.visible = _layers_panel_expanded
+	_layers_panel_surface.add_child(_layers_panel_content)
+
+	_layers_tab_strip = PanelContainer.new()
+	_layers_tab_strip.name = "Layers Tab Strip"
+	_layers_tab_strip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var tab_strip_style := StyleBoxFlat.new()
+	tab_strip_style.bg_color = _get_layers_outline_color()
+	_layers_tab_strip.add_theme_stylebox_override("panel", tab_strip_style)
+	_layers_panel_content.add_child(_layers_tab_strip)
+	var tab_strip_row := HBoxContainer.new()
+	tab_strip_row.add_theme_constant_override("separation", 0)
+	_layers_tab_strip.add_child(tab_strip_row)
+	_layers_panel_tabs = TabBar.new()
+	_layers_panel_tabs.name = "Layers Dock Tabs"
+	_layers_panel_tabs.add_tab("Layers")
+	_layers_panel_tabs.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_layers_panel_tabs.custom_minimum_size.y = 26
+	_layers_panel_tabs.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	tab_strip_row.add_child(_layers_panel_tabs)
+	var tab_strip_fill := Control.new()
+	tab_strip_fill.name = "Layers Tab Strip Fill"
+	tab_strip_fill.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tab_strip_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tab_strip_row.add_child(tab_strip_fill)
+
+	var selected_toolbar := PanelContainer.new()
+	selected_toolbar.name = "Selected Layer Toolbar"
+	_layers_panel_content.add_child(selected_toolbar)
+	var opacity_row := HBoxContainer.new()
+	opacity_row.add_theme_constant_override("separation", 4)
+	selected_toolbar.add_child(opacity_row)
+	_layers_opacity_label = Label.new()
+	_layers_opacity_label.name = "Opacity Label"
+	_layers_opacity_label.text = "Opacity"
+	_layers_opacity_label.tooltip_text = "Opacity of the selected layer or group"
+	opacity_row.add_child(_layers_opacity_label)
+	_layers_opacity_field = SpinBox.new()
+	_layers_opacity_field.name = "Selected Layer Opacity"
+	_layers_opacity_field.min_value = 0.0
+	_layers_opacity_field.max_value = 100.0
+	_layers_opacity_field.step = 1.0
+	_layers_opacity_field.value = 100.0
+	_layers_opacity_field.suffix = "%"
+	_layers_opacity_field.custom_minimum_size = Vector2(64, 24)
+	_layers_opacity_field.tooltip_text = "Opacity of the selected paint layer or layer group"
+	_layers_opacity_field.value_changed.connect(_on_layers_opacity_changed)
+	opacity_row.add_child(_layers_opacity_field)
+	_layers_filter_field = LineEdit.new()
+	_layers_filter_field.name = "Layer Filter"
+	_layers_filter_field.placeholder_text = "Filter Layers"
+	_layers_filter_field.tooltip_text = "Filter layer and group names; nested results show their full path"
+	_layers_filter_field.clear_button_enabled = true
+	_layers_filter_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_layers_filter_field.custom_minimum_size = Vector2(72, 24)
+	_layers_filter_field.text_changed.connect(_on_layers_filter_changed)
+	opacity_row.add_child(_layers_filter_field)
+	_update_layers_filter_icons()
+	_update_layers_filter_icon()
+	_layers_lock_button = _make_icon_button(
+		"lock-keyhole-open_0.svg",
+		"Lock the selected layer or group",
+		true,
+		"lock-keyhole_2.svg"
+	)
+	_layers_lock_button.name = "Selected Layer Lock"
+	_layers_lock_button.custom_minimum_size = Vector2(24, 24)
+	_layers_lock_button.add_theme_constant_override("icon_max_width", 14)
+	_layers_lock_button.toggled.connect(_on_layers_lock_toggled)
+	opacity_row.add_child(_layers_lock_button)
+	# Target Lock remains a session capability, but is intentionally absent from
+	# this compact panel until cross-target routing UI returns.
+	_layers_target_lock = null
+
+	_layers_tree = LayerHierarchyTree.new()
+	_layers_tree.name = "Layer Tree"
+	_layers_tree.columns = 3
+	_layers_tree.hide_root = true
+	_layers_tree.column_titles_visible = false
+	var tree_panel_style := _make_layers_tree_panel_style()
+	_layers_tree.add_theme_stylebox_override("panel", tree_panel_style)
+	_layers_tree.set_column_expand(0, true)
+	_layers_tree.set_column_custom_minimum_width(0, LAYER_TREE_NAME_MIN_WIDTH)
+	_layers_tree.set_column_clip_content(0, true)
+	_layers_tree.set_column_expand(1, false)
+	_layers_tree.set_column_custom_minimum_width(1, LAYER_STATUS_COLUMN_WIDTH)
+	_layers_tree.set_column_clip_content(1, true)
+	_layers_tree.set_column_expand(2, false)
+	_layers_tree.set_column_custom_minimum_width(2, LAYER_VISIBILITY_COLUMN_WIDTH)
+	_layers_tree.set_column_clip_content(2, true)
+	# Keep lock and visibility controls pinned inside the dock. Long names use
+	# native ellipsis rendering and retain their complete value in the tooltip.
+	_layers_tree.scroll_horizontal_enabled = false
+	_layers_tree.scroll_vertical_enabled = true
+	_layers_tree.select_mode = Tree.SELECT_ROW
+	# Match Godot's Scene/FileSystem docks: right-click first selects the row,
+	# then item_mouse_selected supplies that stable row to the native PopupMenu.
+	_layers_tree.allow_rmb_select = true
+	_layers_tree.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_layers_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_layers_tree.custom_minimum_size.y = 72
+	(_layers_tree as LayerHierarchyTree).can_drop_callback = Callable(self, "_can_drop_layer_tree_data")
+	(_layers_tree as LayerHierarchyTree).drop_callback = Callable(self, "_drop_layer_tree_data")
+	_layers_tree.item_selected.connect(_on_layers_tree_item_selected)
+	_layers_tree.item_edited.connect(_on_layers_tree_item_edited)
+	_layers_tree.button_clicked.connect(_on_layers_tree_button_clicked)
+	_layers_tree.item_mouse_selected.connect(_on_layers_tree_item_mouse_selected)
+	(_layers_tree as LayerHierarchyTree).selected_row_reclicked.connect(_on_layers_tree_row_reclicked)
+	(_layers_tree as LayerHierarchyTree).lock_slot_hover_changed.connect(_on_layers_tree_lock_slot_hover_changed)
+	_layers_panel_content.add_child(_layers_tree)
+
+	var actions := Control.new()
+	actions.name = "Layers Bottom Toolbar"
+	actions.custom_minimum_size.y = TOOL_BUTTON_SIZE.y
+	_layers_panel_content.add_child(actions)
+	var centered_actions := CenterContainer.new()
+	centered_actions.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	actions.add_child(centered_actions)
+	var create_actions := HBoxContainer.new()
+	create_actions.add_theme_constant_override("separation", 4)
+	centered_actions.add_child(create_actions)
+	_layers_add_button = _make_icon_button(
+		"layers-plus_0.svg", "Add Layer: add a paint layer above the current item", false, "layers-plus_1.svg"
+	)
+	_layers_add_button.pressed.connect(_on_layers_add_pressed)
+	create_actions.add_child(_layers_add_button)
+	_layers_group_button = _make_icon_button(
+		"folder-plus_0.svg", "Add Group: create a group containing the current item", false, "folder-plus_1.svg"
+	)
+	_layers_group_button.pressed.connect(_on_layers_group_pressed)
+	create_actions.add_child(_layers_group_button)
+	_layers_delete_button = _make_icon_button(
+		"trash-2_0.svg", "Delete the selected layer or group", false, "trash-2_1.svg"
+	)
+	_layers_delete_button.name = "Delete Selected Layer"
+	_layers_delete_button.pressed.connect(_on_layers_delete_pressed)
+	actions.add_child(_layers_delete_button)
+	# Explicit offsets keep the button's entire rect above the bottom perimeter.
+	# The previous preset ran before layout and could center it on that edge.
+	_layers_delete_button.set_anchor(SIDE_LEFT, 1.0)
+	_layers_delete_button.set_anchor(SIDE_TOP, 0.5)
+	_layers_delete_button.set_anchor(SIDE_RIGHT, 1.0)
+	_layers_delete_button.set_anchor(SIDE_BOTTOM, 0.5)
+	_layers_delete_button.offset_left = -TOOL_BUTTON_SIZE.x
+	_layers_delete_button.offset_top = -TOOL_BUTTON_SIZE.y * 0.5
+	_layers_delete_button.offset_right = 0.0
+	_layers_delete_button.offset_bottom = TOOL_BUTTON_SIZE.y * 0.5
+
+	_build_layers_context_menu()
+
+
+func _make_layers_panel_outline_style() -> StyleBoxFlat:
+	var result := StyleBoxFlat.new()
+	result.bg_color = Color.TRANSPARENT
+	result.border_color = _get_layers_outline_color()
+	result.set_border_width_all(LAYERS_PANEL_BORDER_WIDTH)
+	return result
+
+
+func _get_layers_outline_color() -> Color:
+	var outline_color := Color("#202020")
+	var divider_style := get_theme_stylebox("separator", "HSeparator")
+	if divider_style is StyleBoxLine:
+		outline_color = divider_style.color
+	return outline_color
+
+
+func _get_layers_tab_background_color() -> Color:
+	var tab_style := get_theme_stylebox("tab_selected", "TabBar")
+	if tab_style is StyleBoxFlat:
+		return tab_style.bg_color
+	return TOOL_BUTTON_PANEL_COLOR
+
+
+func _make_layers_tree_panel_style() -> StyleBoxFlat:
+	var native_style := get_theme_stylebox("panel", "Tree")
+	var result := native_style.duplicate() as StyleBoxFlat if native_style is StyleBoxFlat else StyleBoxFlat.new()
+	result.bg_color = _layers_content_background_color
+	return result
+
+
+func _on_layers_panel_toggled(expanded: bool) -> void:
+	_layers_panel_expanded = expanded
+	if _layers_panel_content:
+		_layers_panel_content.visible = expanded
+		_layers_panel_content.get_parent().visible = expanded
+	if _layers_panel_root:
+		_layers_panel_root.custom_minimum_size.x = (
+			LAYERS_PANEL_MIN_WIDTH if expanded else LAYERS_PANEL_COLLAPSED_WIDTH
+		)
+	if _workspace_layers_split:
+		_workspace_layers_split.dragger_visibility = (
+			SplitContainer.DRAGGER_VISIBLE
+			if expanded
+			else SplitContainer.DRAGGER_HIDDEN_COLLAPSED
+		)
+	_save_split_view_preferences()
+	_sync_menu_state()
+	call_deferred("_apply_layers_panel_width")
+
+
+func _on_layers_filter_changed(_text: String) -> void:
+	_update_layers_filter_icon()
+	_refresh_layers_tree()
+
+
+func _update_layers_filter_icon() -> void:
+	if not _layers_filter_field:
+		return
+	# Native clear-button spacing keeps typed text out from under the x icon.
+	# The passive search icon occupies that same right-side slot while empty.
+	_layers_filter_field.right_icon = (
+		_layers_filter_search_icon
+		if _layers_filter_field.text.strip_edges().is_empty()
+		else null
+	)
+
+
+func _update_layers_filter_icons(force_replace := false) -> bool:
+	if not _layers_filter_field:
+		return true
+	var search_texture := _get_godot_layer_icon("Search.svg", 14, force_replace)
+	var search_ready := search_texture != null
+	if not search_texture:
+		var search_loaded := _load_icon_for_state("search_0.svg", -1, force_replace)
+		search_texture = _scale_layer_ui_icon(search_loaded.get("texture") as Texture2D, 14)
+		search_ready = bool(search_loaded.get("ready", false))
+	var clear_loaded := _load_icon_for_state("x_0.svg", -1, force_replace)
+	var clear_texture := _scale_layer_ui_icon(clear_loaded.get("texture") as Texture2D, 14)
+	if search_texture:
+		_layers_filter_search_icon = search_texture
+	if clear_texture:
+		_layers_filter_field.add_theme_icon_override("clear", clear_texture)
+	var ready := search_ready and bool(clear_loaded.get("ready", false))
+	_layers_filter_field.set_meta("gddraw_icon_ready", ready)
+	_update_layers_filter_icon()
+	return ready
+
+
+func _scale_layer_ui_icon(texture: Texture2D, maximum_size: int) -> Texture2D:
+	if not texture or maximum_size <= 0:
+		return texture
+	if texture.get_width() <= maximum_size and texture.get_height() <= maximum_size:
+		return texture
+	var image := texture.get_image()
+	if not image or image.is_empty():
+		return texture
+	image.resize(maximum_size, maximum_size, Image.INTERPOLATE_LANCZOS)
+	return ImageTexture.create_from_image(image)
+
+
+func _get_layers_filter_text() -> String:
+	return _layers_filter_field.text.strip_edges().to_lower() if _layers_filter_field else ""
+
+
+func _apply_layers_panel_width() -> void:
+	if not _workspace_layers_split or not _layers_panel_root:
+		return
+	var total_width := _workspace_layers_split.size.x
+	if total_width <= 0.0:
+		return
+	var separation := float(_workspace_layers_split.get_theme_constant("separation"))
+	var usable_width := maxf(0.0, total_width - separation)
+	var desired_width := LAYERS_PANEL_COLLAPSED_WIDTH
+	if _layers_panel_expanded:
+		var maximum := minf(LAYERS_PANEL_MAX_WIDTH, maxf(LAYERS_PANEL_MIN_WIDTH, usable_width - 360.0))
+		desired_width = clampf(_layers_panel_width, LAYERS_PANEL_MIN_WIDTH, maximum)
+	_workspace_layers_split.split_offset = roundi(usable_width * 0.5 - desired_width)
+
+
+func _on_layers_panel_dragged(_offset: int) -> void:
+	if not _layers_panel_expanded or not _layers_panel_root:
+		return
+	_layers_panel_width = clampf(_layers_panel_root.size.x, LAYERS_PANEL_MIN_WIDTH, LAYERS_PANEL_MAX_WIDTH)
+	_save_split_view_preferences()
+
+
+func _refresh_layers_tree(preferred_selection: Dictionary = {}) -> void:
+	if not _layers_tree or not _layer_session:
+		return
+	var selection := preferred_selection
+	if selection.is_empty():
+		selection = _get_selected_layers_context()
+	_syncing_layers_ui = true
+	_layers_tree.clear()
+	var root := _layers_tree.create_item()
+	var selected_item: TreeItem
+	for group in _layer_session.object_groups:
+		if not str(group.get("parent_id", "")).is_empty():
+			continue
+		var found := _append_object_group_tree_item(root, str(group.get("id", "")), selection)
+		if found:
+			selected_item = found
+	if not selected_item:
+		selected_item = _find_active_layer_tree_item(root)
+	if selected_item:
+		selected_item.select(0)
+		(_layers_tree as LayerHierarchyTree).stable_selected_context = selected_item.get_metadata(0).duplicate(true)
+	else:
+		(_layers_tree as LayerHierarchyTree).stable_selected_context.clear()
+	if _layers_target_lock:
+		_layers_target_lock.set_pressed_no_signal(_layer_session.target_lock_enabled)
+	_syncing_layers_ui = false
+	_refresh_layers_controls()
+
+
+func _append_object_group_tree_item(
+	parent: TreeItem,
+	group_id: String,
+	selection: Dictionary
+) -> TreeItem:
+	var group: Dictionary = _layer_session.get_object_group(group_id)
+	if group.is_empty():
+		return null
+	var filter_text := _get_layers_filter_text()
+	var label := str(group.get("label", "Object"))
+	if not filter_text.is_empty() and not _object_group_matches_layers_filter(group_id, filter_text):
+		return null
+	var item := _layers_tree.create_item(parent)
+	item.set_text(0, _get_layer_tree_display_text(label))
+	item.set_text_overrun_behavior(0, TextServer.OVERRUN_TRIM_ELLIPSIS)
+	item.set_metadata(0, {"kind": "object", "group_id": group_id})
+	for column in range(1, 3):
+		item.set_selectable(column, false)
+	var source_key := str(group.get("source_key", ""))
+	var is_scene_object: bool = _layer_session.session_kind == "3d"
+	if is_scene_object:
+		var scene_icon_name := _get_object_group_scene_icon_name(group)
+		var scene_icon := _get_godot_layer_icon(scene_icon_name, 16) if not scene_icon_name.is_empty() else null
+		item.set_icon(0, scene_icon if scene_icon else _get_layer_tree_icon("circle-small_0.svg", 16))
+		item.set_icon_max_width(0, 16)
+		item.set_tooltip_text(0, "%s\nSelect in the Scene dock" % label if not source_key.is_empty() else "%s 3D preview object" % label)
+		_configure_3d_object_group_visibility_button(item, group, label)
+	else:
+		item.set_tooltip_text(0, label)
+	item.set_collapsed(false)
+	var selected_item: TreeItem = item if _layers_context_matches(item.get_metadata(0), selection) else null
+	for target_id in group.get("target_ids", PackedStringArray()):
+		var found := _append_paint_target_tree_item(
+			item,
+			str(target_id),
+			selection,
+			group_id
+		)
+		if found:
+			selected_item = found
+	for child_group in _layer_session.object_groups:
+		if str(child_group.get("parent_id", "")) == group_id:
+			var found := _append_object_group_tree_item(
+				item,
+				str(child_group.get("id", "")),
+				selection
+			)
+			if found:
+				selected_item = found
+	return selected_item
+
+
+func _append_paint_target_tree_item(
+	parent: TreeItem,
+	target_id: String,
+	selection: Dictionary,
+	group_id := ""
+) -> TreeItem:
+	var target = _layer_session.get_target(target_id)
+	if not target:
+		return null
+	var filter_text := _get_layers_filter_text()
+	if not filter_text.is_empty() and not _paint_target_matches_layers_filter(target, filter_text):
+		return null
+	var item := _layers_tree.create_item(parent)
+	var row_label := _get_paint_target_tree_label(target)
+	item.set_text(0, _get_layer_tree_display_text(row_label))
+	item.set_text_overrun_behavior(0, TextServer.OVERRUN_TRIM_ELLIPSIS)
+	item.set_tooltip_text(0, row_label)
+	item.set_metadata(0, {"kind": "target", "target_id": target_id, "group_id": group_id})
+	for column in range(1, 3):
+		item.set_selectable(column, false)
+	item.set_collapsed(false)
+	var selected_item: TreeItem = item if _layers_context_matches(item.get_metadata(0), selection) else null
+	for node in target.nodes:
+		var found := _append_layer_node_tree_item(item, target, node, selection, group_id)
+		if found:
+			selected_item = found
+	return selected_item
+
+
+func _object_group_matches_layers_filter(group_id: String, filter_text: String) -> bool:
+	var group: Dictionary = _layer_session.get_object_group(group_id)
+	if group.is_empty():
+		return false
+	if str(group.get("label", "")).to_lower().contains(filter_text):
+		return true
+	for target_id in group.get("target_ids", PackedStringArray()):
+		if _paint_target_matches_layers_filter(_layer_session.get_target(str(target_id)), filter_text):
+			return true
+	for child_group in _layer_session.object_groups:
+		if (
+			str(child_group.get("parent_id", "")) == group_id
+			and _object_group_matches_layers_filter(str(child_group.get("id", "")), filter_text)
+		):
+			return true
+	return false
+
+
+func _paint_target_matches_layers_filter(target, filter_text: String) -> bool:
+	if not target:
+		return false
+	if _get_paint_target_tree_label(target).to_lower().contains(filter_text):
+		return true
+	for node in target.nodes:
+		if _layer_node_matches_layers_filter(node, filter_text):
+			return true
+	return false
+
+
+func _get_paint_target_tree_label(target) -> String:
+	var label := str(target.label) if target else "Paint Target"
+	if not _layer_session or _layer_session.session_kind != "3d":
+		return label
+	# Older layered documents stored the filename in this label. The child paint
+	# layer already owns that filename, so trim the legacy suffix for a compact
+	# Scene-dock-style hierarchy without mutating saved target identity data.
+	var marker := " · Albedo"
+	var marker_index := label.find(marker)
+	if marker_index < 0:
+		return label
+	var compact_label := label.substr(0, marker_index + marker.length())
+	var material_prefix := compact_label.substr(0, marker_index)
+	var object_separator_index := material_prefix.rfind(" · ")
+	if object_separator_index >= 0:
+		material_prefix = material_prefix.substr(object_separator_index + 3)
+	# Discovery describes a named surface as "Material 0 (MAT_01)". The object
+	# row already conveys both the owning mesh and hierarchy, so prefer the useful
+	# authored name while retaining "Material 0" as the unnamed-slot fallback.
+	var authored_name_start := material_prefix.rfind("(")
+	if authored_name_start >= 0 and material_prefix.ends_with(")"):
+		var authored_name := material_prefix.substr(
+			authored_name_start + 1,
+			material_prefix.length() - authored_name_start - 2
+		).strip_edges()
+		if not authored_name.is_empty():
+			material_prefix = authored_name
+	return "%s%s" % [material_prefix, marker]
+
+
+func _layer_node_matches_layers_filter(node, filter_text: String) -> bool:
+	if str(node.name).to_lower().contains(filter_text):
+		return true
+	for child in node.children:
+		if _layer_node_matches_layers_filter(child, filter_text):
+			return true
+	return false
+
+
+func _append_layer_node_tree_item(
+	parent: TreeItem,
+	target,
+	node,
+	selection: Dictionary,
+	group_id := ""
+) -> TreeItem:
+	var filter_text := _get_layers_filter_text()
+	if not filter_text.is_empty() and not _layer_node_matches_layers_filter(node, filter_text):
+		return null
+	var item := _layers_tree.create_item(parent)
+	var kind := "paint" if node.is_paint_layer() else "group"
+	var metadata := {
+		"kind": kind,
+		"target_id": target.target_id,
+		"node_id": node.id,
+		"group_id": group_id,
+	}
+	var row_name: String = node.name
+	item.set_metadata(0, metadata)
+	item.set_text(0, _get_layer_tree_display_text(row_name))
+	item.set_text_overrun_behavior(0, TextServer.OVERRUN_TRIM_ELLIPSIS)
+	item.set_tooltip_text(0, "%s (%s)" % [row_name, "paint layer" if node.is_paint_layer() else "layer group"])
+	var hierarchy_selected := _layers_context_matches(metadata, selection)
+	var effectively_locked: bool = target.is_node_effectively_locked(node.id)
+	var inherited_locked: bool = target.is_node_locked_by_ancestor(node.id)
+	item.set_selectable(1, false)
+	item.set_selectable(2, false)
+	if effectively_locked:
+		item.add_button(
+			1,
+			_get_layer_tree_icon("lock-keyhole_2.svg", LAYER_ROW_STATUS_ICON_SIZE),
+			LAYER_BUTTON_LOCK_STATUS,
+			inherited_locked,
+			"Locked by a parent group" if inherited_locked else "Unlock %s" % node.name
+		)
+	elif _layers_context_matches(metadata, _layers_lock_hover_context):
+		item.add_button(
+			1,
+			_get_layer_tree_icon("lock-keyhole-open_0.svg", LAYER_ROW_STATUS_ICON_SIZE),
+			LAYER_BUTTON_LOCK_STATUS,
+			false,
+			"Lock %s" % node.name
+		)
+	item.add_button(
+		2,
+		_get_layer_visibility_icon(node.visible),
+		LAYER_BUTTON_VISIBILITY,
+		false,
+		"Hide %s" % node.name if node.visible else "Show %s" % node.name
+	)
+	var thumbnail_texture := _get_layer_thumbnail_texture(target, node)
+	if thumbnail_texture:
+		item.set_icon(0, thumbnail_texture)
+		item.set_icon_max_width(0, LAYER_THUMBNAIL_SIZE)
+	item.set_collapsed(false)
+	var selected_item: TreeItem = item if hierarchy_selected else null
+	for child in node.children:
+		var found := _append_layer_node_tree_item(
+			item,
+			target,
+			child,
+			selection,
+			group_id
+		)
+		if found:
+			selected_item = found
+	return selected_item
+
+
+func _get_layer_thumbnail_texture(target, node) -> Texture2D:
+	var cache_key := _make_layer_thumbnail_cache_key(target, node)
+	var cached := _layer_thumbnail_cache.get(cache_key) as Texture2D
+	if cached:
+		return cached
+	var thumbnail := _make_checker_thumbnail(LAYER_THUMBNAIL_SIZE)
+	var content_preview: Image = (
+		target.render_node_thumbnail(node.id, LAYER_THUMBNAIL_SIZE - 4)
+		if target.has_method("render_node_thumbnail")
+		else null
+	)
+	if content_preview:
+		thumbnail.blend_rect(
+			content_preview,
+			Rect2i(Vector2i.ZERO, content_preview.get_size()),
+			Vector2i(2, 2)
+		)
+	if not thumbnail:
+		return _get_layer_tree_icon("folder_1.svg", 16) if node.is_group() else null
+	var texture := ImageTexture.create_from_image(thumbnail)
+	_layer_thumbnail_cache[cache_key] = texture
+	return texture
+
+
+func _make_layer_thumbnail_cache_key(target, node) -> String:
+	var parts := PackedStringArray(["target=" + str(target.target_id)])
+	_append_layer_thumbnail_cache_key(parts, str(target.target_id), node)
+	return "|".join(parts)
+
+
+func _append_layer_thumbnail_cache_key(parts: PackedStringArray, target_id: String, node) -> void:
+	parts.push_back(str(node.id))
+	parts.push_back(str(node.visible))
+	parts.push_back(str(node.opacity))
+	parts.push_back("revision=" + str(_layer_thumbnail_revisions.get(target_id + ":" + str(node.id), 0)))
+	if node.is_paint_layer():
+		parts.push_back(str(node.image.get_instance_id()) if node.image else "null")
+		return
+	for child in node.children:
+		_append_layer_thumbnail_cache_key(parts, target_id, child)
+	parts.push_back("group_end")
+
+
+func _invalidate_layer_thumbnail(target_id: String, node_id: String) -> void:
+	if target_id.is_empty() or node_id.is_empty():
+		return
+	var revision_key := target_id + ":" + node_id
+	_layer_thumbnail_revisions[revision_key] = int(_layer_thumbnail_revisions.get(revision_key, 0)) + 1
+	if _layer_thumbnail_cache.size() > 2048:
+		_layer_thumbnail_cache.clear()
+
+
+func _make_layer_thumbnail(image: Image, opacity := 1.0, visible := true) -> Image:
+	var thumbnail := _make_checker_thumbnail(LAYER_THUMBNAIL_SIZE)
+	var preview_opacity := clampf(float(opacity), 0.0, 1.0)
+	if not visible or preview_opacity <= 0.0 or not image or image.is_empty():
+		return thumbnail
+	var image_rect := Rect2i(Vector2i.ZERO, image.get_size())
+	var source_rect := image.get_used_rect()
+	if source_rect.size.x <= 0 or source_rect.size.y <= 0:
+		return thumbnail
+	var padding := maxi(1, ceili(float(maxi(source_rect.size.x, source_rect.size.y)) * 0.08))
+	source_rect = source_rect.grow(padding).intersection(image_rect)
+	var available := Vector2(LAYER_THUMBNAIL_SIZE - 4, LAYER_THUMBNAIL_SIZE - 4)
+	var scale := minf(available.x / float(source_rect.size.x), available.y / float(source_rect.size.y))
+	var destination_size := Vector2i(
+		maxi(1, roundi(float(source_rect.size.x) * scale)),
+		maxi(1, roundi(float(source_rect.size.y) * scale))
+	)
+	var destination_origin := Vector2i(
+		(LAYER_THUMBNAIL_SIZE - destination_size.x) / 2,
+		(LAYER_THUMBNAIL_SIZE - destination_size.y) / 2
+	)
+	for y in range(destination_size.y):
+		var source_y := source_rect.position.y + mini(
+			source_rect.size.y - 1,
+			int(float(y) * float(source_rect.size.y) / float(destination_size.y))
+		)
+		for x in range(destination_size.x):
+			var source_x := source_rect.position.x + mini(
+				source_rect.size.x - 1,
+				int(float(x) * float(source_rect.size.x) / float(destination_size.x))
+			)
+			var destination := destination_origin + Vector2i(x, y)
+			var source_color := image.get_pixel(source_x, source_y)
+			source_color.a *= preview_opacity
+			thumbnail.set_pixel(
+				destination.x,
+				destination.y,
+				thumbnail.get_pixel(destination.x, destination.y).blend(source_color)
+			)
+	return thumbnail
+
+
+func _get_layer_tree_icon(icon_name: String, maximum_size := 0) -> Texture2D:
+	var loaded := _load_icon_for_state(icon_name, -1, false)
+	var texture := loaded.get("texture") as Texture2D
+	if texture:
+		if maximum_size > 0 and (texture.get_width() > maximum_size or texture.get_height() > maximum_size):
+			var image := texture.get_image()
+			if image and not image.is_empty():
+				image.resize(maximum_size, maximum_size, Image.INTERPOLATE_LANCZOS)
+				return ImageTexture.create_from_image(image)
+		return texture
+	var fallback := Image.create_empty(1, 1, false, Image.FORMAT_RGBA8)
+	fallback.fill(Color.TRANSPARENT)
+	return ImageTexture.create_from_image(fallback)
+
+
+func _get_godot_layer_icon(icon_name: String, maximum_size := 0, replace_cache := false) -> Texture2D:
+	if icon_name.is_empty():
+		return null
+	var texture := _load_icon_texture("%s/%s" % [GODOT_ICON_DIR, icon_name.get_file()], replace_cache)
+	return _scale_layer_ui_icon(texture, maximum_size) if texture else null
+
+
+func _get_layer_visibility_icon(visible: bool) -> Texture2D:
+	if visible:
+		var godot_visible := _get_godot_layer_icon("GuiVisibilityVisible.svg", LAYER_ROW_STATUS_ICON_SIZE)
+		if godot_visible:
+			return godot_visible
+	# Keep the existing authored hidden-eye state until its Godot counterpart can
+	# be visually distinguished from the visible eye in the Layers panel.
+	return _get_layer_tree_icon(
+		"eye_0.svg" if visible else "eye-closed_2.svg",
+		LAYER_ROW_STATUS_ICON_SIZE
+	)
+
+
+func _get_3d_object_group_scene_visibility(group: Dictionary) -> bool:
+	if not _is_3d_scene_sync_enabled():
+		return true
+	var group_id := str(group.get("id", ""))
+	if _paint_3d_object_group_scene_visibility_cache.has(group_id):
+		return bool(_paint_3d_object_group_scene_visibility_cache[group_id])
+	var source_node := _resolve_object_group_source_node(group_id)
+	return source_node.is_visible_in_tree() if is_instance_valid(source_node) and source_node is Node3D and source_node.is_inside_tree() else true
+
+
+func _configure_3d_object_group_visibility_button(item: TreeItem, group: Dictionary, label: String) -> void:
+	if not item:
+		return
+	while item.get_button_count(2) > 0:
+		item.erase_button(2, item.get_button_count(2) - 1)
+	var object_visible := bool(group.get("visible", true))
+	var scene_visible := _get_3d_object_group_scene_visibility(group)
+	var effective_visible := object_visible and scene_visible
+	var hidden_by_scene := _is_3d_scene_sync_enabled() and not scene_visible
+	var tooltip := (
+		"Hidden by the linked Scene hierarchy. Show %s in the Scene dock to make it available here." % label
+		if hidden_by_scene
+		else "Hide %s in the GDDraw 3D preview" % label
+		if object_visible
+		else "Show %s in the GDDraw 3D preview" % label
+	)
+	item.add_button(
+		2,
+		_get_layer_visibility_icon(effective_visible),
+		LAYER_BUTTON_VISIBILITY,
+		hidden_by_scene,
+		tooltip
+	)
+
+
+func _refresh_3d_object_group_visibility_buttons(parent: TreeItem = null) -> void:
+	if not _layers_tree or not _layer_session or _layer_session.session_kind != "3d":
+		return
+	var tree_parent := parent if parent else _layers_tree.get_root()
+	if not tree_parent:
+		return
+	var item := tree_parent.get_first_child()
+	while item:
+		var context: Variant = item.get_metadata(0)
+		if context is Dictionary and str(context.get("kind", "")) == "object":
+			var group: Dictionary = _layer_session.get_object_group(str(context.get("group_id", "")))
+			if not group.is_empty():
+				_configure_3d_object_group_visibility_button(item, group, str(group.get("label", "Object")))
+		_refresh_3d_object_group_visibility_buttons(item)
+		item = item.get_next()
+
+
+func _get_object_group_scene_icon_name(group: Dictionary) -> String:
+	var source_class := str(group.get("source_class", ""))
+	if source_class.is_empty():
+		var source_node := _resolve_object_group_source_node(str(group.get("id", "")))
+		if is_instance_valid(source_node):
+			source_class = source_node.get_class()
+	if source_class.is_empty() and _layer_session:
+		for target_id in group.get("target_ids", PackedStringArray()):
+			var target = _layer_session.get_target(str(target_id))
+			if target:
+				source_class = str(target.binding.get("source_class", ""))
+				if not source_class.is_empty():
+					break
+	match source_class:
+		"MeshInstance3D":
+			return "MeshInstance3D.svg"
+		"Node3D":
+			return "Node3D.svg"
+		"Skeleton3D":
+			return "Skeleton3D.svg"
+		"Node2D":
+			return "Node2D.svg"
+		"BoneAttachment3D":
+			return "BoneAttachment3D.svg"
+		"CSGBox3D":
+			return "CSGBox3D.svg"
+		"CSGCombiner3D":
+			return "CSGCombiner3D.svg"
+		"CSGCylinder3D":
+			return "CSGCylinder3D.svg"
+		"CSGMesh3D":
+			return "CSGMesh3D.svg"
+		"CSGPolygon3D":
+			return "CSGPolygon3D.svg"
+		"CSGSphere3D":
+			return "CSGSphere3D.svg"
+		"CSGTorus3D":
+			return "CSGTorus3D.svg"
+	return ""
+
+
+func _make_checker_thumbnail(size: int) -> Image:
+	var result := Image.create_empty(size, size, false, Image.FORMAT_RGBA8)
+	var checker_size := maxi(4, size / 8)
+	for y in range(size):
+		for x in range(size):
+			var light := ((x / checker_size) + (y / checker_size)) % 2 == 0
+			result.set_pixel(x, y, Color(0.68, 0.68, 0.68) if light else Color(0.48, 0.48, 0.48))
+	return result
+
+
+func _get_layer_tree_display_text(full_text: String) -> String:
+	if full_text.length() <= LAYER_TREE_LABEL_MAX_CHARACTERS:
+		return full_text
+	return full_text.left(LAYER_TREE_LABEL_MAX_CHARACTERS).trim_suffix(" ") + "…"
+
+
+func _find_active_layer_tree_item(root: TreeItem) -> TreeItem:
+	if not _layer_session:
+		return null
+	var target = _layer_session.get_active_target()
+	if not target:
+		return null
+	return _find_layers_tree_item(root, "paint", target.target_id, target.selected_layer_id)
+
+
+func _find_layers_tree_item(
+	item: TreeItem,
+	kind: String,
+	target_id: String,
+	node_id: String,
+	group_id := ""
+) -> TreeItem:
+	var child := item.get_first_child()
+	while child:
+		var metadata: Variant = child.get_metadata(0)
+		if metadata is Dictionary:
+			if (
+				str(metadata.get("kind", "")) == kind
+				and str(metadata.get("target_id", "")) == target_id
+				and str(metadata.get("node_id", "")) == node_id
+				and (group_id.is_empty() or str(metadata.get("group_id", "")) == group_id)
+			):
+				return child
+		var nested := _find_layers_tree_item(child, kind, target_id, node_id, group_id)
+		if nested:
+			return nested
+		child = child.get_next()
+	return null
+
+
+func _sync_layers_tree_selection(context: Dictionary) -> void:
+	if not _layers_tree or context.is_empty():
+		return
+	var current_item := _layers_tree.get_selected()
+	var current_context: Variant = current_item.get_metadata(0) if current_item else null
+	if current_context is Dictionary and _layers_context_matches(current_context, context):
+		(_layers_tree as LayerHierarchyTree).stable_selected_context = current_context.duplicate(true)
+		_refresh_layers_controls()
+		return
+	var item := _find_layers_tree_item(
+		_layers_tree.get_root(),
+		str(context.get("kind", "")),
+		str(context.get("target_id", "")),
+		str(context.get("node_id", "")),
+		str(context.get("group_id", ""))
+	)
+	if not item:
+		if _get_layers_filter_text().is_empty():
+			_refresh_layers_tree(context)
+		else:
+			_syncing_layers_ui = true
+			_layers_tree.deselect_all()
+			(_layers_tree as LayerHierarchyTree).stable_selected_context.clear()
+			_syncing_layers_ui = false
+			_refresh_layers_controls()
+		return
+	_syncing_layers_ui = true
+	item.select(0)
+	(_layers_tree as LayerHierarchyTree).stable_selected_context = context.duplicate(true)
+	_syncing_layers_ui = false
+	_refresh_layers_controls()
+
+
+func _layers_context_matches(left: Variant, right: Dictionary) -> bool:
+	if not left is Dictionary or right.is_empty():
+		return false
+	for key in ["kind", "group_id", "target_id", "node_id"]:
+		if right.has(key) and str(left.get(key, "")) != str(right.get(key, "")):
+			return false
+	return str(left.get("kind", "")) == str(right.get("kind", ""))
+
+
+func _get_selected_layers_context() -> Dictionary:
+	if not _layers_tree:
+		return {}
+	var item := _layers_tree.get_selected()
+	if not item:
+		return {}
+	var metadata: Variant = item.get_metadata(0)
+	return metadata.duplicate(true) if metadata is Dictionary else {}
+
+
+func _get_layers_context_target(context: Dictionary):
+	if not _layer_session:
+		return null
+	var target_id := str(context.get("target_id", ""))
+	return _layer_session.get_target(target_id) if not target_id.is_empty() else _layer_session.get_active_target()
+
+
+func _refresh_layers_controls() -> void:
+	if not _layers_opacity_field:
+		return
+	var context := _get_selected_layers_context()
+	var target = _get_layers_context_target(context)
+	var node = target.find_node(str(context.get("node_id", ""))) if target and context.has("node_id") else null
+	var effectively_locked: bool = target != null and node != null and target.is_node_effectively_locked(node.id)
+	_syncing_layers_ui = true
+	_layers_opacity_field.editable = node != null and not effectively_locked
+	_layers_opacity_field.set_value_no_signal(node.opacity * 100.0 if node else 100.0)
+	var inherited_locked: bool = node != null and target.is_node_locked_by_ancestor(node.id)
+	_layers_lock_button.disabled = node == null or inherited_locked
+	_layers_lock_button.set_pressed_no_signal(node != null and node.locked)
+	_layers_lock_button.tooltip_text = (
+		"Locked by a parent group"
+		if inherited_locked
+		else ("Unlock the selected layer or group" if node and node.locked else "Lock the selected layer or group")
+	)
+	_layers_group_button.disabled = target == null or effectively_locked
+	_layers_add_button.disabled = target == null or (node != null and node.is_group() and effectively_locked)
+	_layers_delete_button.disabled = node == null or not target.can_remove_node(node.id)
+	for button in [_layers_lock_button, _layers_add_button, _layers_group_button, _layers_delete_button]:
+		_update_icon_button_icon(button)
+	_syncing_layers_ui = false
+
+
+func _on_layers_tree_item_selected() -> void:
+	if _syncing_layers_ui:
+		return
+	var context := _get_selected_layers_context()
+	# Selection is a native Tree callback. Carry only stable IDs across the
+	# message boundary so canvas synchronization cannot clear the live TreeItem.
+	call_deferred("_apply_layers_tree_selection", context.duplicate(true))
+
+
+func _apply_layers_tree_selection(context: Dictionary) -> void:
+	var kind := str(context.get("kind", ""))
+	if kind == "object":
+		_prepare_layer_operation()
+		_select_3d_object_group(str(context.get("group_id", "")))
+		return
+	var target = _get_layers_context_target(context)
+	if not target:
+		_refresh_layers_controls()
+		return
+	if kind == "paint":
+		var selected_node_id := str(context.get("node_id", ""))
+		var active_target = _layer_session.get_active_target()
+		var changing_layer: bool = (
+			active_target == null
+			or active_target.target_id != target.target_id
+			or active_target.selected_layer_id != selected_node_id
+		)
+		if changing_layer:
+			_prepare_layer_operation()
+			var paint_binding_key := ""
+			if _texture_3d_layer_coordinator:
+				var paint_binding: Dictionary = _get_3d_binding_for_target_group(
+					target.target_id,
+					str(context.get("group_id", ""))
+				)
+				paint_binding_key = str(paint_binding.get("binding_key", ""))
+			_select_paint_layer(target.target_id, selected_node_id, true, paint_binding_key)
+		_sync_layers_tree_selection(context)
+	elif kind == "target":
+		var target_binding: Dictionary
+		if _texture_3d_layer_coordinator:
+			target_binding = _get_3d_binding_for_target_group(
+				target.target_id,
+				str(context.get("group_id", ""))
+			)
+		if _layer_session.active_target_id != target.target_id:
+			_prepare_layer_operation()
+			_layer_session.activate_target(target.target_id)
+			var target_binding_key := str(target_binding.get("binding_key", ""))
+			var promoted := _promote_cached_3d_preview(target.target_id, target_binding_key)
+			_sync_canvas_to_active_layer(false, promoted)
+		if _texture_3d_layer_coordinator:
+			# Material rows choose the paint target. Scene-object selection belongs
+			# to the lighter object row above the target.
+			_promote_cached_3d_preview(target.target_id, str(target_binding.get("binding_key", "")))
+			_set_active_3d_binding(str(target_binding.get("binding_key", "")), false)
+		else:
+			_refresh_layers_tree(context)
+	else:
+		_refresh_layers_tree(context)
+
+
+func _on_layers_tree_item_edited() -> void:
+	if _syncing_layers_ui or not _layers_tree:
+		return
+	var item := _layers_tree.get_edited()
+	var column := _layers_tree.get_edited_column()
+	if not item:
+		return
+	var context: Variant = item.get_metadata(0)
+	if not context is Dictionary or not context.has("node_id"):
+		return
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if column != 0 or not target or not target.find_node(node_id):
+		return
+	var edited_name := item.get_text(0)
+	_commit_layer_inline_rename(context.duplicate(true), edited_name)
+
+
+func _commit_layer_inline_rename(context: Dictionary, edited_name: String) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or not target.find_node(node_id):
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var changed: bool = target.rename_node(node_id, edited_name)
+	_layers_rename_context.clear()
+	if changed:
+		_push_layer_session_state_undo(previous_state)
+		_refresh_layer_composite()
+	else:
+		_set_status("Layer names cannot be empty, unchanged, or edited while locked.")
+	# item_edited is emitted from Tree's native editor teardown. Clear the Tree
+	# only after that callback releases its TreeItem.
+	call_deferred("_refresh_layers_tree", context)
+
+
+func _cancel_layer_inline_rename() -> void:
+	if _layers_rename_context.is_empty():
+		return
+	var context := _layers_rename_context.duplicate(true)
+	_layers_rename_context.clear()
+	_refresh_layers_tree(context)
+	_set_status("Layer rename canceled; the name is unchanged.")
+
+
+func _begin_layer_inline_rename(context: Dictionary) -> void:
+	if not _layers_tree or context.is_empty():
+		return
+	if not _get_layers_filter_text().is_empty():
+		# Search rows display a full path, not the editable model name. Return to
+		# the normal hierarchy before handing the row to Tree's native editor.
+		_layers_filter_field.clear()
+		call_deferred("_begin_layer_inline_rename", context.duplicate(true))
+		return
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	var node = target.find_node(node_id) if target else null
+	if not node or target.is_node_effectively_locked(node_id):
+		_refresh_layers_tree(context)
+		return
+	var item := _find_layers_tree_item(
+		_layers_tree.get_root(),
+		str(context.get("kind", "")),
+		str(context.get("target_id", "")),
+		node_id,
+		str(context.get("group_id", ""))
+	)
+	if not item:
+		return
+	# Resolve a fresh item from stable IDs before editing; selection, row-button,
+	# and context-menu callbacks may all have rebuilt the Tree on a prior frame.
+	_syncing_layers_ui = true
+	item.select(0)
+	_syncing_layers_ui = false
+	(_layers_tree as LayerHierarchyTree).stable_selected_context = context.duplicate(true)
+	_layers_rename_context = context.duplicate(true)
+	# Display rows may be shortened for layout, but native inline editing always
+	# starts from the complete model name and commits that complete value.
+	item.set_text(0, str(node.name))
+	item.set_editable(0, true)
+	# A headless Tree has no native editor focus metadata to hand to its
+	# internal LineEdit. Interactive editor sessions enter it immediately.
+	if DisplayServer.get_name() != "headless":
+		_layers_tree.edit_selected(true)
+
+
+func _on_layers_tree_button_clicked(
+	item: TreeItem,
+	_column: int,
+	button_id: int,
+	_mouse_button_index: int
+) -> void:
+	if _syncing_layers_ui or not item:
+		return
+	var context: Variant = item.get_metadata(0)
+	if not context is Dictionary:
+		return
+	var kind := str(context.get("kind", ""))
+	if (kind == "object" and not context.has("group_id")) or (kind != "object" and not context.has("node_id")):
+		return
+	# Tree row buttons are native sub-controls. Never select, rebuild, or mutate
+	# their TreeItem while Godot is still dispatching button_clicked.
+	call_deferred("_handle_layer_tree_button", context.duplicate(true), button_id)
+
+
+func _handle_layer_tree_button(context: Dictionary, button_id: int) -> void:
+	var kind := str(context.get("kind", ""))
+	if kind == "object":
+		var group_id := str(context.get("group_id", ""))
+		var object_item := _find_layers_tree_item(
+			_layers_tree.get_root(),
+			"object",
+			"",
+			"",
+			group_id
+		) if _layers_tree else null
+		if not object_item:
+			return
+		_syncing_layers_ui = true
+		object_item.select(0)
+		_syncing_layers_ui = false
+		(_layers_tree as LayerHierarchyTree).stable_selected_context = context.duplicate(true)
+		if button_id == LAYER_BUTTON_VISIBILITY:
+			_toggle_3d_object_group_visibility(context)
+		return
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	var node = target.find_node(node_id) if target else null
+	if not node:
+		return
+	var item := _find_layers_tree_item(
+		_layers_tree.get_root(),
+		str(context.get("kind", "")),
+		str(context.get("target_id", "")),
+		node_id,
+		str(context.get("group_id", ""))
+	) if _layers_tree else null
+	if not item:
+		return
+	_syncing_layers_ui = true
+	item.select(0)
+	_syncing_layers_ui = false
+	(_layers_tree as LayerHierarchyTree).stable_selected_context = context.duplicate(true)
+	if str(context.get("kind", "")) == "paint":
+		_select_paint_layer(target.target_id, node_id, true)
+	_refresh_layers_controls()
+	match button_id:
+		LAYER_BUTTON_LOCK_STATUS:
+			_toggle_layer_context_lock(context)
+		LAYER_BUTTON_VISIBILITY:
+			_toggle_layer_context_visibility(context)
+
+
+func _toggle_3d_object_group_visibility(context: Dictionary) -> void:
+	if not _layer_session or _layer_session.session_kind != "3d":
+		return
+	var group_id := str(context.get("group_id", ""))
+	var group: Dictionary = _layer_session.get_object_group(group_id)
+	if group.is_empty():
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var next_visible := not bool(group.get("visible", true))
+	if not _layer_session.set_object_group_visible(group_id, next_visible):
+		return
+	_push_layer_session_state_undo(previous_state)
+	_apply_3d_object_group_visibility()
+	_refresh_layers_tree(context)
+	_set_status("%s %s in the GDDraw 3D preview." % ["Showed" if next_visible else "Hid", str(group.get("label", "object"))])
+
+
+func _on_layers_tree_lock_slot_hover_changed(context: Dictionary, hovered: bool) -> void:
+	if hovered:
+		_layers_lock_hover_context = context.duplicate(true)
+	elif _layers_context_matches(context, _layers_lock_hover_context):
+		_layers_lock_hover_context.clear()
+	# Tree input still owns the row during this signal. Resolve stable IDs and
+	# alter only the compact button after native input dispatch has completed.
+	call_deferred("_sync_layers_tree_lock_hover_affordance")
+
+
+func _sync_layers_tree_lock_hover_affordance() -> void:
+	if not _layers_tree or not _layer_session:
+		return
+	_sync_layers_tree_lock_hover_items(_layers_tree.get_root())
+
+
+func _sync_layers_tree_lock_hover_items(parent: TreeItem) -> void:
+	if not parent:
+		return
+	var item := parent.get_first_child()
+	while item:
+		var context: Variant = item.get_metadata(0)
+		if context is Dictionary and str(context.get("kind", "")) in ["paint", "group"]:
+			var target = _get_layers_context_target(context)
+			var node = target.find_node(str(context.get("node_id", ""))) if target else null
+			if node and not target.is_node_effectively_locked(node.id):
+				var hovered := _layers_context_matches(context, _layers_lock_hover_context)
+				if hovered and item.get_button_count(1) == 0:
+					item.add_button(
+						1,
+						_get_layer_tree_icon("lock-keyhole-open_0.svg", LAYER_ROW_STATUS_ICON_SIZE),
+						LAYER_BUTTON_LOCK_STATUS,
+						false,
+						"Lock %s" % node.name
+					)
+				elif not hovered and item.get_button_count(1) > 0:
+					item.erase_button(1, 0)
+		_sync_layers_tree_lock_hover_items(item)
+		item = item.get_next()
+
+
+func _on_layers_tree_row_reclicked(context: Dictionary) -> void:
+	# The release originated inside Tree._gui_input. Resolve the row by stable
+	# IDs on the next message cycle before enabling native inline editing.
+	call_deferred("_begin_layer_inline_rename", context.duplicate(true))
+
+
+func _on_layers_tree_item_mouse_selected(mouse_position: Vector2, mouse_button_index: int) -> void:
+	if mouse_button_index != MOUSE_BUTTON_RIGHT or not _layers_tree:
+		return
+	var item := _layers_tree.get_item_at_position(mouse_position)
+	if not item:
+		return
+	var context: Variant = item.get_metadata(0)
+	if not context is Dictionary or str(context.get("kind", "")) not in ["object", "target", "paint", "group"]:
+		return
+	var popup_position := Vector2i(_layers_tree.get_screen_position() + mouse_position)
+	call_deferred("_show_layers_context_menu", context.duplicate(true), popup_position)
+
+
+func _build_layers_context_menu() -> void:
+	_layers_context_menu = PopupMenu.new()
+	_layers_context_menu.name = "Layer Context Menu"
+	_layers_context_menu.id_pressed.connect(_on_layers_context_menu_id_pressed)
+	add_child(_layers_context_menu)
+
+
+func _show_layers_context_menu(context: Dictionary, screen_position: Vector2i) -> void:
+	if not _select_layers_tree_context(context):
+		return
+	_layers_context_menu_context = context.duplicate(true)
+	_layers_context_menu.clear()
+	var kind := str(context.get("kind", ""))
+	if kind in ["paint", "group"]:
+		_configure_layer_context_menu(context)
+	elif _layer_session and _layer_session.session_kind == "3d" and kind == "object":
+		_configure_3d_object_context_menu(context)
+	elif _layer_session and _layer_session.session_kind == "3d" and kind == "target":
+		_configure_3d_target_context_menu(context)
+	else:
+		_configure_2d_document_context_menu(context)
+	if _layers_context_menu.item_count <= 0:
+		return
+	_layers_context_menu.position = screen_position
+	_layers_context_menu.popup()
+
+
+func _configure_layer_context_menu(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	var node = target.find_node(node_id) if target else null
+	if not node:
+		return
+	var effectively_locked: bool = target.is_node_effectively_locked(node_id)
+	var inherited_locked: bool = target.is_node_locked_by_ancestor(node_id)
+	var location: Dictionary = target.get_node_location(node_id)
+	var paste_parent_id := str(location.get("parent_group_id", ""))
+	_layers_context_menu.add_item("Cut", LAYER_CONTEXT_CUT)
+	_layers_context_menu.add_item("Copy", LAYER_CONTEXT_COPY)
+	_layers_context_menu.add_item("Paste", LAYER_CONTEXT_PASTE)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("Rename", LAYER_CONTEXT_RENAME)
+	_layers_context_menu.add_item("Duplicate", LAYER_CONTEXT_DUPLICATE)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("Hide" if node.visible else "Show", LAYER_CONTEXT_VISIBILITY)
+	_layers_context_menu.add_item("Hide Others", LAYER_CONTEXT_HIDE_OTHERS)
+	_layers_context_menu.add_item("Show All", LAYER_CONTEXT_SHOW_ALL)
+	_layers_context_menu.add_item("Unlock" if node.locked else "Lock", LAYER_CONTEXT_LOCK)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("Merge Down", LAYER_CONTEXT_MERGE_DOWN)
+	_layers_context_menu.add_item("Merge Visible", LAYER_CONTEXT_MERGE_VISIBLE)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("New Paint Layer", LAYER_CONTEXT_NEW_PAINT)
+	_layers_context_menu.add_item("New Group", LAYER_CONTEXT_NEW_GROUP)
+	_layers_context_menu.add_item("Select Parent Group", LAYER_CONTEXT_SELECT_PARENT)
+	_layers_context_menu.add_separator("Arrange")
+	_layers_context_menu.add_item("Move Up", LAYER_CONTEXT_MOVE_UP)
+	_layers_context_menu.add_item("Move Down", LAYER_CONTEXT_MOVE_DOWN)
+	_layers_context_menu.add_item("Move Into Group", LAYER_CONTEXT_MOVE_INTO)
+	_layers_context_menu.add_item("Move Out of Group", LAYER_CONTEXT_MOVE_OUT)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("Delete", LAYER_CONTEXT_DELETE)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_CUT, not target.can_remove_node(node_id))
+	_set_layers_context_item_disabled(LAYER_CONTEXT_COPY, false)
+	_set_layers_context_item_disabled(
+		LAYER_CONTEXT_PASTE,
+		_layer_node_clipboard.is_empty()
+		or not target.can_insert_node_state(
+			_layer_node_clipboard.get("node_state", {}),
+			paste_parent_id
+		)
+	)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_RENAME, effectively_locked)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_DUPLICATE, effectively_locked)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_LOCK, inherited_locked)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_VISIBILITY, false)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_HIDE_OTHERS, false)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_SHOW_ALL, false)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_MERGE_DOWN, not target.can_merge_node_down(node_id))
+	_set_layers_context_item_disabled(LAYER_CONTEXT_MERGE_VISIBLE, not target.can_merge_visible_nodes())
+	_set_layers_context_item_disabled(LAYER_CONTEXT_NEW_PAINT, effectively_locked)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_NEW_GROUP, effectively_locked)
+	_set_layers_context_item_disabled(LAYER_CONTEXT_SELECT_PARENT, str(location.get("parent_group_id", "")).is_empty())
+	_set_layers_context_item_disabled(LAYER_CONTEXT_MOVE_UP, not target.can_move_node_relative(node_id, -1))
+	_set_layers_context_item_disabled(LAYER_CONTEXT_MOVE_DOWN, not target.can_move_node_relative(node_id, 1))
+	_set_layers_context_item_disabled(LAYER_CONTEXT_MOVE_INTO, target.get_move_into_neighbor_destination(node_id).is_empty())
+	_set_layers_context_item_disabled(LAYER_CONTEXT_MOVE_OUT, target.get_move_out_destination(node_id).is_empty())
+	_set_layers_context_item_disabled(LAYER_CONTEXT_DELETE, not target.can_remove_node(node_id))
+
+
+func _configure_2d_document_context_menu(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	if not target:
+		target = _get_first_target_for_object_context(context)
+	if not target:
+		return
+	_layers_context_menu.add_item("Resize Canvas…", DOCUMENT_CONTEXT_RESIZE_CANVAS)
+	_layers_context_menu.add_item("Scale Document…", DOCUMENT_CONTEXT_SCALE)
+	_layers_context_menu.add_item("Fit Canvas to Content", DOCUMENT_CONTEXT_FIT_CONTENT)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("Export PNG…", DOCUMENT_CONTEXT_EXPORT_PNG)
+	_layers_context_menu.add_item("Document Properties", DOCUMENT_CONTEXT_PROPERTIES)
+	_set_layers_context_item_disabled(DOCUMENT_CONTEXT_FIT_CONTENT, not target.composite().get_used_rect().has_area())
+
+
+func _configure_3d_object_context_menu(context: Dictionary) -> void:
+	var group: Dictionary = _layer_session.get_object_group(str(context.get("group_id", ""))) if _layer_session else {}
+	if group.is_empty():
+		return
+	var visible := bool(group.get("visible", true))
+	var target_ids := _get_target_ids_for_object_context(context)
+	_layers_context_menu.add_item("Select in Scene", OBJECT_CONTEXT_SELECT_SCENE)
+	_layers_context_menu.add_item("Frame in 3D View", OBJECT_CONTEXT_FRAME_3D)
+	_layers_context_menu.add_item("Hide Object" if visible else "Show Object", OBJECT_CONTEXT_VISIBILITY)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("Create Missing Textures…", OBJECT_CONTEXT_CREATE_MISSING_TEXTURES)
+	_layers_context_menu.add_item("Resize All Textures…", OBJECT_CONTEXT_RESIZE_ALL_TEXTURES)
+	_layers_context_menu.add_item("Save All Textures", OBJECT_CONTEXT_SAVE_ALL_TEXTURES)
+	_set_layers_context_item_disabled(OBJECT_CONTEXT_SELECT_SCENE, _resolve_object_group_source_node(str(context.get("group_id", ""))) == null)
+	_set_layers_context_item_disabled(OBJECT_CONTEXT_CREATE_MISSING_TEXTURES, _resolve_object_group_source_node(str(context.get("group_id", ""))) == null)
+	_set_layers_context_item_disabled(OBJECT_CONTEXT_FRAME_3D, target_ids.is_empty())
+	_set_layers_context_item_disabled(OBJECT_CONTEXT_RESIZE_ALL_TEXTURES, target_ids.is_empty())
+	_set_layers_context_item_disabled(OBJECT_CONTEXT_SAVE_ALL_TEXTURES, target_ids.is_empty())
+
+
+func _configure_3d_target_context_menu(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	if not target:
+		return
+	var selected = target.get_selected_layer()
+	var can_match: bool = selected != null and (selected.image.get_size() != target.size or selected.origin != Vector2i.ZERO)
+	_layers_context_menu.add_item("Resize Texture…", TARGET_CONTEXT_RESIZE_TEXTURE)
+	_layers_context_menu.add_item("Match Selected Layer Size", TARGET_CONTEXT_MATCH_LAYER_SIZE)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("Save Texture", TARGET_CONTEXT_SAVE)
+	_layers_context_menu.add_item("Save Texture As…", TARGET_CONTEXT_SAVE_AS)
+	_layers_context_menu.add_separator()
+	_layers_context_menu.add_item("Reveal Texture in FileSystem", TARGET_CONTEXT_REVEAL_TEXTURE)
+	_layers_context_menu.add_item("Inspect Material", TARGET_CONTEXT_SELECT_MATERIAL)
+	_set_layers_context_item_disabled(TARGET_CONTEXT_MATCH_LAYER_SIZE, not can_match)
+	var texture_session = _get_texture_session_for_target(target.target_id)
+	var has_session: bool = texture_session != null and texture_session.has_active_session()
+	var has_path: bool = has_session and not str(texture_session.texture_path).is_empty()
+	_set_layers_context_item_disabled(TARGET_CONTEXT_SAVE, not has_session)
+	_set_layers_context_item_disabled(TARGET_CONTEXT_SAVE_AS, not has_session)
+	_set_layers_context_item_disabled(TARGET_CONTEXT_REVEAL_TEXTURE, not has_path)
+	_set_layers_context_item_disabled(TARGET_CONTEXT_SELECT_MATERIAL, not has_session or texture_session.material == null)
+
+
+func _set_layers_context_item_text(command_id: int, label: String) -> void:
+	var index := _layers_context_menu.get_item_index(command_id)
+	if index >= 0:
+		_layers_context_menu.set_item_text(index, label)
+
+
+func _set_layers_context_item_disabled(command_id: int, disabled: bool) -> void:
+	var index := _layers_context_menu.get_item_index(command_id)
+	if index >= 0:
+		_layers_context_menu.set_item_disabled(index, disabled)
+
+
+func _select_layers_tree_context(context: Dictionary) -> bool:
+	if not _layers_tree:
+		return false
+	var item := _find_layers_tree_item(
+		_layers_tree.get_root(),
+		str(context.get("kind", "")),
+		str(context.get("target_id", "")),
+		str(context.get("node_id", "")),
+		str(context.get("group_id", ""))
+	)
+	if not item:
+		return false
+	_syncing_layers_ui = true
+	item.select(0)
+	_syncing_layers_ui = false
+	(_layers_tree as LayerHierarchyTree).stable_selected_context = context.duplicate(true)
+	if str(context.get("kind", "")) == "paint":
+		_select_paint_layer(str(context.get("target_id", "")), str(context.get("node_id", "")), true)
+	_refresh_layers_controls()
+	return true
+
+
+func _on_layers_context_menu_id_pressed(command_id: int) -> void:
+	var context := _layers_context_menu_context.duplicate(true)
+	if context.is_empty():
+		return
+	match command_id:
+		LAYER_CONTEXT_CUT:
+			_cut_layer_context(context)
+		LAYER_CONTEXT_COPY:
+			_copy_layer_context(context)
+		LAYER_CONTEXT_PASTE:
+			_paste_layer_context(context)
+		LAYER_CONTEXT_RENAME:
+			call_deferred("_begin_layer_inline_rename", context)
+		LAYER_CONTEXT_DUPLICATE:
+			_duplicate_layer_context(context)
+		LAYER_CONTEXT_LOCK:
+			_toggle_layer_context_lock(context)
+		LAYER_CONTEXT_VISIBILITY:
+			_toggle_layer_context_visibility(context)
+		LAYER_CONTEXT_HIDE_OTHERS:
+			_isolate_layer_context(context)
+		LAYER_CONTEXT_SHOW_ALL:
+			_show_all_layer_context(context)
+		LAYER_CONTEXT_MERGE_DOWN:
+			_merge_layer_context_down(context)
+		LAYER_CONTEXT_MERGE_VISIBLE:
+			_merge_visible_layer_context(context)
+		LAYER_CONTEXT_NEW_PAINT:
+			_on_layers_add_pressed()
+		LAYER_CONTEXT_NEW_GROUP:
+			_on_layers_group_pressed()
+		LAYER_CONTEXT_SELECT_PARENT:
+			_select_parent_layer_context(context)
+		LAYER_CONTEXT_MOVE_UP:
+			_move_layer_context_relative(context, -1)
+		LAYER_CONTEXT_MOVE_DOWN:
+			_move_layer_context_relative(context, 1)
+		LAYER_CONTEXT_MOVE_INTO:
+			_move_layer_context_with_method(context, "move_node_into_neighbor_group", "Moved the item into the neighboring group.")
+		LAYER_CONTEXT_MOVE_OUT:
+			_move_layer_context_with_method(context, "move_node_out_of_group", "Moved the item out of its group.")
+		LAYER_CONTEXT_DELETE:
+			_request_layer_delete(context)
+		DOCUMENT_CONTEXT_RESIZE_CANVAS:
+			_activate_context_target(context)
+			_start_resize_canvas()
+		DOCUMENT_CONTEXT_SCALE:
+			_activate_context_target(context)
+			_start_scale_image()
+		DOCUMENT_CONTEXT_FIT_CONTENT:
+			_activate_context_target(context)
+			_trim_transparent_bounds()
+		DOCUMENT_CONTEXT_EXPORT_PNG:
+			_activate_context_target(context)
+			_save_as()
+		DOCUMENT_CONTEXT_PROPERTIES:
+			_show_document_context_properties(context)
+		OBJECT_CONTEXT_SELECT_SCENE:
+			_select_3d_object_group(str(context.get("group_id", "")), true)
+		OBJECT_CONTEXT_FRAME_3D:
+			_activate_first_object_target(context)
+			_frame_active_3d_mesh()
+		OBJECT_CONTEXT_VISIBILITY:
+			_toggle_3d_object_group_visibility(context)
+		OBJECT_CONTEXT_CREATE_MISSING_TEXTURES:
+			_open_missing_textures_for_object_context(context)
+		OBJECT_CONTEXT_RESIZE_ALL_TEXTURES:
+			_start_context_texture_scale(_get_target_ids_for_object_context(context))
+		OBJECT_CONTEXT_SAVE_ALL_TEXTURES:
+			_save_object_context_textures(context)
+		TARGET_CONTEXT_RESIZE_TEXTURE:
+			_start_context_texture_scale(PackedStringArray([str(context.get("target_id", ""))]))
+		TARGET_CONTEXT_MATCH_LAYER_SIZE:
+			_match_context_texture_to_selected_layer(context)
+		TARGET_CONTEXT_SAVE:
+			if _activate_context_target(context):
+				_save_3d_texture()
+		TARGET_CONTEXT_SAVE_AS:
+			if _activate_context_target(context):
+				_show_3d_texture_save_as(false)
+		TARGET_CONTEXT_REVEAL_TEXTURE:
+			_reveal_context_texture(context)
+		TARGET_CONTEXT_SELECT_MATERIAL:
+			_inspect_context_material(context)
+
+
+func _get_first_target_for_object_context(context: Dictionary):
+	var target_ids := _get_target_ids_for_object_context(context)
+	return _layer_session.get_target(target_ids[0]) if _layer_session and not target_ids.is_empty() else null
+
+
+func _get_target_ids_for_object_context(context: Dictionary) -> PackedStringArray:
+	var result := PackedStringArray()
+	if not _layer_session:
+		return result
+	_collect_object_group_target_ids(str(context.get("group_id", "")), result)
+	return result
+
+
+func _collect_object_group_target_ids(group_id: String, result: PackedStringArray) -> void:
+	var group: Dictionary = _layer_session.get_object_group(group_id) if _layer_session else {}
+	if group.is_empty():
+		return
+	for target_id_value in group.get("target_ids", PackedStringArray()):
+		var target_id := str(target_id_value)
+		if not target_id.is_empty() and not result.has(target_id):
+			result.push_back(target_id)
+	for child_group in _layer_session.object_groups:
+		if str(child_group.get("parent_id", "")) == group_id:
+			_collect_object_group_target_ids(str(child_group.get("id", "")), result)
+
+
+func _get_texture_session_for_target(target_id: String):
+	if _texture_3d_layer_coordinator:
+		return _texture_3d_layer_coordinator.get_texture_session(target_id)
+	if _layer_session and target_id == _layer_session.active_target_id:
+		return _texture_3d_session
+	return null
+
+
+func _activate_context_target(context: Dictionary) -> bool:
+	if not _layer_session:
+		return false
+	var target_id := str(context.get("target_id", ""))
+	if target_id.is_empty():
+		var target = _get_first_target_for_object_context(context)
+		target_id = target.target_id if target else ""
+	if target_id.is_empty():
+		return false
+	_prepare_layer_operation()
+	if not _layer_session.activate_target(target_id):
+		return false
+	if not _sync_canvas_to_active_layer():
+		return false
+	if _layer_session.session_kind == "3d" and _texture_3d_layer_coordinator:
+		var binding := _get_3d_binding_for_target_group(target_id, str(context.get("group_id", "")))
+		_set_active_3d_binding(str(binding.get("binding_key", "")), false)
+	return true
+
+
+func _activate_first_object_target(context: Dictionary) -> bool:
+	return _activate_context_target(context)
+
+
+func _show_document_context_properties(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	if not target:
+		target = _get_first_target_for_object_context(context)
+	if not target:
+		return
+	if not _document_properties_dialog:
+		_document_properties_dialog = AcceptDialog.new()
+		_document_properties_dialog.name = "Document Properties Dialog"
+		_document_properties_dialog.title = "Document Properties"
+		add_child(_document_properties_dialog)
+	var document_name := _document_path.get_file() if not _document_path.is_empty() else "Untitled"
+	_document_properties_dialog.dialog_text = (
+		"Name: %s\nCanvas: %s × %s px\nPaint layers: %s\nColor target: %s"
+		% [document_name, target.size.x, target.size.y, target.get_paint_layer_count(), target.label]
+	)
+	_document_properties_dialog.popup_centered(Vector2i(390, 190))
+
+
+func _open_missing_textures_for_object_context(context: Dictionary) -> void:
+	var source_node := _resolve_object_group_source_node(str(context.get("group_id", "")))
+	if not is_instance_valid(source_node):
+		_set_status("That scene object is no longer available.")
+		return
+	_open_3d_scope_picker([source_node])
+
+
+func _duplicate_layer_context(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or node_id.is_empty():
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var duplicate_id: String = target.duplicate_node(node_id)
+	if duplicate_id.is_empty():
+		_set_status("That locked layer item could not be duplicated.")
+		return
+	_push_layer_session_state_undo(previous_state)
+	var duplicate = target.find_node(duplicate_id)
+	var selection_kind := "group" if duplicate and duplicate.is_group() else "paint"
+	if duplicate and duplicate.is_paint_layer():
+		_select_paint_layer(target.target_id, duplicate_id)
+	else:
+		_refresh_layer_composite()
+	_refresh_layers_tree({"kind": selection_kind, "target_id": target.target_id, "node_id": duplicate_id})
+	_set_status("Duplicated the layer item.")
+
+
+func _copy_layer_context(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or node_id.is_empty():
+		return
+	_prepare_layer_operation()
+	var node_state: Dictionary = target.capture_node_state(node_id)
+	if node_state.is_empty():
+		_set_status("That layer item could not be copied.")
+		return
+	_layer_node_clipboard = {
+		"node_state": node_state,
+		"cut": false,
+	}
+	_set_status("Copied the layer item.")
+
+
+func _cut_layer_context(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or node_id.is_empty():
+		return
+	_prepare_layer_operation()
+	var node_state: Dictionary = target.capture_node_state(node_id)
+	if node_state.is_empty() or not target.can_remove_node(node_id):
+		_set_status("That item is locked, contains a locked descendant, or contains the target's last paint layer.")
+		_refresh_layers_tree(context)
+		return
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not target.remove_node(node_id):
+		_set_status("That layer item could not be cut.")
+		_refresh_layers_tree(context)
+		return
+	_layer_node_clipboard = {
+		"node_state": node_state,
+		"cut": true,
+	}
+	_push_layer_session_state_undo(previous_state)
+	if target.target_id == _layer_session.active_target_id:
+		_sync_canvas_to_active_layer()
+	_refresh_layers_tree()
+	_set_status("Cut the layer item.")
+
+
+func _paste_layer_context(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var anchor_id := str(context.get("node_id", ""))
+	var location: Dictionary = target.get_node_location(anchor_id) if target else {}
+	var node_state: Dictionary = _layer_node_clipboard.get("node_state", {})
+	if not target or location.is_empty() or node_state.is_empty():
+		_set_status("There is no layer item available to paste here.")
+		return
+	var parent_group_id := str(location.get("parent_group_id", ""))
+	if not target.can_insert_node_state(node_state, parent_group_id):
+		_set_status("That layer item cannot be pasted into the selected location.")
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var inserted_id: String = target.insert_node_state(
+		node_state,
+		parent_group_id,
+		int(location.get("index", 0)),
+		not bool(_layer_node_clipboard.get("cut", false))
+	)
+	if inserted_id.is_empty():
+		_set_status("That layer item could not be pasted.")
+		return
+	_layer_node_clipboard["cut"] = false
+	_push_layer_session_state_undo(previous_state)
+	var inserted = target.find_node(inserted_id)
+	var selection_kind := "group" if inserted and inserted.is_group() else "paint"
+	if inserted and inserted.is_paint_layer():
+		_select_paint_layer(target.target_id, inserted_id)
+	else:
+		_refresh_layer_composite()
+	_refresh_layers_tree({"kind": selection_kind, "target_id": target.target_id, "node_id": inserted_id})
+	_set_status("Pasted the layer item.")
+
+
+func _isolate_layer_context(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	if not target:
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not target.show_only_node(str(context.get("node_id", ""))):
+		return
+	_push_layer_session_state_undo(previous_state)
+	_refresh_layer_composite()
+	_refresh_layers_tree(context)
+	_set_status("Hid the other layer items.")
+
+
+func _show_all_layer_context(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	if not target:
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not target.show_all_nodes():
+		return
+	_push_layer_session_state_undo(previous_state)
+	_refresh_layer_composite()
+	_refresh_layers_tree(context)
+	_set_status("Showed all layer items.")
+
+
+func _merge_layer_context_down(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	if not target:
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var merged_id: String = target.merge_node_down(str(context.get("node_id", "")))
+	if merged_id.is_empty():
+		_set_status("Merge Down requires an unlocked paint layer directly below this one.")
+		return
+	_push_layer_session_state_undo(previous_state)
+	_select_paint_layer(target.target_id, merged_id)
+	_refresh_layers_tree({"kind": "paint", "target_id": target.target_id, "node_id": merged_id})
+	_set_status("Merged the paint layer down.")
+
+
+func _merge_visible_layer_context(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	if not target:
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var merged_id: String = target.merge_visible_nodes()
+	if merged_id.is_empty():
+		_set_status("Merge Visible requires at least two visible, unlocked paint layers.")
+		return
+	_push_layer_session_state_undo(previous_state)
+	_select_paint_layer(target.target_id, merged_id)
+	_refresh_layers_tree({"kind": "paint", "target_id": target.target_id, "node_id": merged_id})
+	_set_status("Merged the visible result into a new paint layer and hid its sources.")
+
+
+func _select_parent_layer_context(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var location: Dictionary = target.get_node_location(str(context.get("node_id", ""))) if target else {}
+	var parent_id := str(location.get("parent_group_id", ""))
+	if parent_id.is_empty():
+		return
+	_refresh_layers_tree({"kind": "group", "target_id": target.target_id, "node_id": parent_id})
+
+
+func _match_context_texture_to_selected_layer(context: Dictionary) -> void:
+	if not _activate_context_target(context):
+		return
+	var target = _layer_session.get_active_target()
+	var selected = target.get_selected_layer() if target else null
+	if not target or not selected:
+		return
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not target.match_size_to_node(selected.id):
+		_set_status("The selected layer cannot define this texture size.")
+		return
+	_push_layer_session_state_undo(previous_state)
+	_sync_canvas_to_active_layer()
+	_sync_3d_paint_view(true)
+	_refresh_layers_tree(context)
+	_set_status("Matched the texture to the selected layer: %sx%s." % [target.size.x, target.size.y])
+
+
+func _save_object_context_textures(context: Dictionary) -> void:
+	var target_ids := _get_target_ids_for_object_context(context)
+	if target_ids.is_empty():
+		return
+	_show_3d_batch_save_dialog(SessionTransition.NONE, target_ids, true, true)
+
+
+func _show_3d_batch_save_dialog(
+	transition := SessionTransition.NONE,
+	target_filter := PackedStringArray(),
+	show_unchanged := false,
+	force_all := false,
+	save_layered_document := false,
+	choose_new_layered_destination := false
+) -> void:
+	if not _save_3d_batch_dialog or not _layer_session or not _texture_3d_layer_coordinator:
+		_set_status("A coordinated 3D hierarchy is required for batch texture saving.")
+		return
+	if _batch_texture_save_stage != BatchTextureSaveStage.IDLE or _texture_save_stage != TextureSaveStage.IDLE:
+		_set_status("A 3D texture save is already in progress.")
+		return
+	_prepare_layer_operation()
+	_batch_texture_save_filter = target_filter.duplicate()
+	_batch_texture_save_show_unchanged = show_unchanged
+	_batch_texture_save_force_all = force_all
+	_batch_texture_save_rows = _build_3d_batch_save_plan(
+		_batch_texture_save_filter,
+		_batch_texture_save_show_unchanged,
+		_batch_texture_save_force_all,
+		_batch_texture_save_rows
+	)
+	var layered_visible: bool = _layer_session.session_kind == "3d"
+	var layered_checked := (
+		_is_layered_session_save_required()
+		or transition != SessionTransition.NONE
+		or save_layered_document
+	)
+	_save_3d_batch_dialog.title = (
+		"Save 3D Hierarchy As"
+		if choose_new_layered_destination
+		else (
+			"Save 3D Hierarchy"
+			if save_layered_document or transition != SessionTransition.NONE
+			else "Save 3D Textures"
+		)
+	)
+	_save_3d_batch_dialog.set_plan(
+		_batch_texture_save_rows,
+		_batch_texture_save_show_unchanged,
+		layered_visible,
+		layered_checked,
+		_get_3d_batch_layered_destination(choose_new_layered_destination),
+		transition != SessionTransition.NONE
+	)
+	_batch_texture_save_context = {
+		"transition": transition,
+		"save_layered_document": save_layered_document,
+		"choose_new_layered_destination": choose_new_layered_destination,
+	}
+	_validate_3d_batch_save_dialog()
+	if _session_replace_dialog:
+		_session_replace_dialog.hide()
+	_save_3d_batch_dialog.call_deferred("popup_centered", Vector2i(940, 700))
+	if choose_new_layered_destination:
+		_save_3d_batch_dialog.call_deferred("focus_layered_destination")
+
+
+func _build_3d_batch_save_plan(
+	target_filter: PackedStringArray,
+	show_unchanged: bool,
+	force_all: bool,
+	previous_rows: Array[Dictionary] = []
+) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	if not _texture_3d_layer_coordinator or not _layer_session:
+		return rows
+	var previous_by_target := {}
+	for previous_row in previous_rows:
+		previous_by_target[str(previous_row.get("target_id", ""))] = previous_row
+	var active_image: Image = _get_canvas_output_image() if _canvas else null
+	var dirty_ids: PackedStringArray = _texture_3d_layer_coordinator.get_dirty_target_ids(active_image)
+	var used_destinations := {}
+	for target in _layer_session.paint_targets:
+		var target_id: String = target.target_id
+		if not target_filter.is_empty() and not target_filter.has(target_id):
+			continue
+		var dirty := dirty_ids.has(target_id)
+		if not dirty and not show_unchanged:
+			continue
+		var texture_session = _texture_3d_layer_coordinator.get_texture_session(target_id)
+		if not texture_session:
+			continue
+		var previous: Dictionary = previous_by_target.get(target_id, {})
+		var original_path := str(texture_session.texture_path).strip_edges()
+		var default_action: int = (
+			_save_3d_batch_dialog.ACTION_SAVE
+			if not original_path.is_empty()
+			else _save_3d_batch_dialog.ACTION_SAVE_AS
+		)
+		var save_as_destination := str(previous.get("save_as_destination", "")).strip_edges()
+		if save_as_destination.is_empty():
+			save_as_destination = _make_3d_batch_default_texture_path(target, used_destinations, original_path)
+		var destination := str(previous.get(
+			"destination",
+			original_path if default_action == _save_3d_batch_dialog.ACTION_SAVE else save_as_destination
+		)).strip_edges()
+		if destination.is_empty():
+			destination = save_as_destination
+		used_destinations[destination.to_lower()] = true
+		used_destinations[save_as_destination.to_lower()] = true
+		var source_key := str(target.binding.get("source_key", "")).strip_edges()
+		var row := {
+			"target_id": target_id,
+			"target": target,
+			"session": texture_session,
+			"label": str(target.label),
+			"source_path": source_key if not source_key.is_empty() else str(target.label),
+			"dirty": dirty,
+			"included": bool(previous.get("included", force_all or dirty)),
+			"action": int(previous.get("action", default_action)),
+			"original_path": original_path,
+			"destination": destination,
+			"save_as_destination": save_as_destination,
+			"status": str(previous.get("status", "Changed" if dirty else "Unchanged")),
+			"status_error": bool(previous.get("status_error", false)),
+		}
+		if previous.has("thumbnail"):
+			row["thumbnail"] = previous["thumbnail"]
+		else:
+			row["thumbnail"] = _save_3d_batch_dialog._make_thumbnail(target.composite())
+		rows.push_back(row)
+	return rows
+
+
+func _make_3d_batch_default_texture_path(target, used_destinations: Dictionary, original_path := "") -> String:
+	var directory := str(original_path).get_base_dir().trim_suffix("/")
+	if directory.is_empty():
+		directory = _get_default_save_dir().trim_suffix("/")
+	if directory.is_empty():
+		directory = "res://"
+	var safe_name := str(original_path).get_file().get_basename().to_snake_case()
+	if not safe_name.is_empty():
+		safe_name += "_copy"
+	else:
+		safe_name = str(target.label).get_file().get_basename().to_snake_case()
+	if safe_name.is_empty():
+		safe_name = "albedo_texture"
+	for index in range(1, 1000):
+		var suffix := "" if index == 1 else "_%03d" % index
+		var candidate := "%s/%s%s.png" % [directory, safe_name, suffix]
+		if not used_destinations.has(candidate.to_lower()) and not FileAccess.file_exists(candidate):
+			return candidate
+	return "%s/%s_%d.png" % [directory, safe_name, Time.get_unix_time_from_system()]
+
+
+func _get_3d_batch_layered_destination(choose_new_destination := false) -> String:
+	if not choose_new_destination and not _layer_document_path.is_empty():
+		return _layer_document_path
+	var seed_path := _layer_document_path
+	var directory := seed_path.get_base_dir().trim_suffix("/")
+	if directory.is_empty():
+		directory = _get_default_save_dir().trim_suffix("/")
+	if directory.is_empty():
+		directory = "res://"
+	var source_path := str(_layer_session.source_scene_path) if _layer_session else ""
+	var base_name := seed_path.get_file().get_basename().to_snake_case()
+	if base_name.is_empty():
+		base_name = source_path.get_file().get_basename().to_snake_case()
+	if base_name.is_empty():
+		base_name = "gddraw_3d_hierarchy"
+	if not choose_new_destination:
+		return "%s/%s.gddraw" % [directory, base_name]
+	for index in range(1, 1000):
+		var suffix := "_copy" if index == 1 else "_copy_%03d" % index
+		var candidate := "%s/%s%s.gddraw" % [directory, base_name, suffix]
+		if candidate != _layer_document_path and not FileAccess.file_exists(candidate):
+			return candidate
+	return "%s/%s_copy_%d.gddraw" % [directory, base_name, Time.get_unix_time_from_system()]
+
+
+func _on_3d_batch_show_unchanged_changed(enabled: bool) -> void:
+	if _batch_texture_save_stage != BatchTextureSaveStage.IDLE:
+		return
+	_batch_texture_save_rows = _save_3d_batch_dialog.get_plan()
+	_batch_texture_save_show_unchanged = enabled
+	_batch_texture_save_rows = _build_3d_batch_save_plan(
+		_batch_texture_save_filter,
+		enabled,
+		_batch_texture_save_force_all,
+		_batch_texture_save_rows
+	)
+	_save_3d_batch_dialog.set_plan(
+		_batch_texture_save_rows,
+		enabled,
+		true,
+		_save_3d_batch_dialog.get_save_layered_enabled(),
+		_save_3d_batch_dialog.get_layered_destination(),
+		int(_batch_texture_save_context.get("transition", SessionTransition.NONE)) != SessionTransition.NONE
+	)
+	_validate_3d_batch_save_dialog()
+
+
+func _validate_3d_batch_save_dialog() -> bool:
+	if not _save_3d_batch_dialog:
+		return false
+	_batch_texture_save_rows = _save_3d_batch_dialog.get_plan()
+	var errors := PackedStringArray()
+	var destinations := {}
+	var selected_count := 0
+	var omitted_dirty := 0
+	for row in _batch_texture_save_rows:
+		var target_id := str(row.get("target_id", ""))
+		if bool(row.get("dirty", false)) and not bool(row.get("included", false)):
+			omitted_dirty += 1
+		if not bool(row.get("included", false)):
+			continue
+		selected_count += 1
+		var action := int(row.get("action", _save_3d_batch_dialog.ACTION_SAVE))
+		var original_path := str(row.get("original_path", "")).strip_edges()
+		var destination := str(row.get("destination", "")).strip_edges()
+		var normalized := ""
+		var error := ""
+		if action == _save_3d_batch_dialog.ACTION_SAVE:
+			normalized = original_path.replace("\\", "/")
+			row["destination"] = original_path
+			if (
+				not normalized.begins_with("res://")
+				or normalized.get_extension().to_lower() not in ["png", "jpg", "jpeg", "webp"]
+			):
+				error = "Existing texture has no writable image path. Choose Save As & Reassign."
+		else:
+			normalized = _normalize_png_path(destination)
+		if action == _save_3d_batch_dialog.ACTION_SAVE_AS and normalized.is_empty():
+			error = "Choose a PNG destination inside res://."
+		elif action == _save_3d_batch_dialog.ACTION_SAVE_AS and normalized == original_path.replace("\\", "/"):
+			error = "Save As must use a different destination."
+		if error.is_empty() and not StoragePaths.is_writable_project_path(normalized):
+			error = "Destination must remain outside the GDDraw plugin package."
+		var destination_key := normalized.to_lower()
+		if error.is_empty() and destinations.has(destination_key):
+			error = "Another selected texture uses this destination."
+		if error.is_empty():
+			destinations[destination_key] = target_id
+			row["destination"] = normalized
+			row["status_error"] = false
+			row["status"] = (
+				"Will replace file"
+				if action == _save_3d_batch_dialog.ACTION_SAVE_AS and FileAccess.file_exists(normalized)
+				else "Ready"
+			)
+		else:
+			row["status_error"] = true
+			row["status"] = "Invalid"
+			errors.push_back("%s: %s" % [str(row.get("label", target_id)), error])
+		_save_3d_batch_dialog.set_row_status(target_id, str(row["status"]), bool(row["status_error"]))
+	var transition := int(_batch_texture_save_context.get("transition", SessionTransition.NONE))
+	if transition != SessionTransition.NONE and omitted_dirty > 0:
+		errors.push_back("Select every changed texture, or use Discard and Continue.")
+	if _save_3d_batch_dialog.get_save_layered_enabled():
+		var layered_path := _normalize_layer_document_path(_save_3d_batch_dialog.get_layered_destination())
+		if layered_path.is_empty():
+			errors.push_back("Choose a writable .gddraw hierarchy path inside res://.")
+	elif transition != SessionTransition.NONE and _is_layered_session_save_required():
+		errors.push_back("Save the hierarchy layer document, or use Discard and Continue.")
+	if selected_count == 0 and not _save_3d_batch_dialog.get_save_layered_enabled():
+		errors.push_back("Select at least one texture or the hierarchy layer document.")
+	_save_3d_batch_dialog.get_ok_button().disabled = not errors.is_empty()
+	_save_3d_batch_dialog.set_status(
+		"Ready to save %d texture%s." % [selected_count, "" if selected_count == 1 else "s"]
+		if errors.is_empty()
+		else errors[0]
+	)
+	return errors.is_empty()
+
+
+func _reveal_context_texture(context: Dictionary) -> void:
+	var texture_session = _get_texture_session_for_target(str(context.get("target_id", "")))
+	var path := str(texture_session.texture_path) if texture_session else ""
+	if path.is_empty() or not _plugin:
+		return
+	var editor_interface := _plugin.get_editor_interface()
+	var filesystem_dock = editor_interface.get_file_system_dock() if editor_interface and editor_interface.has_method("get_file_system_dock") else null
+	if filesystem_dock and filesystem_dock.has_method("navigate_to_path"):
+		filesystem_dock.call("navigate_to_path", path)
+		_set_status("Revealed %s in FileSystem." % path)
+	else:
+		_set_status("Texture path: %s" % path)
+
+
+func _inspect_context_material(context: Dictionary) -> void:
+	var texture_session = _get_texture_session_for_target(str(context.get("target_id", "")))
+	if not texture_session or not texture_session.material or not _plugin:
+		return
+	_plugin.get_editor_interface().edit_resource(texture_session.material)
+
+
+func _toggle_layer_context_visibility(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	var node = target.find_node(node_id) if target else null
+	if not node:
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if target.set_node_visible(node_id, not node.visible):
+		_push_layer_session_state_undo(previous_state)
+		_refresh_layer_composite()
+	_refresh_layers_tree(context)
+
+
+func _toggle_layer_context_lock(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	var node = target.find_node(node_id) if target else null
+	if not node:
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if target.set_node_locked(node_id, not node.locked):
+		_push_layer_session_state_undo(previous_state)
+		_refresh_layer_composite()
+	_refresh_layers_tree(context)
+
+
+func _on_layers_lock_toggled(_enabled: bool) -> void:
+	if _syncing_layers_ui:
+		return
+	_toggle_layer_context_lock(_get_selected_layers_context())
+
+
+func _prepare_layer_operation() -> void:
+	if not _canvas:
+		return
+	if _canvas.has_text_draft():
+		_canvas.finish_text_draft(true)
+	if _canvas.has_floating_selection():
+		_canvas.commit_active_selection_transform()
+
+
+func _refresh_layer_composite() -> void:
+	if not _canvas or not _layer_session:
+		return
+	_canvas.set_display_compositor(
+		Callable(self, "_compose_active_layer_for_canvas"),
+		Callable(self, "_compose_active_layer_region_for_canvas")
+	)
+	var target = _layer_session.get_active_target()
+	if target:
+		_canvas.editing_enabled = not target.is_node_effectively_locked(target.selected_layer_id)
+	_sync_3d_paint_texture()
+	_update_3d_session_status(_get_canvas_output_image())
+	_refresh_canvas_visible_pixels_state()
+
+
+func _on_layers_add_pressed() -> void:
+	var context := _get_selected_layers_context()
+	var target = _get_layers_context_target(context)
+	if not target:
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var parent_group_id := ""
+	var index := 0
+	var node = target.find_node(str(context.get("node_id", ""))) if context.has("node_id") else null
+	if node:
+		if node.is_group():
+			parent_group_id = node.id
+		else:
+			var location: Dictionary = target.get_node_location(node.id)
+			parent_group_id = str(location.get("parent_group_id", ""))
+			index = int(location.get("index", 0))
+	var layer_id: String = target.add_paint_layer("", null, parent_group_id, index)
+	if layer_id.is_empty():
+		_set_status("Could not add a paint layer to the selected location.")
+		return
+	_push_layer_session_state_undo(previous_state)
+	_select_paint_layer(target.target_id, layer_id)
+	_refresh_layers_tree({"kind": "paint", "target_id": target.target_id, "node_id": layer_id})
+	_set_status("Added a paint layer.")
+
+
+func _on_layers_group_pressed() -> void:
+	var context := _get_selected_layers_context()
+	var target = _get_layers_context_target(context)
+	if not target:
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var selected_node = target.find_node(str(context.get("node_id", ""))) if context.has("node_id") else null
+	var parent_group_id := ""
+	var index := 0
+	if selected_node:
+		var location: Dictionary = target.get_node_location(selected_node.id)
+		parent_group_id = str(location.get("parent_group_id", ""))
+		index = int(location.get("index", 0))
+	var group_id: String = target.add_group("", parent_group_id, index)
+	if group_id.is_empty():
+		_set_status("Could not add a layer group to the selected location.")
+		return
+	if selected_node and not target.move_node(selected_node.id, group_id, 0):
+		target.remove_node(group_id)
+		_set_status("Could not group the selected item.")
+		return
+	_push_layer_session_state_undo(previous_state)
+	_refresh_layer_composite()
+	_refresh_layers_tree({"kind": "group", "target_id": target.target_id, "node_id": group_id})
+	_set_status("Created a layer group.")
+
+
+func _on_layers_delete_pressed() -> void:
+	_request_layer_delete(_get_selected_layers_context())
+
+
+func _request_layer_delete(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or node_id.is_empty():
+		return
+	var node = target.find_node(node_id)
+	if not node or not target.can_remove_node(node_id):
+		_set_status("That item is locked, contains a locked descendant, or contains the target's last paint layer.")
+		_refresh_layers_tree(context)
+		return
+	_pending_layer_delete_context = context.duplicate(true)
+	_layers_delete_dialog.dialog_text = "Delete %s \"%s\"?" % [
+		"paint layer" if node.is_paint_layer() else "layer group",
+		node.name,
+	]
+	_layers_delete_dialog.popup_centered(Vector2i(390, 130))
+
+
+func _cancel_layer_delete() -> void:
+	_pending_layer_delete_context.clear()
+	_set_status("Layer deletion canceled; the document is unchanged.")
+
+
+func _confirm_layer_delete() -> void:
+	var context := _pending_layer_delete_context.duplicate(true)
+	_pending_layer_delete_context.clear()
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or node_id.is_empty():
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not target.remove_node(node_id):
+		_set_status("That item is locked, contains a locked descendant, or contains the target's last paint layer.")
+		_refresh_layers_tree(context)
+		return
+	_push_layer_session_state_undo(previous_state)
+	if target.target_id == _layer_session.active_target_id:
+		_sync_canvas_to_active_layer()
+	_refresh_layers_tree()
+	_set_status("Deleted the layer item.")
+
+
+func _move_layer_context_relative(context: Dictionary, offset: int) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or node_id.is_empty():
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not target.move_node_relative(node_id, offset):
+		_refresh_layers_controls()
+		return
+	_push_layer_session_state_undo(previous_state)
+	_refresh_layer_composite()
+	_refresh_layers_tree(context)
+
+
+func _move_layer_context_with_method(context: Dictionary, method_name: String, success_message: String) -> void:
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or node_id.is_empty() or not target.has_method(method_name):
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not bool(target.call(method_name, node_id)):
+		_refresh_layers_controls()
+		return
+	_push_layer_session_state_undo(previous_state)
+	_refresh_layer_composite()
+	_refresh_layers_tree(context)
+	_set_status(success_message)
+
+
+func _get_layer_drop_destination(at_position: Vector2, data: Variant) -> Dictionary:
+	# A filtered tree preserves its hierarchy, but omitted siblings still make a
+	# displayed drop index ambiguous. Keep reordering available after clearing
+	# the filter so the model cannot receive a misleading destination index.
+	if not _get_layers_filter_text().is_empty():
+		return {}
+	if not data is Dictionary or not data.has("gddraw_layer_node") or not _layers_tree:
+		return {}
+	var source: Variant = data.get("gddraw_layer_node")
+	if not source is Dictionary:
+		return {}
+	var source_target_id := str(source.get("target_id", ""))
+	var source_node_id := str(source.get("node_id", ""))
+	var target = _layer_session.get_target(source_target_id) if _layer_session else null
+	if not target or source_node_id.is_empty():
+		return {}
+	var destination_item := _layers_tree.get_item_at_position(at_position)
+	if not destination_item:
+		return {}
+	var destination_context: Variant = destination_item.get_metadata(0)
+	if not destination_context is Dictionary:
+		return {}
+	var destination_kind := str(destination_context.get("kind", ""))
+	if destination_kind == "target":
+		if str(destination_context.get("target_id", "")) != source_target_id:
+			return {}
+		var root_index: int = target.nodes.size()
+		return {"target": target, "parent_group_id": "", "index": root_index}
+	if destination_kind not in ["paint", "group"] or str(destination_context.get("target_id", "")) != source_target_id:
+		return {}
+	var destination_node_id := str(destination_context.get("node_id", ""))
+	var destination_node = target.find_node(destination_node_id)
+	if not destination_node:
+		return {}
+	var drop_section := _layers_tree.get_drop_section_at_position(at_position)
+	if drop_section == 0 and destination_node.is_group():
+		return {
+			"target": target,
+			"parent_group_id": destination_node.id,
+			"index": destination_node.children.size(),
+		}
+	var location: Dictionary = target.get_node_location(destination_node_id)
+	if location.is_empty():
+		return {}
+	var sibling_index := int(location.get("index", 0)) + (1 if drop_section > 0 else 0)
+	var source_location: Dictionary = target.get_node_location(source_node_id)
+	if (
+		str(source_location.get("parent_group_id", "")) == str(location.get("parent_group_id", ""))
+		and int(source_location.get("index", -1)) < sibling_index
+	):
+		sibling_index -= 1
+	return {
+		"target": target,
+		"parent_group_id": str(location.get("parent_group_id", "")),
+		"index": sibling_index,
+	}
+
+
+func _can_drop_layer_tree_data(at_position: Vector2, data: Variant) -> bool:
+	if not data is Dictionary or not data.has("gddraw_layer_node"):
+		return (
+			_layer_tree_drop_might_contain_image(data)
+			and not _get_external_layer_drop_destination(at_position).is_empty()
+		)
+	var destination := _get_layer_drop_destination(at_position, data)
+	if destination.is_empty():
+		return false
+	var source: Dictionary = data.get("gddraw_layer_node", {})
+	var target = destination.get("target")
+	return target != null and target.can_move_node(
+		str(source.get("node_id", "")),
+		str(destination.get("parent_group_id", "")),
+		int(destination.get("index", 0))
+	)
+
+
+func _drop_layer_tree_data(at_position: Vector2, data: Variant) -> void:
+	if not data is Dictionary or not data.has("gddraw_layer_node"):
+		_drop_external_image_into_layer_tree(at_position, data)
+		return
+	var destination := _get_layer_drop_destination(at_position, data)
+	if destination.is_empty():
+		return
+	var source: Dictionary = data.get("gddraw_layer_node", {})
+	var target = destination.get("target")
+	var node_id := str(source.get("node_id", ""))
+	if not target or not target.can_move_node(
+		node_id,
+		str(destination.get("parent_group_id", "")),
+		int(destination.get("index", 0))
+	):
+		_set_status("That layer drop is not valid; the hierarchy is unchanged.")
+		return
+	_prepare_layer_operation()
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not target.move_node(
+		node_id,
+		str(destination.get("parent_group_id", "")),
+		int(destination.get("index", 0))
+	):
+		_set_status("That layer drop was rejected; the hierarchy is unchanged.")
+		return
+	_push_layer_session_state_undo(previous_state)
+	_refresh_layer_composite()
+	_refresh_layers_tree(source)
+	_set_status("Moved the layer item.")
+
+
+func _get_external_layer_drop_destination(at_position: Vector2) -> Dictionary:
+	if not _layers_tree or not _layer_session or not _get_layers_filter_text().is_empty():
+		return {}
+	var destination_item := _layers_tree.get_item_at_position(at_position)
+	if not destination_item:
+		return {}
+	var destination_context: Variant = destination_item.get_metadata(0)
+	if not destination_context is Dictionary:
+		return {}
+	var destination_kind := str(destination_context.get("kind", ""))
+	var target_id := str(destination_context.get("target_id", ""))
+	var target = _layer_session.get_target(target_id) if not target_id.is_empty() else null
+	if not target:
+		return {}
+	if destination_kind == "target":
+		var target_destination := {
+			"target_id": target.target_id,
+			"parent_group_id": "",
+			"index": target.nodes.size(),
+		}
+		if destination_context.has("group_id"):
+			target_destination["group_id"] = str(destination_context.get("group_id", ""))
+		return target_destination
+	if destination_kind not in ["paint", "group"]:
+		return {}
+	var destination_node_id := str(destination_context.get("node_id", ""))
+	var destination_node = target.find_node(destination_node_id)
+	if not destination_node:
+		return {}
+	var drop_section := _layers_tree.get_drop_section_at_position(at_position)
+	if drop_section == 0 and destination_node.is_group():
+		if target.is_node_effectively_locked(destination_node.id):
+			return {}
+		var group_destination := {
+			"target_id": target.target_id,
+			"parent_group_id": destination_node.id,
+			"index": destination_node.children.size(),
+		}
+		if destination_context.has("group_id"):
+			group_destination["group_id"] = str(destination_context.get("group_id", ""))
+		return group_destination
+	var location: Dictionary = target.get_node_location(destination_node_id)
+	if location.is_empty():
+		return {}
+	var parent_group_id := str(location.get("parent_group_id", ""))
+	if not parent_group_id.is_empty() and target.is_node_effectively_locked(parent_group_id):
+		return {}
+	var row_destination := {
+		"target_id": target.target_id,
+		"parent_group_id": parent_group_id,
+		"index": int(location.get("index", 0)) + (1 if drop_section > 0 else 0),
+	}
+	if destination_context.has("group_id"):
+		row_destination["group_id"] = str(destination_context.get("group_id", ""))
+	return row_destination
+
+
+func _layer_tree_drop_might_contain_image(data: Variant) -> bool:
+	if data is Texture2D:
+		return true
+	if data is String:
+		return _is_supported_filesystem_image_path(_normalize_filesystem_path(data))
+	if data is Resource:
+		return _is_supported_filesystem_image_path(_normalize_filesystem_path(data.resource_path))
+	if data is PackedStringArray or data is Array:
+		for item in data:
+			if _layer_tree_drop_might_contain_image(item):
+				return true
+		return false
+	if data is Dictionary:
+		for key in ["files", "paths", "path", "file", "resource_path", "resource"]:
+			if data.has(key) and _layer_tree_drop_might_contain_image(data[key]):
+				return true
+		return data.has("nodes") and not _extract_drop_image_path(data).is_empty()
+	return false
+
+
+func _drop_external_image_into_layer_tree(at_position: Vector2, data: Variant) -> void:
+	var destination := _get_external_layer_drop_destination(at_position)
+	if destination.is_empty():
+		_set_status("Drop the image on a paint target, layer, or unlocked group.")
+		return
+	var drop_image_path := _extract_drop_image_path(data)
+	var drop_image: Image = null
+	var drop_label := drop_image_path
+	if drop_image_path.is_empty():
+		drop_image = _extract_drop_image(data)
+		drop_label = "dropped texture"
+	if drop_image_path.is_empty() and drop_image == null:
+		_set_status("That FileSystem item is not a supported image.")
+		return
+	_import_dropped_image_as_layer(drop_image_path, drop_image, drop_label, destination)
+
+
+func _on_layers_opacity_changed(value: float) -> void:
+	if _syncing_layers_ui:
+		return
+	var context := _get_selected_layers_context()
+	var target = _get_layers_context_target(context)
+	var node_id := str(context.get("node_id", ""))
+	if not target or node_id.is_empty():
+		return
+	var previous_state: Dictionary = _layer_session.capture_state()
+	if not target.set_node_opacity(node_id, value / 100.0):
+		return
+	_push_layer_session_state_undo(previous_state)
+	_refresh_layer_composite()
+	_refresh_layers_tree(context)
+
+
+func _on_layers_target_lock_toggled(enabled: bool) -> void:
+	if _syncing_layers_ui or not _layer_session:
+		return
+	_layer_session.set_target_lock_enabled(enabled)
+	_set_status("3D paint target locked." if _layer_session.target_lock_enabled else "3D paint target routing unlocked.")
+
+
 func _build_canvas_region(parent: Container) -> void:
 	_canvas_region = Control.new()
 	_canvas_region.custom_minimum_size = Vector2(360, 220)
@@ -2234,6 +5393,8 @@ func _build_canvas_region(parent: Container) -> void:
 	_canvas.color_picked.connect(_on_color_picked)
 	_canvas.selection_committed.connect(_on_selection_committed)
 	_canvas.selection_cleared.connect(_on_selection_cleared)
+	_canvas.floating_selection_committed.connect(_on_floating_selection_committed)
+	_canvas.floating_selection_canceled.connect(_on_floating_selection_canceled)
 	_canvas.image_drop_requested.connect(_on_canvas_image_drop_requested)
 	_canvas.image_changed.connect(_on_canvas_image_changed)
 	_canvas.hover_uv_changed.connect(_on_canvas_hover_uv_changed)
@@ -2260,7 +5421,7 @@ func _create_3d_paint_view() -> SubViewportContainer:
 	view.stretch = true
 	view.mouse_filter = Control.MOUSE_FILTER_STOP
 	view.focus_mode = Control.FOCUS_CLICK
-	view.mouse_default_cursor_shape = Control.CURSOR_CROSS
+	view.mouse_default_cursor_shape = Control.CURSOR_ARROW
 	view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	view.custom_minimum_size = Vector2(360, 220)
@@ -2303,6 +5464,7 @@ func _create_3d_paint_view() -> SubViewportContainer:
 	_paint_3d_preview_light.visible = _preview_light_enabled
 	_paint_3d_root.add_child(_paint_3d_preview_light)
 	_create_3d_rotation_gizmo()
+	_apply_empty_3d_camera_pose()
 	return view
 
 
@@ -2515,6 +5677,7 @@ func _update_3d_rotation_gizmo_visibility() -> void:
 		and has_session
 		and _paint_3d_mesh != null
 		and _paint_3d_mesh.mesh != null
+		and _paint_3d_mesh.visible
 	)
 	if not _paint_3d_rotation_gizmo.visible:
 		_cancel_3d_rotation_gizmo_drag(false)
@@ -2650,6 +5813,7 @@ func _build_canvas_view_controls() -> void:
 	_preview_light_intensity.min_value = PAINT_3D_PREVIEW_LIGHT_MIN
 	_preview_light_intensity.max_value = PAINT_3D_PREVIEW_LIGHT_MAX
 	_preview_light_intensity.step = 0.05
+	_preview_light_intensity.suffix = "x"
 	_preview_light_intensity.custom_minimum_size = Vector2(72, TOOL_BUTTON_SIZE.y)
 	_preview_light_intensity.update_on_text_changed = true
 	_preview_light_intensity.tooltip_text = "Adjust the neutral light intensity in the 3D preview."
@@ -2693,11 +5857,11 @@ func _build_canvas_view_controls() -> void:
 
 	_preview_scene_orientation_button = _make_icon_button(
 		"unlink_0.svg",
-		"Link the source scene transform to the 3D preview.",
+		"Sync imported hierarchy transforms and visibility from the source scene.",
 		true,
 		"link_1.svg"
 	)
-	_preview_scene_orientation_button.name = "Link Preview to Scene Transform"
+	_preview_scene_orientation_button.name = "Sync Preview with Scene"
 	_preview_scene_orientation_button.set_pressed_no_signal(false)
 	_apply_scene_transform_link_control_state(false)
 	_preview_scene_orientation_button.toggled.connect(_on_scene_transform_link_toggled)
@@ -3026,7 +6190,7 @@ func _build_settings_menu() -> void:
 	grid_row.add_child(_snap_to_grid)
 
 	var grid_size_label := Label.new()
-	grid_size_label.text = "Size"
+	grid_size_label.text = "Size px"
 	grid_row.add_child(grid_size_label)
 
 	_grid_size = _make_integer_line_edit("1", "Grid cell size in image pixels")
@@ -3333,18 +6497,25 @@ func _build_3d_empty_state() -> void:
 	var content := VBoxContainer.new()
 	content.add_theme_constant_override("separation", 10)
 	card.add_child(content)
-	var title := Label.new()
-	title.text = "No 3D texture session"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 18)
-	content.add_child(title)
-	var instructions := Label.new()
-	instructions.text = "Select a mesh or supported CSG shape and choose Use Selected Mesh,\nor drag the node (or a parent) from the Scene tree."
-	instructions.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	content.add_child(instructions)
+	_empty_3d_state_title = Label.new()
+	_empty_3d_state_title.text = "No 3D texture session"
+	_empty_3d_state_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_empty_3d_state_title.add_theme_font_size_override("font_size", 18)
+	content.add_child(_empty_3d_state_title)
+	_empty_3d_state_instructions = Label.new()
+	_empty_3d_state_instructions.text = EMPTY_3D_SESSION_INSTRUCTIONS
+	_empty_3d_state_instructions.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	content.add_child(_empty_3d_state_instructions)
+	_empty_3d_relink_button = Button.new()
+	_empty_3d_relink_button.text = "Relink Current Scene"
+	_empty_3d_relink_button.tooltip_text = "Restore this layered document's 3D preview from compatible objects at its saved relative paths"
+	_empty_3d_relink_button.visible = false
+	_empty_3d_relink_button.pressed.connect(_relink_detached_layered_3d_document)
+	content.add_child(_empty_3d_relink_button)
 	var use_selected := Button.new()
-	use_selected.text = "Use Selected Mesh"
-	use_selected.tooltip_text = "Use Selected 3D Surface: open the session picker for the selected MeshInstance3D or supported CSG shape; parent selection and unsaved 2D protection are supported"
+	use_selected.name = "Use Selected 3D Object"
+	use_selected.text = "Use Selected 3D Object"
+	use_selected.tooltip_text = "Open the session picker for a selected 3D hierarchy root or individual editable surface; unsaved 2D changes remain protected"
 	use_selected.pressed.connect(_load_selected_3d_mesh_texture)
 	content.add_child(use_selected)
 
@@ -3366,11 +6537,15 @@ func _make_icon_button(icon_name: String, tooltip: String, toggle := false, sele
 	_apply_icon_button_style(button)
 	button.set_meta("inactive_icon_name", icon_name)
 	button.set_meta("active_icon_name", _get_active_icon_name(icon_name, selected_icon_name))
+	button.set_meta("gddraw_icon_hovered", false)
 	_icon_buttons.append(button)
 	_update_icon_button_icon(button)
 	if toggle:
 		_apply_selected_tool_style(button)
 		button.toggled.connect(_on_toggle_button_icon_toggled.bind(button))
+	elif not selected_icon_name.is_empty():
+		button.mouse_entered.connect(_on_icon_button_hover_changed.bind(true, button))
+		button.mouse_exited.connect(_on_icon_button_hover_changed.bind(false, button))
 	return button
 
 
@@ -3536,6 +6711,10 @@ func _registered_icon_family_names() -> PackedStringArray:
 		var family := _get_icon_family_name(str(icon.get_meta("gddraw_icon_name", "")))
 		if not family.is_empty() and not families.has(family):
 			families.append(family)
+	if _layers_filter_field:
+		for family in PackedStringArray(["search", "x"]):
+			if not families.has(family):
+				families.append(family)
 	return families
 
 
@@ -3667,6 +6846,8 @@ func _refresh_registered_icons(force_replace: bool) -> int:
 		if not _update_static_icon(icon, force_replace):
 			pending += 1
 	_static_icons = live_static_icons
+	if _layers_filter_field and not _update_layers_filter_icons(force_replace):
+		pending += 1
 	return pending
 
 
@@ -3682,6 +6863,8 @@ func _count_pending_icon_controls() -> int:
 	for icon in _static_icons:
 		if is_instance_valid(icon) and not bool(icon.get_meta("gddraw_icon_ready", false)):
 			pending += 1
+	if _layers_filter_field and not bool(_layers_filter_field.get_meta("gddraw_icon_ready", false)):
+		pending += 1
 	return pending
 
 
@@ -3765,6 +6948,13 @@ func _on_toggle_button_icon_toggled(_enabled: bool, button: Button) -> void:
 	_update_toggle_button_icon(button)
 
 
+func _on_icon_button_hover_changed(hovered: bool, button: Button) -> void:
+	if not button:
+		return
+	button.set_meta("gddraw_icon_hovered", hovered)
+	_update_icon_button_icon(button)
+
+
 func _update_toggle_button_icon(button: Button) -> void:
 	_update_icon_button_icon(button)
 
@@ -3772,7 +6962,8 @@ func _update_toggle_button_icon(button: Button) -> void:
 func _update_icon_button_icon(button: Button, force_replace := false) -> bool:
 	if not button:
 		return true
-	var icon_name := str(button.get_meta("active_icon_name" if button.button_pressed else "inactive_icon_name", ""))
+	var use_active_icon := button.button_pressed or bool(button.get_meta("gddraw_icon_hovered", false))
+	var icon_name := str(button.get_meta("active_icon_name" if use_active_icon else "inactive_icon_name", ""))
 	if icon_name.is_empty():
 		return true
 	var state_override := IconState.DISABLED if button.disabled else -1
@@ -3861,7 +7052,8 @@ func _make_compact_rotation_controls(
 	amount.max_value = 359
 	amount.step = 1
 	amount.value = 90
-	amount.custom_minimum_size = Vector2(62, TOOL_BUTTON_SIZE.y)
+	amount.suffix = "°"
+	amount.custom_minimum_size = Vector2(72, TOOL_BUTTON_SIZE.y)
 	amount.tooltip_text = amount_tooltip
 	control.add_child(amount)
 
@@ -3879,7 +7071,8 @@ func _make_dimension_spinbox() -> SpinBox:
 	spinbox.max_value = 4096
 	spinbox.step = 1
 	spinbox.value = DEFAULT_CANVAS_SIZE.x
-	spinbox.custom_minimum_size.x = 54
+	spinbox.suffix = " px"
+	spinbox.custom_minimum_size.x = 72
 	return spinbox
 
 
@@ -3950,9 +7143,12 @@ func _build_open_dialog() -> void:
 	_open_dialog = FileDialog.new()
 	_open_dialog.access = FileDialog.ACCESS_RESOURCES
 	_open_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
-	_open_dialog.filters = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp, *.bmp, *.tga, *.svg ; Image files"])
-	_open_dialog.title = "Load Image"
-	_open_dialog.file_selected.connect(_load_png)
+	_open_dialog.filters = PackedStringArray([
+		"*.gddraw ; GDDraw layered projects",
+		"*.png, *.jpg, *.jpeg, *.webp, *.bmp, *.tga, *.svg ; Image files",
+	])
+	_open_dialog.title = "Open Image or Layered Project"
+	_open_dialog.file_selected.connect(_load_document_path)
 	add_child(_open_dialog)
 
 
@@ -3986,6 +7182,26 @@ func _build_save_dialog() -> void:
 	_save_dialog.file_selected.connect(_save_png_to_path)
 	_save_dialog.canceled.connect(_cancel_2d_save_as)
 	add_child(_save_dialog)
+
+
+func _build_save_layered_dialog() -> void:
+	_save_layered_dialog = FileDialog.new()
+	_save_layered_dialog.access = FileDialog.ACCESS_RESOURCES
+	_save_layered_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	_save_layered_dialog.filters = PackedStringArray(["*.gddraw ; GDDraw layered projects"])
+	_save_layered_dialog.title = "Save Layered Project"
+	_save_layered_dialog.file_selected.connect(_on_layered_project_path_selected)
+	_save_layered_dialog.canceled.connect(_cancel_layered_project_save)
+	add_child(_save_layered_dialog)
+
+
+func _build_layers_delete_dialog() -> void:
+	_layers_delete_dialog = ConfirmationDialog.new()
+	_layers_delete_dialog.title = "Delete Layer Item"
+	_layers_delete_dialog.ok_button_text = "Delete"
+	_layers_delete_dialog.confirmed.connect(_confirm_layer_delete)
+	_layers_delete_dialog.canceled.connect(_cancel_layer_delete)
+	add_child(_layers_delete_dialog)
 
 
 func _build_save_3d_as_dialog() -> void:
@@ -4078,18 +7294,6 @@ func _build_brush_preset_dialog() -> void:
 	button_bottom_spacer.custom_minimum_size.y = 14.0
 	content.add_child(button_bottom_spacer)
 	add_child(_brush_preset_dialog)
-
-
-func _build_drop_replace_dialog() -> void:
-	_drop_replace_dialog = ConfirmationDialog.new()
-	_drop_replace_dialog.title = "Replace Canvas?"
-	_drop_replace_dialog.dialog_text = "Save the current canvas before opening the dropped image?"
-	_drop_replace_dialog.ok_button_text = "Replace"
-	_drop_replace_dialog.cancel_button_text = "Cancel"
-	_drop_replace_dialog.confirmed.connect(_replace_canvas_with_pending_drop)
-	_drop_replace_dialog.custom_action.connect(_on_drop_replace_custom_action)
-	_drop_replace_dialog.add_button("Save & Replace", false, "save_replace")
-	add_child(_drop_replace_dialog)
 
 
 func _build_create_textured_csg_dialog() -> void:
@@ -4206,11 +7410,11 @@ func _build_3d_session_picker() -> void:
 	_session_picker_dialog = ConfirmationDialog.new()
 	_session_picker_dialog.title = "Choose 3D Texture Session"
 	_session_picker_dialog.dialog_text = ""
-	_session_picker_dialog.ok_button_text = "Open"
+	_session_picker_dialog.ok_button_text = "Edit Textures"
 	_session_picker_dialog.cancel_button_text = "Cancel"
-	_session_picker_dialog.min_size = Vector2i(600, 340)
-	_session_picker_dialog.max_size = Vector2i(720, 420)
-	_session_picker_dialog.unresizable = true
+	_session_picker_dialog.min_size = Vector2i(640, 400)
+	_session_picker_dialog.max_size = Vector2i(900, 700)
+	_session_picker_dialog.unresizable = false
 	_session_picker_dialog.confirmed.connect(_confirm_3d_session_picker)
 	_session_picker_dialog.canceled.connect(_clear_3d_session_picker)
 	var content := VBoxContainer.new()
@@ -4222,21 +7426,50 @@ func _build_3d_session_picker() -> void:
 	content.add_theme_constant_override("separation", 12)
 	_session_picker_dialog.add_child(content)
 	var description := Label.new()
-	description.text = "Choose a material slot and editable texture. This step does not change the scene."
+	description.text = "Choose what to bring into this painting session. Inspection does not change the scene."
 	description.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	content.add_child(description)
 	_session_picker_target_label = Label.new()
 	_session_picker_target_label.name = "3D Session Target"
 	_session_picker_target_label.add_theme_color_override("font_color", Color(0.78, 0.84, 0.94))
 	content.add_child(_session_picker_target_label)
-	_session_picker_options = ItemList.new()
-	_session_picker_options.name = "3D Session Texture Choices"
-	_session_picker_options.tooltip_text = "Safe editable mesh/CSG material slots; unsupported and multi-material CSG configurations are disabled with an explanation"
-	_session_picker_options.custom_minimum_size.y = 120.0
-	_session_picker_options.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_session_picker_options.select_mode = ItemList.SELECT_SINGLE
-	_session_picker_options.item_selected.connect(_on_3d_session_picker_choice_selected)
-	content.add_child(_session_picker_options)
+	var selection_row := HBoxContainer.new()
+	selection_row.name = "3D Session Selection Controls"
+	selection_row.add_theme_constant_override("separation", 8)
+	content.add_child(selection_row)
+	_session_picker_summary_label = Label.new()
+	_session_picker_summary_label.name = "3D Session Selection Summary"
+	_session_picker_summary_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	selection_row.add_child(_session_picker_summary_label)
+	_session_picker_select_all_button = Button.new()
+	_session_picker_select_all_button.name = "Select All 3D Textures"
+	_session_picker_select_all_button.text = "Select All"
+	_session_picker_select_all_button.tooltip_text = "Include every compatible texture in this editing session"
+	_session_picker_select_all_button.pressed.connect(_on_3d_session_picker_select_all)
+	selection_row.add_child(_session_picker_select_all_button)
+	_session_picker_select_none_button = Button.new()
+	_session_picker_select_none_button.name = "Select No 3D Textures"
+	_session_picker_select_none_button.text = "Select None"
+	_session_picker_select_none_button.tooltip_text = "Clear every texture selection"
+	_session_picker_select_none_button.pressed.connect(_on_3d_session_picker_select_none)
+	selection_row.add_child(_session_picker_select_none_button)
+	_session_picker_tree = Tree.new()
+	_session_picker_tree.name = "3D Session Texture Hierarchy"
+	_session_picker_tree.tooltip_text = "Check the scene objects and material textures to include in this GDDraw session"
+	_session_picker_tree.hide_root = true
+	_session_picker_tree.columns = 2
+	_session_picker_tree.set_column_expand(SESSION_PICKER_NAME_COLUMN, true)
+	_session_picker_tree.set_column_expand(SESSION_PICKER_INCLUDE_COLUMN, false)
+	_session_picker_tree.set_column_custom_minimum_width(
+		SESSION_PICKER_INCLUDE_COLUMN,
+		SESSION_PICKER_INCLUDE_COLUMN_WIDTH
+	)
+	_session_picker_tree.custom_minimum_size.y = 180.0
+	_session_picker_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_session_picker_tree.select_mode = Tree.SELECT_ROW
+	_session_picker_tree.item_edited.connect(_on_3d_session_picker_item_edited)
+	_session_picker_tree.item_selected.connect(_on_3d_session_picker_item_selected)
+	content.add_child(_session_picker_tree)
 	_session_picker_reason_label = Label.new()
 	_session_picker_reason_label.name = "3D Session Choice Explanation"
 	_session_picker_reason_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -4265,6 +7498,21 @@ func _build_save_3d_texture_dialog() -> void:
 	add_child(_save_3d_texture_dialog)
 
 
+func _build_save_3d_batch_dialog() -> void:
+	var dialog_script: Script = load(BATCH_SAVE_3D_DIALOG_SCRIPT_PATH)
+	if not dialog_script:
+		return
+	_save_3d_batch_dialog = dialog_script.new()
+	add_child(_save_3d_batch_dialog)
+	_save_3d_batch_dialog.setup()
+	_save_3d_batch_dialog.confirmed.connect(_on_3d_batch_save_confirmed)
+	_save_3d_batch_dialog.canceled.connect(_on_3d_batch_save_canceled)
+	_save_3d_batch_dialog.show_unchanged_changed.connect(_on_3d_batch_show_unchanged_changed)
+	_save_3d_batch_dialog.save_all_requested.connect(_on_3d_batch_save_all_requested)
+	_save_3d_batch_dialog.discard_requested.connect(_on_3d_batch_discard_requested)
+	_save_3d_batch_dialog.plan_changed.connect(_validate_3d_batch_save_dialog)
+
+
 func _build_session_replace_dialog() -> void:
 	_session_replace_dialog = ConfirmationDialog.new()
 	_session_replace_dialog.title = "Unsaved 3D Texture"
@@ -4290,14 +7538,18 @@ func _build_document_session_dialog() -> void:
 	_document_session_dialog.confirmed.connect(_save_2d_before_3d_session)
 	_document_session_dialog.custom_action.connect(_on_document_session_custom_action)
 	_document_session_dialog.canceled.connect(_cancel_2d_to_3d_transition)
-	_document_session_dialog.add_button("Continue Without Saving", false, "continue_without_saving")
+	_document_session_discard_button = _document_session_dialog.add_button(
+		"Continue Without Saving",
+		false,
+		"continue_without_saving"
+	)
 
 	var content := VBoxContainer.new()
 	content.add_theme_constant_override("separation", 10)
-	var prompt := Label.new()
-	prompt.text = "Save this independent 2D image before starting the 3D texture session?"
-	prompt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	content.add_child(prompt)
+	_document_session_prompt = Label.new()
+	_document_session_prompt.text = "Save this independent 2D image before starting the 3D texture session?"
+	_document_session_prompt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	content.add_child(_document_session_prompt)
 	var preview_panel := PanelContainer.new()
 	preview_panel.name = "Unsaved 2D Preview Panel"
 	preview_panel.custom_minimum_size = Vector2(320, 200)
@@ -4320,6 +7572,54 @@ func _build_document_session_dialog() -> void:
 	content.add_child(_document_session_preview_label)
 	_document_session_dialog.add_child(content)
 	add_child(_document_session_dialog)
+
+
+func _build_layered_3d_source_dialog() -> void:
+	_layered_3d_source_dialog = ConfirmationDialog.new()
+	_layered_3d_source_dialog.title = "3D Source Scene Required"
+	_layered_3d_source_dialog.dialog_text = ""
+	_layered_3d_source_dialog.ok_button_text = "Open Source Scene and Continue"
+	_layered_3d_source_dialog.cancel_button_text = "Cancel"
+	_layered_3d_source_dialog.min_size = Vector2i(560, 250)
+	_layered_3d_source_dialog.max_size = Vector2i(720, 360)
+	_layered_3d_source_dialog.confirmed.connect(_open_pending_layered_3d_source_scene)
+	_layered_3d_source_dialog.custom_action.connect(_on_layered_3d_source_custom_action)
+	_layered_3d_source_dialog.canceled.connect(_cancel_pending_layered_3d_document)
+	_layered_3d_source_relink_button = _layered_3d_source_dialog.add_button(
+		"Relink to Current Scene",
+		false,
+		"relink_current_scene"
+	)
+	_layered_3d_source_layers_only_button = _layered_3d_source_dialog.add_button(
+		"Open Layers Only",
+		false,
+		"open_layers_only"
+	)
+
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 12)
+	var prompt := Label.new()
+	prompt.text = "This layered project uses objects from:"
+	prompt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	content.add_child(prompt)
+	_layered_3d_source_path_label = Label.new()
+	_layered_3d_source_path_label.name = "3D Source Scene Path"
+	_layered_3d_source_path_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	content.add_child(_layered_3d_source_path_label)
+	_layered_3d_source_warning_label = Label.new()
+	_layered_3d_source_warning_label.name = "3D Source Scene Warning"
+	_layered_3d_source_warning_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_layered_3d_source_warning_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3, 1.0))
+	content.add_child(_layered_3d_source_warning_label)
+	var explanation := Label.new()
+	explanation.text = (
+		"Open the recorded scene, try the same relative object paths in the current scene, "
+		+ "or open the embedded paint layers without a 3D preview."
+	)
+	explanation.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	content.add_child(explanation)
+	_layered_3d_source_dialog.add_child(content)
+	add_child(_layered_3d_source_dialog)
 
 
 func _build_clipboard_paste_resize_dialog() -> void:
@@ -4376,6 +7676,7 @@ func _add_crop_field(parent: GridContainer, label_text: String) -> SpinBox:
 	field.step = 1.0
 	field.allow_greater = false
 	field.allow_lesser = false
+	field.suffix = " px"
 	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	field.tooltip_text = (
 		"Crop rectangle %s in pixels"
@@ -4953,6 +8254,25 @@ func _get_installed_plugin_version() -> String:
 	return str(constants.get("PLUGIN_VERSION", ""))
 
 
+func _build_documentation_browser() -> void:
+	var browser_script = load(DOCUMENTATION_BROWSER_SCRIPT_PATH)
+	if not browser_script or not browser_script.has_method("new"):
+		return
+	_documentation_browser = browser_script.call("new")
+	if not _documentation_browser:
+		return
+	_documentation_browser.name = "GDDraw Documentation Browser"
+	add_child(_documentation_browser)
+	_documentation_browser.configure(DOCUMENTATION_MANIFEST_PATH)
+
+
+func _open_documentation(page_path := "index.md") -> void:
+	if not _documentation_browser:
+		_set_status("The packaged GDDraw documentation could not be loaded.")
+		return
+	_documentation_browser.open_documentation(page_path)
+
+
 func _build_help_dialog() -> void:
 	_help_dialog = AcceptDialog.new()
 	_help_dialog.min_size = Vector2i(560, 320)
@@ -5123,6 +8443,7 @@ func _select_canvas_mode(mode_id: int) -> void:
 			_set_active_3d_session_status(split_mode)
 		else:
 			_clear_3d_paint_mesh()
+			_apply_empty_3d_camera_pose()
 			_update_3d_selection_status()
 	else:
 		_disconnect_editor_selection_changed()
@@ -5158,9 +8479,9 @@ func _update_3d_session_status(image: Image = null) -> void:
 		return
 	var current_image := image
 	if not current_image and _canvas:
-		current_image = _canvas.get_image_copy()
-	var state := "Unsaved" if _texture_3d_session.is_dirty(current_image) else "Clean"
-	var identity := "%s · %s" % [_texture_3d_session.get_identity_text(), state]
+		current_image = _get_canvas_output_image()
+	var state := "Unsaved" if _is_active_3d_paint_session_dirty(current_image) else "Clean"
+	var identity := "%s · %s" % [_get_active_3d_paint_session_identity(), state]
 	if _session_status_label:
 		_session_status_label.text = identity
 		_session_status_label.visible = false
@@ -5169,6 +8490,48 @@ func _update_3d_session_status(image: Image = null) -> void:
 		_stop_3d_session_button.tooltip_text = "Editing %s\nClick to stop and restore the previous 2D workspace." % identity
 	if _empty_3d_state:
 		_empty_3d_state.visible = false
+
+
+func _is_active_3d_paint_session_dirty(image: Image = null) -> bool:
+	var layered_dirty := _is_layered_session_save_required()
+	if _texture_3d_layer_coordinator:
+		return _texture_3d_layer_coordinator.is_dirty(image) or layered_dirty
+	if not _texture_3d_session or not _texture_3d_session.has_active_session():
+		return layered_dirty if _layer_session and _layer_session.session_kind == "3d" else false
+	var current_image := image if image else _get_canvas_output_image()
+	return _texture_3d_session.is_dirty(current_image) or layered_dirty
+
+
+func _is_layered_session_save_required() -> bool:
+	return (
+		_layer_session
+		and _layer_session.has_method("requires_layered_persistence")
+		and _layer_session.requires_layered_persistence()
+		and _layer_session.has_method("is_layered_dirty")
+		and _layer_session.is_layered_dirty()
+	)
+
+
+func _get_active_3d_paint_session_identity() -> String:
+	if not _texture_3d_session:
+		return "3D paint session"
+	var active_identity: String = _texture_3d_session.get_identity_text()
+	if not _texture_3d_layer_coordinator:
+		return active_identity
+	var target_count: int = _texture_3d_layer_coordinator.texture_sessions.size()
+	return "%d-target session · Active: %s" % [target_count, active_identity]
+
+
+func _focus_first_dirty_coordinated_target() -> bool:
+	if not _texture_3d_layer_coordinator:
+		return false
+	var dirty_ids: PackedStringArray = _texture_3d_layer_coordinator.get_dirty_target_ids()
+	if dirty_ids.is_empty():
+		return false
+	if not _texture_3d_layer_coordinator.activate_target(dirty_ids[0]):
+		return false
+	_sync_canvas_to_active_layer()
+	return true
 
 
 func _update_split_view_controls() -> void:
@@ -5239,6 +8602,7 @@ func _update_3d_view_readout() -> void:
 
 func _update_3d_context_control_visibility() -> void:
 	var has_active_session: bool = _texture_3d_session != null and _texture_3d_session.has_active_session()
+	var has_detached_document := _has_detached_3d_layer_document()
 	if _load_selected_mesh_button:
 		_load_selected_mesh_button.visible = _canvas_mode_3d and not has_active_session
 	if _uv_overlay_toggle:
@@ -5252,16 +8616,39 @@ func _update_3d_context_control_visibility() -> void:
 	if _preview_orientation_controls:
 		_preview_orientation_controls.visible = _canvas_mode_3d and has_active_session
 	if _preview_scene_orientation_button:
-		var linked: bool = (
-			has_active_session
-			and _texture_3d_session.has_method("is_scene_transform_linked")
-			and _texture_3d_session.is_scene_transform_linked()
-		)
+		var linked: bool = has_active_session and _is_3d_scene_sync_enabled()
 		_apply_scene_transform_link_control_state(linked)
 	_update_3d_rotation_gizmo_visibility()
 	if _empty_3d_state:
 		_empty_3d_state.visible = _canvas_mode_3d and not has_active_session
+	if _empty_3d_state_title:
+		_empty_3d_state_title.text = "3D source scene not linked" if has_detached_document else "No 3D texture session"
+	if _empty_3d_state_instructions:
+		_empty_3d_state_instructions.text = (
+			"The paint layers are open. Open the original or a compatible scene,\nthen relink its saved object paths to restore the 3D preview."
+			if has_detached_document
+			else EMPTY_3D_SESSION_INSTRUCTIONS
+		)
+	if _empty_3d_relink_button:
+		_empty_3d_relink_button.visible = has_detached_document
 	_sync_menu_state()
+
+
+func _has_detached_3d_layer_document() -> bool:
+	return (
+		_layer_session
+		and _layer_session.session_kind == "3d"
+		and not _layer_document_path.is_empty()
+		and (not _texture_3d_session or not _texture_3d_session.has_active_session())
+	)
+
+
+func _relink_detached_layered_3d_document() -> void:
+	if not _has_detached_3d_layer_document():
+		return
+	var scene_root := _get_active_3d_document_scene_root()
+	if not _try_activate_reattached_layered_document(_layer_session, _layer_document_path, scene_root):
+		_set_status("The current scene does not contain compatible objects at the saved relative paths.")
 
 
 func _on_preview_light_toggled(enabled: bool) -> void:
@@ -5333,6 +8720,13 @@ func _apply_preview_lighting_state() -> void:
 			if _preview_light_enabled
 			else BaseMaterial3D.SHADING_MODE_UNSHADED
 		)
+	for context_material in _paint_3d_context_materials:
+		if context_material:
+			context_material.shading_mode = (
+				BaseMaterial3D.SHADING_MODE_PER_PIXEL
+				if _preview_light_enabled
+				else BaseMaterial3D.SHADING_MODE_UNSHADED
+			)
 	if _preview_light_toggle:
 		_preview_light_toggle.set_pressed_no_signal(_preview_light_enabled)
 		_update_toggle_button_icon(_preview_light_toggle)
@@ -5382,6 +8776,7 @@ func _on_reset_preview_orientation_pressed() -> void:
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		return
 	_cancel_3d_rotation_gizmo_drag(false)
+	_set_3d_scene_sync_enabled(false)
 	_texture_3d_session.reset_preview_transform()
 	_apply_scene_transform_link_control_state(false)
 	_apply_3d_preview_transform(false)
@@ -5393,41 +8788,92 @@ func _on_scene_transform_link_toggled(linked: bool) -> void:
 		_apply_scene_transform_link_control_state(false)
 		return
 	_cancel_3d_rotation_gizmo_drag(false)
-	var source := _get_active_3d_source_node()
-	if linked and (not is_instance_valid(source) or not source.is_inside_tree()):
-		_texture_3d_session.set_scene_transform_linked(false)
+	if linked and not _has_available_3d_scene_sync_source():
+		_set_3d_scene_sync_enabled(false)
 		_apply_scene_transform_link_control_state(false)
 		_update_3d_context_control_visibility()
-		_set_status("Scene Transform Link is unavailable while the source scene is inactive; the private 3D preview remains editable.")
+		_set_status("Scene Sync is unavailable while the imported source hierarchy is inactive; the private 3D preview remains editable.")
 		return
-	var preview_changed: bool = _texture_3d_session.set_scene_transform_linked(
-		linked,
-		source.global_transform if linked else Transform3D.IDENTITY
-	)
-	if preview_changed:
-		_apply_3d_preview_transform(false)
+	_set_3d_scene_sync_enabled(linked)
 	_apply_scene_transform_link_control_state(linked)
 	_set_status(
-		"Source transforms now update GDDraw's isolated preview one-way."
+		"Source hierarchy transforms and visibility now update GDDraw's isolated preview one-way."
 		if linked
-		else "Scene transform linking disabled; GDDraw's isolated preview transform is retained."
+		else "Scene Sync disabled; GDDraw's isolated preview state is retained."
+	)
+
+
+func _set_3d_scene_sync_enabled(linked: bool) -> void:
+	_scene_hierarchy_sync_enabled = linked
+	var preview_changed := false
+	if _texture_3d_layer_coordinator:
+		for preview_entry_value in _texture_3d_layer_coordinator.get_preview_entries():
+			var preview_entry: Dictionary = preview_entry_value
+			var texture_session = preview_entry.get("session")
+			if not texture_session or not texture_session.target:
+				continue
+			var source: Node3D = texture_session.target.source_node if is_instance_valid(texture_session.target.source_node) else null
+			if linked and is_instance_valid(source) and source.is_inside_tree():
+				preview_changed = texture_session.set_scene_transform_linked(true, source.global_transform) or preview_changed
+			else:
+				texture_session.set_scene_transform_linked(false)
+	elif _texture_3d_session and _texture_3d_session.target:
+		var source := _get_active_3d_source_node()
+		if linked and is_instance_valid(source) and source.is_inside_tree():
+			preview_changed = _texture_3d_session.set_scene_transform_linked(true, source.global_transform)
+		else:
+			_texture_3d_session.set_scene_transform_linked(false)
+	if linked:
+		_sync_3d_scene_visibility_from_sources()
+	else:
+		_refresh_3d_object_group_visibility_buttons()
+	if preview_changed:
+		_apply_all_3d_preview_transforms()
+
+
+func _initialize_default_3d_scene_sync_state() -> void:
+	# A newly imported hierarchy starts from the source Scene's authored state,
+	# but remains an independent GDDraw preview until the user opts into live
+	# Scene Sync. This keeps the Layers visibility controls immediately usable.
+	_set_3d_scene_sync_enabled(false)
+	_apply_scene_transform_link_control_state(false)
+
+
+func _capture_3d_object_group_visibility_from_sources() -> void:
+	if not _layer_session or _layer_session.session_kind != "3d":
+		return
+	for group in _layer_session.object_groups:
+		var group_id := str(group.get("id", ""))
+		var source_node := _resolve_object_group_source_node(group_id)
+		if is_instance_valid(source_node) and source_node is Node3D and source_node.is_inside_tree():
+			# Store the node's authored local visibility. Parent visibility remains
+			# represented by the matching parent group, preserving the source tree's
+			# visibility inheritance without keeping a live Scene dependency.
+			group["visible"] = source_node.visible
+
+
+func _is_3d_scene_sync_enabled() -> bool:
+	return (
+		_scene_hierarchy_sync_enabled
+		and _texture_3d_session != null
+		and _texture_3d_session.has_active_session()
 	)
 
 
 func _apply_scene_transform_link_control_state(linked: bool) -> void:
 	if not _preview_scene_orientation_button:
 		return
-	var source_available := _is_active_3d_source_available()
+	var source_available := _has_available_3d_scene_sync_source()
 	_preview_scene_orientation_button.disabled = not source_available
 	_preview_scene_orientation_button.set_pressed_no_signal(linked)
 	_update_toggle_button_icon(_preview_scene_orientation_button)
 	_preview_scene_orientation_button.tooltip_text = (
-		"Scene transform linking is unavailable while the source scene is inactive or closed. The 3D preview remains editable."
+		"Scene Sync is unavailable while the imported source hierarchy is inactive or closed. The 3D preview remains editable."
 		if not source_available
 		else
-		"The source scene transform is linked to the 3D preview."
+		"The imported hierarchy follows source scene transforms and visibility."
 		if linked
-		else "Link the source scene transform to the 3D preview."
+		else "Sync imported hierarchy transforms and visibility from the source scene."
 	)
 
 
@@ -5436,6 +8882,20 @@ func _is_active_3d_source_available() -> bool:
 		return false
 	var source := _get_active_3d_source_node()
 	return is_instance_valid(source) and source.is_inside_tree()
+
+
+func _has_available_3d_scene_sync_source() -> bool:
+	if _texture_3d_layer_coordinator:
+		for preview_entry_value in _texture_3d_layer_coordinator.get_preview_entries():
+			var preview_entry: Dictionary = preview_entry_value
+			var texture_session = preview_entry.get("session")
+			if not texture_session or not texture_session.target:
+				continue
+			var source: Node3D = texture_session.target.source_node if is_instance_valid(texture_session.target.source_node) else null
+			if is_instance_valid(source) and source.is_inside_tree():
+				return true
+		return false
+	return _is_active_3d_source_available()
 
 
 func _get_active_3d_source_node() -> Node3D:
@@ -5755,6 +9215,27 @@ func _on_text_font_dialog_canceled() -> void:
 func _on_text_font_size_changed(value: float) -> void:
 	if _canvas:
 		_canvas.text_font_size = int(value)
+
+
+func _on_text_fill_toggled(enabled: bool) -> void:
+	if _canvas:
+		_canvas.text_fill_mode = (
+			GDDrawCanvasControl.TextFillMode.BACKGROUND
+			if enabled
+			else GDDrawCanvasControl.TextFillMode.NONE
+		)
+	_update_text_fill_tooltip(enabled)
+	if _canvas:
+		call_deferred("_refocus_text_editor")
+
+
+func _update_text_fill_tooltip(enabled: bool) -> void:
+	if not _text_fill_toggle:
+		return
+	if enabled:
+		_text_fill_toggle.tooltip_text = "Text background: Background Color\nClick to remove the fill and leave the text box transparent."
+	else:
+		_text_fill_toggle.tooltip_text = "Text background: No Fill\nClick to fill the text box with the current background color."
 
 
 func _on_text_alignment_toggled(enabled: bool, alignment: int) -> void:
@@ -6203,7 +9684,7 @@ func _on_brush_touch_pixels_toggled(enabled: bool) -> void:
 
 func _on_fill_tolerance_changed(value: float) -> void:
 	if _canvas:
-		_canvas.fill_tolerance = int(value)
+		_canvas.fill_tolerance = roundi(clampf(value, 0.0, 100.0) * 255.0 / 100.0)
 
 
 func _on_fill_mode_selected(index: int) -> void:
@@ -7019,23 +10500,27 @@ func _set_mirror_mode(mode: int) -> void:
 	_sync_menu_state()
 
 
-func _on_shape_fill_mode_selected(index: int) -> void:
-	if not _canvas or not _shape_fill_mode:
+func _on_shape_fill_toggled(enabled: bool) -> void:
+	if not _canvas or not _shape_fill_toggle:
 		return
-	_canvas.shape_fill_mode = _shape_fill_mode.get_item_id(index)
-	_update_shape_fill_tooltip(_canvas.shape_fill_mode)
+	_canvas.shape_fill_mode = (
+		GDDrawCanvasControl.ShapeFillMode.BACKGROUND
+		if enabled
+		else GDDrawCanvasControl.ShapeFillMode.NONE
+	)
+	_shape_fill_toggle.set_pressed_no_signal(enabled)
+	_update_toggle_button_icon(_shape_fill_toggle)
+	_update_shape_fill_tooltip(enabled)
 
 
-func _update_shape_fill_tooltip(mode: int) -> void:
-	if not _shape_fill_mode:
+func _update_shape_fill_tooltip(enabled: bool) -> void:
+	if not _shape_fill_toggle:
 		return
-	match mode:
-		GDDrawCanvasControl.ShapeFillMode.BACKGROUND:
-			_shape_fill_mode.tooltip_text = "Foreground color outlines the shape; background color fills its interior"
-		GDDrawCanvasControl.ShapeFillMode.FOREGROUND:
-			_shape_fill_mode.tooltip_text = "Foreground color is used for both the shape outline and interior"
-		_:
-			_shape_fill_mode.tooltip_text = "Foreground color outlines the shape; the interior is left unchanged"
+	_shape_fill_toggle.tooltip_text = (
+		"Shape fill: Background Color\nForeground outlines the shape and Background fills it. Click to remove the fill; use Swap Colors to reverse them."
+		if enabled
+		else "Shape fill: No Fill\nClick to fill the interior with Background while Foreground remains the outline."
+	)
 
 
 func _on_shape_origin_mode_selected(index: int) -> void:
@@ -7430,18 +10915,37 @@ func _refresh_canvas_visible_pixels_state() -> void:
 
 func _on_stroke_committed(previous_image: Image) -> void:
 	_refresh_canvas_visible_pixels_state()
+	if not _dropped_layer_import_context.is_empty():
+		_update_selection_action_buttons()
+		_sync_3d_paint_texture()
+		_update_3d_session_status()
+		return
 	_push_undo(previous_image)
 	_history.clear_redo()
 	_update_history_buttons()
 	_update_selection_action_buttons()
 	_sync_3d_paint_texture()
 	_update_3d_session_status()
+	if _layer_session:
+		var target = _layer_session.get_active_target()
+		if target:
+			_invalidate_layer_thumbnail(target.target_id, target.selected_layer_id)
+	_refresh_layers_tree()
 
 
 func _on_canvas_image_changed(image: Image) -> void:
-	if _paint_3d_view and _texture_3d_session and _texture_3d_session.has_active_session():
-		_set_3d_paint_texture_image(image)
-	_update_3d_session_status(image)
+	if not _syncing_layer_session and _layer_session and _layer_session.has_method("get_active_target"):
+		var target = _layer_session.get_active_target()
+		if target:
+			var workspace_origin: Vector2i = _canvas.get_workspace_origin() if _canvas.has_method("get_workspace_origin") else Vector2i.ZERO
+			if target.has_method("adopt_selected_layer_workspace"):
+				target.adopt_selected_layer_workspace(image, workspace_origin)
+			elif not target.has_method("adopt_selected_layer_image") or not target.adopt_selected_layer_image(image):
+				target.set_selected_layer_image(image)
+		elif not (_texture_3d_session and _texture_3d_session.has_active_session()):
+			_reset_layer_session_for_image(image, "2d", "2D Document", "RGBA", "rgba")
+	if not _syncing_layer_session and _paint_3d_view and _texture_3d_session and _texture_3d_session.has_active_session():
+		_paint_3d_live_texture_refresh_pending = true
 
 
 func _on_canvas_hover_uv_changed(uv: Vector2, has_hover: bool) -> void:
@@ -7490,11 +10994,16 @@ func _process_canvas_hover_uv(uv: Vector2, has_hover: bool) -> void:
 	if SHOW_2D_TO_3D_HOVER_MARKER:
 		_update_3d_hover_debug_marker(hit)
 	_update_3d_hover_triangle(hit)
-	_update_3d_paint_cursor(true)
 
 
 func _on_3d_paint_uv_started(hit: Dictionary) -> bool:
 	if not _canvas:
+		return false
+	if not _route_3d_hit_to_paint_target(hit):
+		return false
+	var active_target = _layer_session.get_active_target() if _layer_session else null
+	if active_target and active_target.is_node_effectively_locked(active_target.selected_layer_id):
+		_set_status("The selected layer is locked; 3D drawing is disabled for it.")
 		return false
 	if _is_3d_surface_shape_tool(_canvas.active_tool):
 		return _begin_3d_surface_shape(hit)
@@ -7514,6 +11023,9 @@ func _on_3d_paint_uv_started(hit: Dictionary) -> bool:
 
 
 func _on_3d_paint_uv_dragged(hit: Dictionary) -> void:
+	if not _hit_belongs_to_active_3d_target(hit):
+		_paint_3d_last_stroke_hit.clear()
+		return
 	if not _paint_3d_surface_shape_state.is_empty():
 		_update_3d_surface_shape(hit)
 		return
@@ -7530,6 +11042,176 @@ func _on_3d_paint_uv_dragged(hit: Dictionary) -> void:
 		_paint_3d_last_stroke_hit = hit.duplicate(true)
 
 
+func _route_3d_hit_to_paint_target(hit: Dictionary) -> bool:
+	if not _texture_3d_layer_coordinator or not _layer_session:
+		return true
+	var target_id := str(hit.get("target_id", ""))
+	var binding_key := str(hit.get("binding_key", ""))
+	if target_id.is_empty():
+		return true
+	if target_id != _layer_session.active_target_id:
+		if not _layer_session.route_hit_to_target(target_id):
+			_set_status("Target Lock rejected a stroke on another imported object; the active paint target is unchanged.")
+			return false
+		var promoted := _promote_cached_3d_preview(target_id, binding_key)
+		if not _sync_canvas_to_active_layer(false, promoted):
+			return false
+	elif not binding_key.is_empty():
+		_promote_cached_3d_preview(target_id, binding_key)
+	_set_active_3d_binding(binding_key, true)
+	_set_status("Painting %s." % _layer_session.get_active_target().label)
+	return true
+
+
+func _get_root_object_group_id(group_id: String) -> String:
+	if not _layer_session or group_id.is_empty():
+		return ""
+	var current_id := group_id
+	var visited := {}
+	while not current_id.is_empty() and not visited.has(current_id):
+		visited[current_id] = true
+		var group: Dictionary = _layer_session.get_object_group(current_id)
+		if group.is_empty():
+			return ""
+		var parent_id := str(group.get("parent_id", ""))
+		if parent_id.is_empty():
+			return current_id
+		current_id = parent_id
+	return ""
+
+
+func _get_object_group_id_for_source_node(source_node: Node) -> String:
+	if not _layer_session or not is_instance_valid(source_node) or not source_node.is_inside_tree():
+		return ""
+	var source_path := str(source_node.get_path())
+	for group in _layer_session.object_groups:
+		if str(group.get("source_key", "")) == source_path:
+			return str(group.get("id", ""))
+	return ""
+
+
+func _get_object_group_id_for_source_key(source_key: String) -> String:
+	if not _layer_session or source_key.is_empty():
+		return ""
+	for group in _layer_session.object_groups:
+		if str(group.get("source_key", "")) == source_key:
+			return str(group.get("id", ""))
+	return ""
+
+
+func _resolve_object_group_source_node(group_id: String) -> Node:
+	if not _layer_session or group_id.is_empty() or not get_tree():
+		return null
+	var group: Dictionary = _layer_session.get_object_group(group_id)
+	var source_key := str(group.get("source_key", ""))
+	if source_key.is_empty() or source_key.contains("#"):
+		return null
+	var source_node := get_tree().root.get_node_or_null(NodePath(source_key))
+	if source_node:
+		return source_node
+	var current_scene := get_tree().current_scene
+	return current_scene.get_node_or_null(NodePath(source_key)) if current_scene else null
+
+
+func _select_3d_object_group(group_id: String, synchronize_scene_selection := false) -> void:
+	if group_id.is_empty():
+		return
+	var source_node := _resolve_object_group_source_node(group_id)
+	if _texture_3d_layer_coordinator and _layer_session and is_instance_valid(source_node):
+		var binding: Dictionary = _texture_3d_layer_coordinator.get_binding_for_source_node(source_node)
+		var target_id := str(binding.get("target_id", ""))
+		var binding_key := str(binding.get("binding_key", ""))
+		if not target_id.is_empty() and target_id != _layer_session.active_target_id:
+			if _layer_session.route_hit_to_target(target_id):
+				var promoted := _promote_cached_3d_preview(target_id, binding_key)
+				_sync_canvas_to_active_layer(false, promoted)
+			else:
+				_set_status("Target Lock kept %s as the active paint target." % _layer_session.get_active_target().label)
+		elif not target_id.is_empty():
+			_promote_cached_3d_preview(target_id, binding_key)
+		if not binding_key.is_empty() and target_id == _layer_session.active_target_id:
+			_active_3d_binding_key = binding_key
+	# Keep the exact row that the user clicked selected. EditorSelection may emit
+	# its change signal on a later message cycle, so repeat this after syncing it.
+	_sync_layers_tree_selection({"kind": "object", "group_id": group_id})
+	# A Layers-tree click activates the matching paint target without changing
+	# Godot's Scene selection. Inspector and gizmo refreshes can be expensive and
+	# are surprising while a user is simply cycling paint layers. The explicit
+	# "Select in Scene" context action opts into the reverse synchronization.
+	if not synchronize_scene_selection or not _editor_selection:
+		return
+	if not is_instance_valid(source_node):
+		return
+	_syncing_editor_selection_from_target = true
+	_editor_selection.clear()
+	_editor_selection.add_node(source_node)
+	_syncing_editor_selection_from_target = false
+	_sync_layers_tree_selection({"kind": "object", "group_id": group_id})
+
+
+func _get_3d_binding_for_target_group(target_id: String, group_id: String) -> Dictionary:
+	if not _texture_3d_layer_coordinator:
+		return {}
+	var group: Dictionary = _layer_session.get_object_group(group_id) if _layer_session else {}
+	var group_key := str(group.get("source_key", ""))
+	if not group_key.is_empty():
+		for preview in _texture_3d_layer_coordinator.get_preview_entries():
+			var descriptor: Dictionary = preview.get("descriptor", {})
+			if (
+				str(preview.get("target_id", "")) == target_id
+				and str(descriptor.get("group_key", "")) == group_key
+			):
+				return _texture_3d_layer_coordinator.get_binding(str(preview.get("binding_key", "")))
+	return _texture_3d_layer_coordinator.get_primary_binding_for_target(target_id)
+
+
+func _set_active_3d_binding(binding_key: String, synchronize_scene_selection: bool) -> void:
+	if not _texture_3d_layer_coordinator or binding_key.is_empty():
+		return
+	var binding: Dictionary = _texture_3d_layer_coordinator.get_binding(binding_key)
+	if binding.is_empty():
+		return
+	_active_3d_binding_key = binding_key
+	var group_id := ""
+	var group_key := str(binding.get("group_key", ""))
+	for group in _layer_session.object_groups:
+		if str(group.get("source_key", "")) == group_key:
+			group_id = str(group.get("id", ""))
+			break
+	if not group_id.is_empty():
+		if synchronize_scene_selection:
+			var root_group_id := _get_root_object_group_id(group_id)
+			_sync_layers_tree_selection({
+				"kind": "object",
+				"group_id": root_group_id if not root_group_id.is_empty() else group_id,
+			})
+		else:
+			_sync_layers_tree_selection({
+				"kind": "target",
+				"target_id": str(binding.get("target_id", "")),
+				"group_id": group_id,
+			})
+	if not synchronize_scene_selection or not _editor_selection:
+		return
+	var scene_group_id := _get_root_object_group_id(group_id)
+	var source_node: Node = _resolve_object_group_source_node(scene_group_id)
+	if not is_instance_valid(source_node):
+		source_node = binding.get("source_node", null)
+	if not is_instance_valid(source_node):
+		return
+	_syncing_editor_selection_from_target = true
+	_editor_selection.clear()
+	_editor_selection.add_node(source_node)
+	_syncing_editor_selection_from_target = false
+
+
+func _hit_belongs_to_active_3d_target(hit: Dictionary) -> bool:
+	if not _texture_3d_layer_coordinator or not _layer_session:
+		return true
+	var target_id := str(hit.get("target_id", ""))
+	return target_id.is_empty() or target_id == _layer_session.active_target_id
+
+
 func _on_3d_paint_uv_finished() -> void:
 	if not _paint_3d_surface_shape_state.is_empty():
 		_finish_3d_surface_shape()
@@ -7538,7 +11220,7 @@ func _on_3d_paint_uv_finished() -> void:
 		_canvas.end_uv_triangle_stroke()
 	_paint_3d_last_stroke_hit.clear()
 	_end_3d_soft_brush_stroke()
-	_sync_3d_paint_texture()
+	_refresh_promoted_3d_preview_accessories()
 
 
 func _begin_3d_surface_shape(hit: Dictionary) -> bool:
@@ -7674,7 +11356,7 @@ func _finish_3d_surface_shape(release_hit: Dictionary = {}) -> bool:
 	var committed: bool = _canvas != null and _canvas.commit_surface_shape_preview()
 	_paint_3d_surface_shape_state.clear()
 	_paint_3d_last_stroke_hit.clear()
-	_sync_3d_paint_texture()
+	_refresh_promoted_3d_preview_accessories()
 	_set_status(
 		"Committed 3D surface %s." % shape_name.to_lower()
 		if committed
@@ -7811,6 +11493,57 @@ func _on_selection_committed(selection_rect: Rect2i) -> void:
 
 func _on_selection_cleared() -> void:
 	_update_selection_action_buttons()
+
+
+func _on_floating_selection_committed() -> void:
+	if _dropped_layer_import_context.is_empty():
+		return
+	var import_context := _dropped_layer_import_context.duplicate()
+	_dropped_layer_import_context.clear()
+	var target = _layer_session.get_active_target() if _layer_session else null
+	var target_id := str(import_context.get("target_id", ""))
+	var layer_id := str(import_context.get("layer_id", ""))
+	if not target or target.target_id != target_id or not target.find_node(layer_id):
+		_restore_canceled_dropped_layer_import(import_context)
+		return
+	if _canvas:
+		var committed_image: Image = _canvas.get_image_copy()
+		var committed_origin: Vector2i = _canvas.get_workspace_origin() if _canvas.has_method("get_workspace_origin") else Vector2i.ZERO
+		if target.has_method("adopt_selected_layer_workspace"):
+			target.adopt_selected_layer_workspace(committed_image, committed_origin)
+		elif not target.has_method("adopt_selected_layer_image") or not target.adopt_selected_layer_image(committed_image):
+			target.set_selected_layer_image(committed_image)
+	_push_layer_session_state_undo(import_context.get("previous_state", {}))
+	_layer_thumbnail_cache.clear()
+	_refresh_layers_tree({
+		"kind": "paint",
+		"target_id": target_id,
+		"node_id": layer_id,
+	})
+	_refresh_canvas_visible_pixels_state()
+	_update_selection_action_buttons()
+	_sync_3d_paint_texture()
+	_update_3d_session_status()
+	_set_status("Added %s as a transformed layer." % str(import_context.get("layer_name", "dropped image")))
+
+
+func _on_floating_selection_canceled() -> void:
+	if _dropped_layer_import_context.is_empty():
+		return
+	var import_context := _dropped_layer_import_context.duplicate()
+	_dropped_layer_import_context.clear()
+	_restore_canceled_dropped_layer_import(import_context)
+
+
+func _restore_canceled_dropped_layer_import(import_context: Dictionary) -> void:
+	var previous_state: Dictionary = import_context.get("previous_state", {})
+	if not _restore_layer_session(previous_state):
+		_set_status("Could not cancel the dropped layer import cleanly.")
+		return
+	_sync_canvas_to_active_layer()
+	_refresh_canvas_visible_pixels_state()
+	_update_selection_action_buttons()
+	_set_status("Canceled the dropped layer import.")
 
 
 func _cut_selection() -> void:
@@ -7976,8 +11709,10 @@ func _duplicate_selection() -> void:
 
 
 func _commit_selection_transform() -> void:
+	var committing_dropped_layer := not _dropped_layer_import_context.is_empty()
 	if _canvas and _canvas.commit_active_selection_transform():
-		_set_status("Committed floating selection.")
+		if not committing_dropped_layer:
+			_set_status("Committed floating selection.")
 	else:
 		_set_status("No floating selection to commit.")
 	_update_selection_action_buttons()
@@ -8000,6 +11735,9 @@ func _cancel_selection_or_preview() -> void:
 		return
 	if _crop_workflow_active:
 		_cancel_crop_rectangle()
+		return
+	if not _dropped_layer_import_context.is_empty() and _canvas.cancel_imported_floating_selection():
+		_update_selection_action_buttons()
 		return
 	if _canvas.cancel_active_selection_or_preview():
 		_set_status("Canceled selection or preview.")
@@ -8027,9 +11765,32 @@ func _reject_locked_scale() -> bool:
 func _start_scale_image() -> void:
 	if not _canvas or not _scale_image_dialog or _reject_locked_scale():
 		return
+	_scale_context_target_ids.clear()
+	_scale_context_allows_3d = false
+	_open_scale_image_dialog(_canvas.get_canvas_size(), "Scale Image")
+
+
+func _start_context_texture_scale(target_ids: PackedStringArray) -> void:
+	if not _canvas or not _scale_image_dialog or target_ids.is_empty() or not _layer_session:
+		return
+	var first_target = _layer_session.get_target(target_ids[0])
+	if not first_target:
+		return
+	_prepare_layer_operation()
+	if not _layer_session.activate_target(first_target.target_id) or not _sync_canvas_to_active_layer():
+		return
+	_scale_context_target_ids = target_ids.duplicate()
+	_scale_context_allows_3d = true
+	_open_scale_image_dialog(
+		first_target.size,
+		"Resize Texture" if target_ids.size() == 1 else "Resize %d Textures" % target_ids.size()
+	)
+
+
+func _open_scale_image_dialog(source_size: Vector2i, dialog_title: String) -> void:
 	if _crop_workflow_active:
 		_cancel_crop_rectangle(false)
-	_scale_source_size = _canvas.get_canvas_size()
+	_scale_source_size = source_size
 	_syncing_scale_controls = true
 	_scale_width.set_value_no_signal(_scale_source_size.x)
 	_scale_height.set_value_no_signal(_scale_source_size.y)
@@ -8037,6 +11798,7 @@ func _start_scale_image() -> void:
 	_scale_interpolation.select(0)
 	_syncing_scale_controls = false
 	_scale_workflow_active = true
+	_scale_image_dialog.title = dialog_title
 	_scale_image_dialog.size = SCALE_IMAGE_DIALOG_SIZE
 	_scale_image_dialog.popup_centered(SCALE_IMAGE_DIALOG_SIZE)
 	var width_line_edit := _scale_width.get_line_edit()
@@ -8103,16 +11865,47 @@ func _aspect_size_from_height(height: int, source_size: Vector2i) -> Vector2i:
 func _apply_scale_image() -> void:
 	if not _scale_workflow_active or not _canvas:
 		return
-	if _reject_locked_scale():
+	if not _scale_context_allows_3d and _reject_locked_scale():
 		_cancel_scale_image(false)
 		return
 	var new_size := Vector2i(int(_scale_width.value), int(_scale_height.value))
 	var interpolation := _scale_interpolation.get_selected_id()
 	_scale_workflow_active = false
-	if _canvas.scale_image(new_size, interpolation):
-		_set_status("Scaled image to %sx%s." % [new_size.x, new_size.y])
+	var previous_state: Dictionary = _layer_session.capture_state() if _layer_session else {}
+	var target_ids := _scale_context_target_ids.duplicate()
+	if target_ids.is_empty() and _layer_session and _layer_session.get_active_target():
+		target_ids.push_back(_layer_session.active_target_id)
+	var changed_count := 0
+	var failed := false
+	for target_id in target_ids:
+		var target = _layer_session.get_target(target_id) if _layer_session else null
+		if not target:
+			failed = true
+			break
+		if target.size == new_size:
+			continue
+		if not target.scale_layers(new_size, interpolation):
+			failed = true
+			break
+		changed_count += 1
+	if failed and not previous_state.is_empty():
+		_layer_session.restore_state(previous_state)
+		_sync_canvas_to_active_layer()
+		_set_status("Texture scaling was canceled because one target could not use that size.")
+	elif changed_count > 0:
+		_push_layer_session_state_undo(previous_state)
+		_sync_canvas_to_active_layer()
+		if _scale_context_allows_3d:
+			_sync_3d_paint_view(true)
+		_set_status(
+			"Resized %d texture(s) to %sx%s." % [changed_count, new_size.x, new_size.y]
+			if _scale_context_allows_3d
+			else "Scaled image to %sx%s." % [new_size.x, new_size.y]
+		)
 	else:
 		_set_status("Image scaling did not change the canvas.")
+	_scale_context_target_ids.clear()
+	_scale_context_allows_3d = false
 	_update_selection_action_buttons()
 
 
@@ -8120,6 +11913,8 @@ func _cancel_scale_image(show_status := true) -> void:
 	if not _scale_workflow_active:
 		return
 	_scale_workflow_active = false
+	_scale_context_target_ids.clear()
+	_scale_context_allows_3d = false
 	if _scale_image_dialog and _scale_image_dialog.visible:
 		_scale_image_dialog.hide()
 	if show_status:
@@ -8131,7 +11926,12 @@ func _crop_to_selection() -> void:
 		return
 	if _crop_workflow_active:
 		_cancel_crop_rectangle(false)
-	if _canvas.crop_to_selection():
+	var crop_rect: Rect2i = _canvas.get_selection_crop_rect()
+	var previous_state: Dictionary = _layer_session.capture_state() if _layer_session else {}
+	var target = _layer_session.get_active_target() if _layer_session else null
+	if target and target.crop_layers(crop_rect):
+		_push_layer_session_state_undo(previous_state)
+		_sync_canvas_to_active_layer()
 		var size: Vector2i = _canvas.get_canvas_size()
 		_set_status("Cropped to selection: %sx%s." % [size.x, size.y])
 	else:
@@ -8144,12 +11944,37 @@ func _trim_transparent_bounds() -> void:
 		return
 	if _crop_workflow_active:
 		_cancel_crop_rectangle(false)
-	if _canvas.trim_transparent_bounds():
+	var crop_rect := _get_image_transparent_bounds(_get_canvas_output_image())
+	var previous_state: Dictionary = _layer_session.capture_state() if _layer_session else {}
+	var target = _layer_session.get_active_target() if _layer_session else null
+	if target and target.crop_layers(crop_rect):
+		_push_layer_session_state_undo(previous_state)
+		_sync_canvas_to_active_layer()
 		var size: Vector2i = _canvas.get_canvas_size()
 		_set_status("Trimmed transparent bounds to %sx%s." % [size.x, size.y])
 	else:
 		_set_status("Nothing to trim: the canvas is transparent or already tight.")
 	_update_selection_action_buttons()
+
+
+func _get_image_transparent_bounds(image: Image) -> Rect2i:
+	if not image or image.is_empty():
+		return Rect2i()
+	var left := image.get_width()
+	var top := image.get_height()
+	var right := -1
+	var bottom := -1
+	for y in range(image.get_height()):
+		for x in range(image.get_width()):
+			if image.get_pixel(x, y).a8 <= 0:
+				continue
+			left = mini(left, x)
+			top = mini(top, y)
+			right = maxi(right, x)
+			bottom = maxi(bottom, y)
+	if right < left or bottom < top:
+		return Rect2i()
+	return Rect2i(Vector2i(left, top), Vector2i(right - left + 1, bottom - top + 1))
 
 
 func _start_crop_rectangle() -> void:
@@ -8202,9 +12027,14 @@ func _apply_crop_rectangle() -> void:
 	if _reject_locked_crop():
 		_cancel_crop_rectangle(false)
 		return
-	var changed: bool = _canvas.apply_crop_preview()
+	var crop_rect: Rect2i = _canvas.get_crop_preview_rect()
+	var previous_state: Dictionary = _layer_session.capture_state() if _layer_session else {}
+	var target = _layer_session.get_active_target() if _layer_session else null
+	var changed: bool = target != null and target.crop_layers(crop_rect)
 	_crop_workflow_active = false
 	if changed:
+		_push_layer_session_state_undo(previous_state)
+		_sync_canvas_to_active_layer()
 		var size: Vector2i = _canvas.get_canvas_size()
 		_set_status("Cropped canvas to %sx%s." % [size.x, size.y])
 	else:
@@ -8228,16 +12058,30 @@ func _new_canvas() -> void:
 	if not _canvas:
 		return
 	if _texture_3d_session and _texture_3d_session.has_active_session():
-		_set_status("New canvas is unavailable while a 3D texture session is active.")
+		if _request_session_transition(SessionTransition.NEW_DOCUMENT):
+			return
+		_new_canvas_now()
 		return
+	if _is_2d_document_dirty():
+		_pending_session_transition = SessionTransition.NEW_DOCUMENT
+		_configure_document_transition_dialog(SessionTransition.NEW_DOCUMENT)
+		_update_document_session_preview()
+		if _document_session_dialog:
+			_document_session_dialog.call_deferred("popup_centered")
+		return
+	_new_canvas_now()
+
+
+func _new_canvas_now() -> void:
+	if not _canvas:
+		return
+	if not _dropped_layer_import_context.is_empty():
+		_canvas.cancel_imported_floating_selection()
+	if _texture_3d_session and _texture_3d_session.has_active_session():
+		_clear_3d_texture_session_state(false)
 	var default_size := _get_default_canvas_size()
-	_push_undo(_canvas.resize_canvas(default_size, false))
-	_canvas_has_visible_pixels = false
-	_history.clear_redo()
-	_update_history_buttons()
-	_update_selection_action_buttons()
+	_reset_2d_workspace_after_3d_session()
 	_reset_view()
-	_set_2d_document_baseline("", _canvas.get_image_copy())
 	_set_status("Created a new %sx%s canvas." % [default_size.x, default_size.y])
 
 
@@ -8257,19 +12101,39 @@ func _resize_canvas() -> void:
 	if new_size == _canvas.get_canvas_size():
 		_set_status("Canvas is already %sx%s." % [new_size.x, new_size.y])
 		return
-	_push_undo(_canvas.resize_canvas(new_size, _keep_pixels.button_pressed))
+	var previous_state: Dictionary = _layer_session.capture_state() if _layer_session else {}
+	var target = _layer_session.get_active_target() if _layer_session else null
+	if not target or not target.resize_layers(new_size, _keep_pixels.button_pressed):
+		_set_status("Canvas resize did not change the image.")
+		return
+	_push_layer_session_state_undo(previous_state)
+	_sync_canvas_to_active_layer()
 	_refresh_canvas_visible_pixels_state()
-	_history.clear_redo()
 	_update_history_buttons()
 	_update_selection_action_buttons()
 	_set_status("Canvas resized to %sx%s." % [new_size.x, new_size.y])
 
 
 func _undo() -> void:
+	_prepare_layer_operation()
 	if not _history.can_undo():
 		return
-	_history.push_redo(_canvas.get_image_copy())
-	_canvas.set_image(_history.pop_undo())
+	var entry: Variant = _history.pop_undo()
+	if _history.has_method("is_state_entry") and _history.is_state_entry(entry):
+		var current_state: Dictionary = _layer_session.capture_state() if _layer_session else {}
+		var previous_state: Dictionary = _history.get_entry_state(entry)
+		if previous_state.is_empty() or not _restore_layer_session(previous_state):
+			if not previous_state.is_empty():
+				_history.push_undo_state(previous_state)
+			_set_status("Could not restore the previous layer state.")
+			return
+		if not current_state.is_empty():
+			_history.push_redo_state(current_state)
+		_sync_canvas_to_active_layer()
+	else:
+		_history.push_redo(_canvas.get_image_copy())
+		if entry is Image:
+			_canvas.set_image(entry)
 	_refresh_canvas_visible_pixels_state()
 	_update_history_buttons()
 	_update_selection_action_buttons()
@@ -8279,8 +12143,22 @@ func _undo() -> void:
 func _redo() -> void:
 	if not _history.can_redo():
 		return
-	_history.push_undo(_canvas.get_image_copy())
-	_canvas.set_image(_history.pop_redo())
+	var entry: Variant = _history.pop_redo()
+	if _history.has_method("is_state_entry") and _history.is_state_entry(entry):
+		var current_state: Dictionary = _layer_session.capture_state() if _layer_session else {}
+		var next_state: Dictionary = _history.get_entry_state(entry)
+		if next_state.is_empty() or not _restore_layer_session(next_state):
+			if not next_state.is_empty():
+				_history.push_redo_state(next_state)
+			_set_status("Could not restore the next layer state.")
+			return
+		if not current_state.is_empty():
+			_history.push_undo_state(current_state)
+		_sync_canvas_to_active_layer()
+	else:
+		_history.push_undo(_canvas.get_image_copy())
+		if entry is Image:
+			_canvas.set_image(entry)
 	_refresh_canvas_visible_pixels_state()
 	_update_history_buttons()
 	_update_selection_action_buttons()
@@ -8288,8 +12166,27 @@ func _redo() -> void:
 
 
 func _save_png() -> void:
+	_prepare_layer_operation()
+	if _has_coordinated_3d_hierarchy():
+		_show_3d_batch_save_dialog(
+			SessionTransition.NONE,
+			PackedStringArray(),
+			false,
+			false,
+			true
+		)
+		return
+	if (
+		not _layer_document_path.is_empty()
+		and (not _texture_3d_session or not _texture_3d_session.has_active_session())
+	):
+		_save_layered_project_to_path(_layer_document_path)
+		return
 	if _canvas_mode_3d or (_texture_3d_session and _texture_3d_session.has_active_session()):
 		_confirm_save_3d_texture()
+		return
+	if not _layer_document_path.is_empty():
+		_save_layered_project_to_path(_layer_document_path)
 		return
 	if not _document_path.is_empty():
 		_save_2d_document_to_path(_document_path)
@@ -8307,17 +12204,189 @@ func _show_2d_save_as() -> void:
 
 
 func _save_as() -> void:
+	if _has_coordinated_3d_hierarchy():
+		_show_3d_batch_save_dialog(
+			SessionTransition.NONE,
+			PackedStringArray(),
+			false,
+			false,
+			true,
+			true
+		)
+		return
 	if _texture_3d_session and _texture_3d_session.has_active_session():
 		_show_3d_texture_save_as(false)
 		return
 	_show_2d_save_as()
 
 
+func _has_coordinated_3d_hierarchy() -> bool:
+	return (
+		_texture_3d_layer_coordinator != null
+		and _layer_session != null
+		and _layer_session.session_kind == "3d"
+	)
+
+
+func _save_layered_project() -> void:
+	if not _layer_session:
+		_set_status("There is no layer session to save.")
+		return
+	if not _layer_document_path.is_empty():
+		_save_layered_project_to_path(_layer_document_path)
+		return
+	if not _save_layered_dialog:
+		return
+	_save_layered_dialog.current_dir = _get_default_save_dir()
+	var default_name := (
+		_document_path.get_file().get_basename()
+		if not _document_path.is_empty()
+		else "gddraw_project"
+	)
+	_save_layered_dialog.current_file = default_name + ".gddraw"
+	_save_layered_dialog.popup_centered_ratio(0.75)
+
+
+func _save_layered_project_to_path(path: String) -> bool:
+	_prepare_layer_operation()
+	var normalized_path := _normalize_layer_document_path(path)
+	if normalized_path.is_empty():
+		_set_status("Choose a .gddraw path inside res:// and outside res://addons/GDDraw.")
+		return false
+	if _canvas:
+		_canvas.finish_text_draft(true)
+	_refresh_3d_layer_scene_dependency()
+	var result: Dictionary = _layer_document.save_session(_layer_session, normalized_path)
+	if not bool(result.get("ok", false)):
+		_set_status(str(result.get("message", "Could not save the layered project.")))
+		return false
+	_layer_document_path = normalized_path
+	_set_default_save_dir(normalized_path.get_base_dir())
+	_request_resource_filesystem_scan()
+	_sync_menu_state()
+	_set_status("Saved layered project " + normalized_path)
+	return true
+
+
+func _refresh_3d_layer_scene_dependency() -> bool:
+	if (
+		not _layer_session
+		or _layer_session.session_kind != "3d"
+		or not _plugin
+		or (not _texture_3d_layer_coordinator and not _texture_3d_session)
+	):
+		return false
+	var scene_root := _get_active_3d_document_scene_root()
+	var scene_path := _get_scene_root_resource_path(scene_root)
+	if not scene_root or not scene_path.begins_with("res://"):
+		return false
+	_layer_session.source_scene_path = scene_path
+	var scene_uid := ResourceLoader.get_resource_uid(scene_path)
+	_layer_session.source_scene_uid = str(scene_uid) if scene_uid > 0 else ""
+	if _texture_3d_layer_coordinator:
+		for paint_target in _layer_session.paint_targets:
+			var target_id: String = paint_target.target_id
+			var binding: Dictionary = paint_target.binding.duplicate(true)
+			var saved_members: Array = binding.get("members", [])
+			if saved_members.is_empty():
+				saved_members = [binding.duplicate(true)]
+			var runtime_members: Array = _texture_3d_layer_coordinator.target_members.get(target_id, [])
+			var updated_members: Array[Dictionary] = []
+			for member_index in range(saved_members.size()):
+				var saved_member: Dictionary = saved_members[member_index].duplicate(true)
+				var source := _get_runtime_source_for_saved_binding(saved_member, runtime_members, member_index)
+				var relative_path := _get_scene_relative_node_path(scene_root, source)
+				if not relative_path.is_empty():
+					saved_member["source_relative_path"] = relative_path
+				updated_members.push_back(saved_member)
+			if not updated_members.is_empty():
+				binding = updated_members[0].duplicate(true)
+				binding["members"] = updated_members
+				paint_target.binding = binding
+	elif _texture_3d_session and _layer_session.get_active_target():
+		var target = _layer_session.get_active_target()
+		var binding: Dictionary = target.binding.duplicate(true)
+		var relative_path := _get_scene_relative_node_path(scene_root, _texture_3d_session.source_node)
+		if not relative_path.is_empty():
+			binding["source_relative_path"] = relative_path
+			if binding.get("members", []) is Array and not (binding.get("members", []) as Array).is_empty():
+				var members: Array = binding.get("members", []).duplicate(true)
+				var first_member: Dictionary = members[0].duplicate(true)
+				first_member["source_relative_path"] = relative_path
+				members[0] = first_member
+				binding["members"] = members
+			target.binding = binding
+	return true
+
+
+func _get_runtime_source_for_saved_binding(
+	saved_member: Dictionary,
+	runtime_members: Array,
+	fallback_index: int
+) -> Node:
+	var binding_key := str(saved_member.get("key", ""))
+	for runtime_member_value in runtime_members:
+		if not runtime_member_value is Dictionary:
+			continue
+		var runtime_member: Dictionary = runtime_member_value
+		var descriptor: Dictionary = runtime_member.get("descriptor", {})
+		if not binding_key.is_empty() and str(descriptor.get("key", "")) != binding_key:
+			continue
+		var texture_session = runtime_member.get("session")
+		return texture_session.source_node if texture_session and is_instance_valid(texture_session.source_node) else null
+	if fallback_index >= 0 and fallback_index < runtime_members.size():
+		var fallback_member: Dictionary = runtime_members[fallback_index]
+		var fallback_session = fallback_member.get("session")
+		if fallback_session and is_instance_valid(fallback_session.source_node):
+			return fallback_session.source_node
+	return null
+
+
+func _get_scene_relative_node_path(scene_root: Node, source: Node) -> String:
+	if not scene_root or not is_instance_valid(source):
+		return ""
+	if source == scene_root:
+		return "."
+	if not scene_root.is_ancestor_of(source):
+		return ""
+	return str(scene_root.get_path_to(source))
+
+
+func _on_layered_project_path_selected(path: String) -> void:
+	var succeeded := _save_layered_project_to_path(path)
+	if _save_layered_for_3d_transition:
+		var transition := _layered_save_transition
+		_save_layered_for_3d_transition = false
+		_layered_save_transition = SessionTransition.NONE
+		if succeeded:
+			_complete_saved_3d_transition(transition)
+		elif _session_replace_dialog:
+			_session_replace_dialog.call_deferred("popup_centered")
+		return
+	if _save_2d_for_3d_transition and _is_starting_3d_transition():
+		_save_2d_for_3d_transition = false
+		if succeeded:
+			_continue_pending_session_transition()
+		elif _document_session_dialog:
+			_document_session_dialog.call_deferred("popup_centered")
+
+
+func _cancel_layered_project_save() -> void:
+	if _save_layered_for_3d_transition:
+		_save_layered_for_3d_transition = false
+		_layered_save_transition = SessionTransition.NONE
+		if _session_replace_dialog:
+			_session_replace_dialog.call_deferred("popup_centered")
+		_set_status("Layered-project save canceled; the active 3D session is unchanged.")
+		return
+	_cancel_2d_save_as()
+
+
 func _show_3d_texture_save_as(for_pending_transition: bool) -> void:
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		_set_status("Start a 3D texture session before using texture Save As.")
 		return
-	if _texture_save_stage != TextureSaveStage.IDLE:
+	if _texture_save_stage != TextureSaveStage.IDLE or _batch_texture_save_stage != BatchTextureSaveStage.IDLE:
 		_set_status("A 3D texture save is already in progress.")
 		return
 	if not _save_3d_as_dialog:
@@ -8372,8 +12441,281 @@ func _show_load_png_dialog() -> void:
 		_open_dialog.popup_centered_ratio(0.75)
 
 
-func _load_png(path: String) -> void:
+func _load_document_path(path: String) -> void:
+	if path.get_extension().to_lower() == "gddraw":
+		if _request_session_transition(SessionTransition.LOAD_LAYER_DOCUMENT, path):
+			return
+		if not (_texture_3d_session and _texture_3d_session.has_active_session()) and _is_2d_document_dirty():
+			_pending_session_transition = SessionTransition.LOAD_LAYER_DOCUMENT
+			_pending_session_path = path
+			_update_document_session_preview()
+			if _document_session_dialog:
+				_document_session_dialog.call_deferred("popup_centered")
+			return
+		_load_layered_document_now(path)
+		return
 	_load_image_file(path)
+
+
+func _load_png(path: String) -> void:
+	# Retained for compatibility with tests and older scene signal connections.
+	_load_document_path(path)
+
+
+func _load_layered_document_now(path: String) -> void:
+	var candidate = _make_script_instance(LAYER_SESSION_SCRIPT_PATH, RefCounted.new())
+	var loaded: Dictionary = _layer_document.load_into_session(path, candidate)
+	if not bool(loaded.get("ok", false)):
+		_set_status(str(loaded.get("message", "Could not open the layered project.")))
+		return
+	if candidate.session_kind == "3d":
+		_open_loaded_3d_layered_document(candidate, path)
+		return
+	_activate_loaded_layered_document(candidate, path)
+
+
+func _open_loaded_3d_layered_document(candidate, path: String) -> void:
+	var source_scene_path := _get_saved_3d_source_scene_path(candidate)
+	var scene_root := _get_active_3d_document_scene_root()
+	var active_scene_path := _get_scene_root_resource_path(scene_root)
+	if source_scene_path.is_empty() or _scene_resource_paths_match(source_scene_path, active_scene_path):
+		if _try_activate_reattached_layered_document(candidate, path, scene_root):
+			return
+		if source_scene_path.is_empty():
+			return
+	var warning := (
+		"The source scene is open, but its saved object bindings could not be reattached."
+		if _scene_resource_paths_match(source_scene_path, active_scene_path)
+		else ""
+	)
+	_set_pending_layered_3d_document(candidate, path, source_scene_path, warning)
+	_show_pending_layered_3d_source_dialog()
+
+
+func _try_activate_reattached_layered_document(candidate, path: String, scene_root: Node) -> bool:
+	if not scene_root:
+		_set_status("Open or relink the source scene before opening this 3D layered project.")
+		return false
+	var coordinator = _make_script_instance(LAYER_3D_COORDINATOR_SCRIPT_PATH, RefCounted.new())
+	var reattached: Dictionary = coordinator.restore_session(candidate, _plugin, scene_root)
+	if str(reattached.get("status", "error")) != "ok":
+		if coordinator and coordinator.has_method("clear"):
+			coordinator.clear()
+		_set_status(str(reattached.get("message", "Could not reattach the saved 3D targets to the active scene.")))
+		return false
+	_activate_loaded_layered_document(candidate, path, coordinator)
+	return true
+
+
+func _activate_loaded_layered_document(candidate, path: String, coordinator = null, layers_only := false) -> void:
+	if candidate.session_kind == "3d" and not layers_only and _saved_2d_workspace.is_empty():
+		_capture_2d_workspace()
+	_clear_3d_paint_mesh()
+	if _texture_3d_layer_coordinator:
+		_texture_3d_layer_coordinator.clear()
+	elif _texture_3d_session:
+		_texture_3d_session.clear()
+	_reset_3d_scene_sync_state()
+	_texture_3d_layer_coordinator = coordinator
+	_layer_thumbnail_cache.clear()
+	_layer_session = candidate
+	_texture_3d_session = coordinator.get_active_texture_session() if coordinator else null
+	# This is a document replacement, so discard TreeItems from the preceding
+	# 2D/3D session before stable IDs are used for selection synchronization.
+	_refresh_layers_tree()
+	_layer_document_path = path
+	if candidate.session_kind != "3d" or layers_only:
+		_saved_2d_workspace.clear()
+		_saved_2d_history.clear()
+		_saved_2d_layer_session.clear()
+		_saved_2d_layer_document_path = ""
+		_set_2d_document_baseline("", candidate.get_active_target().composite())
+	if _canvas:
+		_canvas.set_display_compositor(
+			Callable(self, "_compose_active_layer_for_canvas"),
+			Callable(self, "_compose_active_layer_region_for_canvas")
+		)
+	_sync_canvas_to_active_layer()
+	if coordinator and not layers_only:
+		var primary_binding: Dictionary = coordinator.get_primary_binding_for_target(candidate.active_target_id)
+		_set_active_3d_binding(str(primary_binding.get("binding_key", "")), true)
+	_sync_active_3d_uv_overlay()
+	_refresh_canvas_visible_pixels_state()
+	_history.clear()
+	_update_history_buttons()
+	_update_selection_action_buttons()
+	_update_canvas_resize_control_availability()
+	_sync_3d_paint_view()
+	if coordinator and not layers_only:
+		_initialize_default_3d_scene_sync_state()
+	_update_3d_context_control_visibility()
+	_update_3d_session_status()
+	_sync_menu_state()
+	if layers_only:
+		_select_canvas_mode(CANVAS_MODE_2D)
+		_set_status("Opened embedded layers without a 3D source scene. Relink the document to restore its 3D preview.")
+	else:
+		_set_status("Opened layered project " + path)
+	_clear_pending_layered_3d_document()
+
+
+func _set_pending_layered_3d_document(
+	candidate,
+	document_path: String,
+	source_scene_path: String,
+	warning := ""
+) -> void:
+	_pending_layered_3d_candidate = candidate
+	_pending_layered_3d_document_path = document_path
+	_pending_layered_3d_source_scene_path = source_scene_path
+	_pending_layered_3d_warning = warning
+	_pending_layered_3d_scene_open_elapsed = 0.0
+	_pending_layered_3d_waiting_for_scene = false
+
+
+func _clear_pending_layered_3d_document() -> void:
+	_pending_layered_3d_candidate = null
+	_pending_layered_3d_document_path = ""
+	_pending_layered_3d_source_scene_path = ""
+	_pending_layered_3d_warning = ""
+	_pending_layered_3d_scene_open_elapsed = 0.0
+	_pending_layered_3d_waiting_for_scene = false
+
+
+func _show_pending_layered_3d_source_dialog() -> void:
+	if not _layered_3d_source_dialog or not _pending_layered_3d_candidate:
+		return
+	var source_path := _pending_layered_3d_source_scene_path
+	var source_exists := _scene_resource_exists(source_path)
+	_layered_3d_source_path_label.text = source_path
+	var warning := _pending_layered_3d_warning
+	if not source_exists:
+		warning = "The original source scene can't be found. Open Source Scene and Continue is unavailable."
+	_layered_3d_source_warning_label.text = warning
+	_layered_3d_source_warning_label.visible = not warning.is_empty()
+	_layered_3d_source_dialog.get_ok_button().disabled = not source_exists
+	_layered_3d_source_dialog.get_ok_button().tooltip_text = (
+		"Open the recorded source scene and restore its 3D bindings."
+		if source_exists
+		else "The recorded source scene does not exist at this project path."
+	)
+	_layered_3d_source_dialog.call_deferred("popup_centered")
+
+
+func _open_pending_layered_3d_source_scene() -> void:
+	if not _pending_layered_3d_candidate:
+		return
+	if not _scene_resource_exists(_pending_layered_3d_source_scene_path):
+		_pending_layered_3d_warning = "The original source scene can't be found. Open Source Scene and Continue is unavailable."
+		_show_pending_layered_3d_source_dialog()
+		return
+	if not _plugin or not _plugin.get_editor_interface():
+		_pending_layered_3d_warning = "The source scene can only be opened from an active Godot editor session."
+		_show_pending_layered_3d_source_dialog()
+		return
+	_pending_layered_3d_waiting_for_scene = true
+	_pending_layered_3d_scene_open_elapsed = 0.0
+	_set_status("Opening source scene " + _pending_layered_3d_source_scene_path)
+	_plugin.get_editor_interface().open_scene_from_path(_pending_layered_3d_source_scene_path)
+
+
+func _advance_pending_layered_3d_scene_open(delta: float) -> void:
+	if not _pending_layered_3d_waiting_for_scene or not _pending_layered_3d_candidate:
+		return
+	_pending_layered_3d_scene_open_elapsed += delta
+	var scene_root := _get_active_3d_document_scene_root()
+	if _scene_resource_paths_match(
+		_get_scene_root_resource_path(scene_root),
+		_pending_layered_3d_source_scene_path
+	):
+		_pending_layered_3d_waiting_for_scene = false
+		if not _try_activate_reattached_layered_document(
+			_pending_layered_3d_candidate,
+			_pending_layered_3d_document_path,
+			scene_root
+		):
+			_pending_layered_3d_warning = "The source scene opened, but one or more saved object bindings could not be restored."
+			_show_pending_layered_3d_source_dialog()
+		return
+	if _pending_layered_3d_scene_open_elapsed < LAYERED_3D_SCENE_OPEN_TIMEOUT:
+		return
+	_pending_layered_3d_waiting_for_scene = false
+	_pending_layered_3d_warning = "Godot did not finish opening the source scene. The layered document remains unchanged."
+	_show_pending_layered_3d_source_dialog()
+
+
+func _on_layered_3d_source_custom_action(action: StringName) -> void:
+	if not _pending_layered_3d_candidate:
+		return
+	if _layered_3d_source_dialog:
+		_layered_3d_source_dialog.hide()
+	match action:
+		&"relink_current_scene":
+			var scene_root := _get_active_3d_document_scene_root()
+			if not _try_activate_reattached_layered_document(
+				_pending_layered_3d_candidate,
+				_pending_layered_3d_document_path,
+				scene_root
+			):
+				_pending_layered_3d_warning = "The current scene does not contain compatible objects at the saved relative paths."
+				_show_pending_layered_3d_source_dialog()
+		&"open_layers_only":
+			_activate_loaded_layered_document(
+				_pending_layered_3d_candidate,
+				_pending_layered_3d_document_path,
+				null,
+				true
+			)
+
+
+func _cancel_pending_layered_3d_document() -> void:
+	if not _pending_layered_3d_candidate:
+		return
+	_clear_pending_layered_3d_document()
+	_set_status("Kept the current workspace unchanged.")
+
+
+func _get_active_3d_document_scene_root() -> Node:
+	if _plugin and _plugin.get_editor_interface():
+		return _plugin.get_editor_interface().get_edited_scene_root()
+	return get_tree().root if get_tree() else null
+
+
+func _get_scene_root_resource_path(scene_root: Node) -> String:
+	if not scene_root:
+		return ""
+	return str(scene_root.scene_file_path).strip_edges().replace("\\", "/")
+
+
+func _get_saved_3d_source_scene_path(session) -> String:
+	if not session:
+		return ""
+	var saved_path := str(session.source_scene_path).strip_edges().replace("\\", "/")
+	if _scene_resource_exists(saved_path):
+		return saved_path
+	var saved_uid := str(session.source_scene_uid).strip_edges()
+	if saved_uid.is_valid_int():
+		var uid := int(saved_uid)
+		if uid > 0 and ResourceUID.has_id(uid):
+			var uid_path := str(ResourceUID.get_id_path(uid)).strip_edges().replace("\\", "/")
+			if _scene_resource_exists(uid_path):
+				session.source_scene_path = uid_path
+				return uid_path
+	return saved_path
+
+
+func _scene_resource_exists(path: String) -> bool:
+	var normalized := path.strip_edges().replace("\\", "/")
+	return (
+		normalized.begins_with("res://")
+		and (FileAccess.file_exists(normalized) or ResourceLoader.exists(normalized, "PackedScene"))
+	)
+
+
+func _scene_resource_paths_match(left: String, right: String) -> bool:
+	var normalized_left := left.strip_edges().replace("\\", "/").to_lower()
+	var normalized_right := right.strip_edges().replace("\\", "/").to_lower()
+	return not normalized_left.is_empty() and normalized_left == normalized_right
 
 
 func _load_image_file(path: String) -> void:
@@ -8404,12 +12746,15 @@ func _load_image(image: Image, label: String) -> void:
 func _load_image_now(image: Image, label: String, end_3d_session := false) -> void:
 	if not _canvas:
 		return
+	if not _dropped_layer_import_context.is_empty():
+		_canvas.cancel_imported_floating_selection()
 	if end_3d_session:
 		_clear_3d_texture_session_state()
 	_push_undo(_canvas.get_image_copy())
 	_history.clear_redo()
-	_canvas.set_image(image)
+	_replace_canvas_layer_session(image, "2d", label.get_file().get_basename(), "RGBA", "rgba")
 	_refresh_canvas_visible_pixels_state()
+	_layer_document_path = ""
 	_set_2d_document_baseline(_get_document_path_from_label(label), image)
 	_update_history_buttons()
 	_update_selection_action_buttons()
@@ -8417,13 +12762,6 @@ func _load_image_now(image: Image, label: String, end_3d_session := false) -> vo
 
 
 func _on_canvas_image_drop_requested(data: Variant) -> void:
-	var dropped_mesh: Node3D = _extract_drop_mesh_instance(data)
-	if dropped_mesh:
-		_open_3d_session_picker(dropped_mesh)
-		return
-	if _canvas_mode_3d and (not _texture_3d_session or not _texture_3d_session.has_active_session()):
-		_set_status("Drop a MeshInstance3D, supported CSG shape, or a parent containing one onto GDDraw in 3D mode.")
-		return
 	var drop_image_path := _extract_drop_image_path(data)
 	var drop_image: Image = null
 	var drop_label := drop_image_path
@@ -8431,70 +12769,188 @@ func _on_canvas_image_drop_requested(data: Variant) -> void:
 		drop_image = _extract_drop_image(data)
 		drop_label = "dropped texture"
 	if drop_image_path.is_empty() and drop_image == null:
+		if _open_3d_drop_session_picker(data):
+			return
+		if _canvas_mode_3d and (not _texture_3d_session or not _texture_3d_session.has_active_session()):
+			_set_status("Drop an individual editable 3D surface or a hierarchy root onto GDDraw in 3D mode.")
+			return
 		_set_status("Drop a texture or image file onto the canvas.")
 		return
-	if _texture_3d_session and _texture_3d_session.has_active_session():
-		if not drop_image_path.is_empty():
-			_load_image_file(drop_image_path)
-		else:
-			_load_image(drop_image, drop_label)
+	if _canvas_mode_3d and (not _texture_3d_session or not _texture_3d_session.has_active_session()):
+		_set_status("Start a 3D texture session before importing an image into its layer stack.")
 		return
-	if _canvas and _canvas.has_visible_pixels():
-		_set_pending_drop(drop_image_path, drop_image, drop_label)
-		if _drop_replace_dialog:
-			_drop_replace_dialog.popup_centered()
+	if _should_import_dropped_image_as_layer():
+		_import_dropped_image_as_layer(drop_image_path, drop_image, drop_label)
 		return
-	_load_pending_drop(drop_image_path, drop_image, drop_label)
+	_open_dropped_image_as_document(drop_image_path, drop_image, drop_label)
 
 
 func _on_3d_mesh_drop_requested(data: Variant) -> void:
-	var dropped_mesh: Node3D = _extract_drop_mesh_instance(data)
-	if dropped_mesh:
-		_open_3d_session_picker(dropped_mesh)
+	if _open_3d_drop_session_picker(data):
 		return
-	_set_status("That drop did not resolve to an editable mesh or supported CSG shape in the edited scene.")
+	_set_status("That drop did not resolve to an editable 3D surface or hierarchy root in the edited scene.")
 
 
-func _replace_canvas_with_pending_drop() -> void:
-	if not _has_pending_drop():
-		return
-	_load_pending_drop(_pending_drop_image_path, _pending_drop_image, _pending_drop_label)
-	_clear_pending_drop()
+func _open_3d_drop_session_picker(data: Variant) -> bool:
+	var dropped_roots := _extract_drop_scene_roots(data)
+	if not dropped_roots.is_empty():
+		_open_3d_scope_picker(dropped_roots)
+		return true
+	# Resource drops do not carry a Scene node root. Preserve the prior mesh
+	# lookup fallback, but use the scope picker so direct meshes and Scene drops
+	# share one import workflow.
+	var dropped_surface: Node3D = _extract_drop_mesh_instance(data)
+	if dropped_surface:
+		_open_3d_scope_picker([dropped_surface])
+		return true
+	return false
 
 
-func _on_drop_replace_custom_action(action: StringName) -> void:
-	if action != &"save_replace" or not _has_pending_drop():
-		return
-	_load_after_save_path = _pending_drop_image_path
-	_load_after_save_image = _pending_drop_image.duplicate() if _pending_drop_image else null
-	_load_after_save_label = _pending_drop_label
-	_clear_pending_drop()
-	if _drop_replace_dialog:
-		_drop_replace_dialog.hide()
-	_save_png()
-
-
-func _set_pending_drop(path: String, image: Image, label: String) -> void:
-	_pending_drop_image_path = path
-	_pending_drop_image = image.duplicate() if image else null
-	_pending_drop_label = label
-
-
-func _clear_pending_drop() -> void:
-	_pending_drop_image_path = ""
-	_pending_drop_image = null
-	_pending_drop_label = ""
-
-
-func _has_pending_drop() -> bool:
-	return not _pending_drop_image_path.is_empty() or _pending_drop_image != null
-
-
-func _load_pending_drop(path: String, image: Image, label: String) -> void:
+func _open_dropped_image_as_document(path: String, image: Image, label: String) -> void:
 	if not path.is_empty():
 		_load_image_file(path)
 	elif image:
 		_load_image(image, label)
+
+
+func _should_import_dropped_image_as_layer() -> bool:
+	if not _layer_session or not _layer_session.get_active_target():
+		return false
+	if _texture_3d_session and _texture_3d_session.has_active_session():
+		return true
+	if not _document_path.is_empty() or not _layer_document_path.is_empty():
+		return true
+	if _layer_session.has_method("requires_layered_persistence") and _layer_session.requires_layered_persistence():
+		return true
+	return _canvas != null and _canvas.has_visible_pixels()
+
+
+func _import_dropped_image_as_layer(
+	path: String,
+	image: Image,
+	label: String,
+	tree_destination: Dictionary = {}
+) -> bool:
+	if not _layer_session:
+		return false
+	var destination_target_id := str(tree_destination.get("target_id", ""))
+	var target = (
+		_layer_session.get_target(destination_target_id)
+		if not destination_target_id.is_empty()
+		else _layer_session.get_active_target()
+	)
+	if not target:
+		return false
+	var source := _load_dropped_layer_source(path, image)
+	if not source:
+		_set_status("Could not load the dropped image as a layer.")
+		return false
+	var context := _get_selected_layers_context()
+	var parent_group_id := str(tree_destination.get("parent_group_id", ""))
+	var insertion_index := int(tree_destination.get("index", 0))
+	if tree_destination.is_empty() and str(context.get("target_id", target.target_id)) == target.target_id:
+		var selected_node = target.find_node(str(context.get("node_id", "")))
+		if selected_node:
+			if selected_node.is_group():
+				parent_group_id = selected_node.id
+			else:
+				var location: Dictionary = target.get_node_location(selected_node.id)
+				parent_group_id = str(location.get("parent_group_id", ""))
+				insertion_index = int(location.get("index", 0))
+	_prepare_layer_operation()
+	target = (
+		_layer_session.get_target(destination_target_id)
+		if not destination_target_id.is_empty()
+		else _layer_session.get_active_target()
+	)
+	if not target:
+		return false
+	var previous_state: Dictionary = _layer_session.capture_state()
+	var layer_name := _get_dropped_layer_name(path, label)
+	var oversized: bool = source.get_width() > target.size.x or source.get_height() > target.size.y
+	var layer_image: Image = null if oversized else source
+	var layer_origin := Vector2i(
+		floori(float(target.size.x - source.get_width()) * 0.5),
+		floori(float(target.size.y - source.get_height()) * 0.5)
+	)
+	var layer_id: String = target.add_paint_layer(
+		layer_name,
+		layer_image,
+		parent_group_id,
+		insertion_index,
+		layer_origin if not oversized else Vector2i.ZERO
+	)
+	if layer_id.is_empty():
+		_set_status("Could not add the dropped image at the selected layer location; its group may be locked.")
+		return false
+	if not _select_paint_layer(target.target_id, layer_id):
+		target.remove_node(layer_id)
+		_set_status("Could not activate the dropped image layer.")
+		return false
+	var selection := {
+		"kind": "paint",
+		"target_id": target.target_id,
+		"node_id": layer_id,
+	}
+	if tree_destination.has("group_id"):
+		selection["group_id"] = str(tree_destination.get("group_id", ""))
+	elif context.has("group_id"):
+		selection["group_id"] = str(context.get("group_id", ""))
+	if oversized:
+		_dropped_layer_import_context = {
+			"previous_state": previous_state,
+			"target_id": target.target_id,
+			"layer_id": layer_id,
+			"layer_name": layer_name,
+		}
+		_select_tool(GDDrawCanvasControl.ToolMode.SELECT)
+		if not _canvas.begin_imported_floating_selection(source):
+			var failed_context := _dropped_layer_import_context.duplicate()
+			_dropped_layer_import_context.clear()
+			_restore_canceled_dropped_layer_import(failed_context)
+			_set_status("Could not start a transform for the oversized dropped image.")
+			return false
+		_refresh_layers_tree(selection)
+		_refresh_canvas_visible_pixels_state()
+		_update_selection_action_buttons()
+		_sync_3d_paint_texture(_get_canvas_output_image())
+		_update_3d_session_status(_get_canvas_output_image())
+		_canvas.call_deferred("frame_floating_selection")
+		_set_status("Dropped %s as a floating layer. Move, scale, or rotate it; press Enter to commit or Escape to cancel." % layer_name)
+		return true
+	_push_layer_session_state_undo(previous_state)
+	_refresh_layers_tree(selection)
+	_refresh_canvas_visible_pixels_state()
+	_update_selection_action_buttons()
+	var status_template := (
+		"Added %s to the layer tree."
+		if not tree_destination.is_empty()
+		else "Added %s as a centered layer."
+	)
+	_set_status(status_template % layer_name)
+	return true
+
+
+func _load_dropped_layer_source(path: String, image: Image) -> Image:
+	var source := image.duplicate() if image else null
+	if not source and not path.is_empty():
+		source = Image.new()
+		var load_path := ProjectSettings.globalize_path(path) if path.begins_with("res://") else path
+		if source.load(load_path) != OK:
+			return null
+	if not source or source.is_empty():
+		return null
+	if source.get_format() != Image.FORMAT_RGBA8:
+		source.convert(Image.FORMAT_RGBA8)
+	if source.has_mipmaps():
+		source.clear_mipmaps()
+	return source
+
+
+func _get_dropped_layer_name(path: String, label: String) -> String:
+	var candidate := path.get_file() if not path.is_empty() else label.get_file()
+	candidate = candidate.get_basename().strip_edges()
+	return candidate if not candidate.is_empty() else "Imported Layer"
 
 
 func _extract_drop_image_path(data: Variant) -> String:
@@ -8598,83 +13054,332 @@ func _extract_image_from_dragged_nodes(nodes_data: Variant) -> Image:
 
 
 func _load_selected_3d_mesh_texture() -> void:
-	var surface_target := _get_selected_3d_surface_node()
-	if surface_target:
-		_open_3d_session_picker(surface_target)
-	else:
-		_set_status("Select a MeshInstance3D, supported CSG shape, or a parent containing one, then choose Use Selected 3D Surface.")
+	var selected_nodes := _get_selected_scene_nodes()
+	if not selected_nodes.is_empty():
+		_open_3d_scope_picker(selected_nodes)
+		return
+	_set_status("Select an individual editable 3D surface or a hierarchy root, then choose Use Selected 3D Object.")
+
+
+func _get_selected_scene_nodes() -> Array[Node]:
+	var result: Array[Node] = []
+	if not _plugin:
+		return result
+	for candidate in _plugin.get_editor_interface().get_selection().get_selected_nodes():
+		if candidate is Node and is_instance_valid(candidate):
+			result.push_back(candidate)
+	return result
+
+
+func _open_3d_scope_picker(selected_roots: Array[Node]) -> void:
+	if selected_roots.is_empty():
+		_set_status("Select at least one scene object to inspect for paint targets.")
+		return
+	_session_picker_roots.assign(selected_roots)
+	_session_picker_layer_discovery.clear()
+	if not _session_picker_dialog or not _session_picker_tree:
+		return
+	_refresh_3d_scope_picker()
+	_session_picker_dialog.size = Vector2i(720, 500)
+	_session_picker_dialog.popup_centered(Vector2i(720, 500))
+
+
+func _refresh_3d_scope_picker() -> void:
+	if _session_picker_roots.is_empty() or not _session_picker_tree:
+		return
+	var discovery_helper = _make_script_instance(LAYER_3D_DISCOVERY_SCRIPT_PATH, RefCounted.new())
+	var scope := (
+		GDDraw3DLayerDiscovery.Scope.EXPLICIT_SELECTION
+		if _session_picker_roots.size() > 1
+		else GDDraw3DLayerDiscovery.Scope.SELECTED_HIERARCHY
+	)
+	_session_picker_layer_discovery = discovery_helper.discover(_session_picker_roots, scope)
+	_rebuild_3d_session_picker_tree()
 
 
 func _open_3d_session_picker(surface_target: Node3D) -> void:
 	if not surface_target:
 		_set_status("Select or drop an editable MeshInstance3D or supported CSG shape.")
 		return
-	var inspector = _make_script_instance(TEXTURE_3D_SESSION_SCRIPT_PATH, RefCounted.new())
-	var discovery: Dictionary = inspector.discover_target(surface_target)
-	if str(discovery.get(GDDraw3DTextureSessionResource.STATUS, "")) != GDDraw3DTextureSessionResource.STATUS_OK:
-		_set_status(str(discovery.get(GDDraw3DTextureSessionResource.MESSAGE, "Could not inspect 3D surface materials.")))
-		return
-	_session_picker_mesh = surface_target
-	_session_picker_choices.assign(discovery.get(GDDraw3DTextureSessionResource.CHOICES, []))
-	if not _session_picker_dialog or not _session_picker_options:
-		return
-	_session_picker_target_label.text = "Target surface: %s (%s)" % [surface_target.name, surface_target.get_class()]
-	_session_picker_options.clear()
-	for index in range(_session_picker_choices.size()):
-		var choice := _session_picker_choices[index]
-		_session_picker_options.add_item(str(choice.get("label", "Material choice")))
-		if not bool(choice.get("supported", false)):
-			_session_picker_options.set_item_disabled(index, true)
-	var first_supported := -1
-	for index in range(_session_picker_choices.size()):
-		if bool(_session_picker_choices[index].get("supported", false)):
-			first_supported = index
-			break
-	if first_supported >= 0:
-		_session_picker_options.select(first_supported)
-	else:
-		if not _session_picker_choices.is_empty():
-			_session_picker_options.select(0)
-	_on_3d_session_picker_choice_selected(first_supported if first_supported >= 0 else 0)
-	_session_picker_dialog.size = Vector2i(600, 340)
-	_session_picker_dialog.popup_centered(Vector2i(600, 340))
+	_open_3d_scope_picker([surface_target])
 
 
-func _on_3d_session_picker_choice_selected(index: int) -> void:
-	if index < 0 or index >= _session_picker_choices.size():
+func _rebuild_3d_session_picker_tree() -> void:
+	if not _session_picker_tree:
 		return
-	var choice := _session_picker_choices[index]
-	var supported := bool(choice.get("supported", false))
-	_session_picker_reason_label.text = str(choice.get("reason", ""))
+	_session_picker_rebuilding = true
+	_session_picker_tree.set_block_signals(true)
+	_session_picker_tree.clear()
+	var root := _session_picker_tree.create_item()
+	var group_items := {}
+	for group_value in _session_picker_layer_discovery.get("groups", []):
+		if not group_value is Dictionary:
+			continue
+		var group: Dictionary = group_value
+		var group_key := str(group.get("key", ""))
+		var parent_key := str(group.get("parent_key", ""))
+		var parent: TreeItem = group_items.get(parent_key, root)
+		var item := _session_picker_tree.create_item(parent)
+		var label := str(group.get("label", "3D Object"))
+		item.set_text(SESSION_PICKER_NAME_COLUMN, label)
+		item.set_text_overrun_behavior(SESSION_PICKER_NAME_COLUMN, TextServer.OVERRUN_TRIM_ELLIPSIS)
+		item.set_cell_mode(SESSION_PICKER_INCLUDE_COLUMN, TreeItem.CELL_MODE_CHECK)
+		item.set_editable(SESSION_PICKER_INCLUDE_COLUMN, true)
+		item.set_checked(SESSION_PICKER_INCLUDE_COLUMN, true)
+		item.set_metadata(SESSION_PICKER_NAME_COLUMN, {
+			"kind": "group",
+			"key": group_key,
+			"reason": "Check or clear %s to include or exclude all compatible textures beneath it." % label,
+		})
+		item.set_tooltip_text(SESSION_PICKER_NAME_COLUMN, str(item.get_metadata(SESSION_PICKER_NAME_COLUMN).get("reason", "")))
+		item.set_tooltip_text(SESSION_PICKER_INCLUDE_COLUMN, "Include or exclude %s and its compatible textures" % label)
+		var icon_name := _get_object_group_scene_icon_name({"source_class": str(group.get("class_name", ""))})
+		var icon := _get_godot_layer_icon(icon_name, 16) if not icon_name.is_empty() else null
+		item.set_icon(SESSION_PICKER_NAME_COLUMN, icon if icon else _get_layer_tree_icon("circle-small_0.svg", 16))
+		item.set_icon_max_width(SESSION_PICKER_NAME_COLUMN, 16)
+		item.set_collapsed(false)
+		group_items[group_key] = item
+	for target_value in _session_picker_layer_discovery.get("targets", []):
+		if not target_value is Dictionary:
+			continue
+		var target: Dictionary = target_value
+		var parent: TreeItem = group_items.get(str(target.get("group_key", "")), root)
+		var item := _session_picker_tree.create_item(parent)
+		var choice: Dictionary = target.get("choice", {})
+		var label := str(choice.get("label", target.get("label", "Material · Albedo")))
+		var reason := str(choice.get("reason", "Ready to edit this albedo texture."))
+		item.set_text(SESSION_PICKER_NAME_COLUMN, label)
+		item.set_text_overrun_behavior(SESSION_PICKER_NAME_COLUMN, TextServer.OVERRUN_TRIM_ELLIPSIS)
+		item.set_cell_mode(SESSION_PICKER_INCLUDE_COLUMN, TreeItem.CELL_MODE_CHECK)
+		item.set_editable(SESSION_PICKER_INCLUDE_COLUMN, true)
+		item.set_checked(SESSION_PICKER_INCLUDE_COLUMN, true)
+		item.set_metadata(SESSION_PICKER_NAME_COLUMN, {
+			"kind": "target",
+			"key": str(target.get("key", "")),
+			"reason": reason,
+		})
+		var texture_path := str(target.get("texture_path", ""))
+		item.set_tooltip_text(SESSION_PICKER_NAME_COLUMN, "%s\n%s" % [reason, texture_path] if not texture_path.is_empty() else reason)
+		item.set_tooltip_text(SESSION_PICKER_INCLUDE_COLUMN, "Include or exclude this texture")
+		item.set_icon(SESSION_PICKER_NAME_COLUMN, _get_layer_tree_icon("circle-small_0.svg", 16))
+		item.set_icon_max_width(SESSION_PICKER_NAME_COLUMN, 16)
+	for issue_value in _session_picker_layer_discovery.get("issues", []):
+		if not issue_value is Dictionary:
+			continue
+		var issue: Dictionary = issue_value
+		var issue_parent_key := str(issue.get("group_key", issue.get("source_key", "")))
+		var parent: TreeItem = group_items.get(issue_parent_key, root)
+		var item := _session_picker_tree.create_item(parent)
+		var source_node: Node = issue.get("source_node", null)
+		var label := str(issue.get("label", source_node.name if is_instance_valid(source_node) else "Unavailable target"))
+		var reason := str(issue.get("reason", "This target is not currently editable."))
+		item.set_text(SESSION_PICKER_NAME_COLUMN, "%s (Unavailable)" % label)
+		item.set_text_overrun_behavior(SESSION_PICKER_NAME_COLUMN, TextServer.OVERRUN_TRIM_ELLIPSIS)
+		item.set_editable(SESSION_PICKER_INCLUDE_COLUMN, false)
+		item.set_custom_color(SESSION_PICKER_NAME_COLUMN, Color(0.92, 0.56, 0.48))
+		item.set_metadata(SESSION_PICKER_NAME_COLUMN, {"kind": "issue", "reason": reason})
+		item.set_tooltip_text(SESSION_PICKER_NAME_COLUMN, reason)
+	_refresh_3d_session_picker_group_checks(root)
+	_session_picker_tree.set_block_signals(false)
+	_session_picker_rebuilding = false
+	var root_names := PackedStringArray()
+	for selected_root in _session_picker_roots:
+		if is_instance_valid(selected_root):
+			root_names.push_back(str(selected_root.name))
+	_session_picker_target_label.text = "Hierarchy: %s" % ", ".join(root_names)
+	_session_picker_reason_label.text = (
+		"All compatible textures are selected by default. Clear any object or material you do not want to bring into GDDraw."
+		if str(_session_picker_layer_discovery.get("status", "error")) == "ok"
+		else str(_session_picker_layer_discovery.get("message", "No compatible textures were found."))
+	)
+	_update_3d_session_picker_selection_state()
+
+
+func _refresh_3d_session_picker_group_checks(item: TreeItem) -> Dictionary:
+	if not item:
+		return {"total": 0, "checked": 0}
+	var metadata: Variant = item.get_metadata(SESSION_PICKER_NAME_COLUMN)
+	var kind := str(metadata.get("kind", "")) if metadata is Dictionary else ""
+	if kind == "target":
+		return {"total": 1, "checked": 1 if item.is_checked(SESSION_PICKER_INCLUDE_COLUMN) else 0}
+	if kind == "issue":
+		return {"total": 0, "checked": 0}
+	var total := 0
+	var checked := 0
+	var child := item.get_first_child()
+	while child:
+		var counts := _refresh_3d_session_picker_group_checks(child)
+		total += int(counts.get("total", 0))
+		checked += int(counts.get("checked", 0))
+		child = child.get_next()
+	if kind == "group":
+		item.set_editable(SESSION_PICKER_INCLUDE_COLUMN, total > 0)
+		item.set_checked(SESSION_PICKER_INCLUDE_COLUMN, total > 0 and checked == total)
+		item.set_indeterminate(SESSION_PICKER_INCLUDE_COLUMN, checked > 0 and checked < total)
+	return {"total": total, "checked": checked}
+
+
+func _set_3d_session_picker_descendants_checked(item: TreeItem, checked: bool) -> void:
+	if not item:
+		return
+	var metadata: Variant = item.get_metadata(SESSION_PICKER_NAME_COLUMN)
+	var kind := str(metadata.get("kind", "")) if metadata is Dictionary else ""
+	if kind in ["group", "target"] and item.is_editable(SESSION_PICKER_INCLUDE_COLUMN):
+		item.set_checked(SESSION_PICKER_INCLUDE_COLUMN, checked)
+		item.set_indeterminate(SESSION_PICKER_INCLUDE_COLUMN, false)
+	var child := item.get_first_child()
+	while child:
+		_set_3d_session_picker_descendants_checked(child, checked)
+		child = child.get_next()
+
+
+func _on_3d_session_picker_item_edited() -> void:
+	if _session_picker_rebuilding or not _session_picker_tree:
+		return
+	var item := _session_picker_tree.get_edited()
+	if not item:
+		return
+	if _session_picker_tree.get_edited_column() != SESSION_PICKER_INCLUDE_COLUMN:
+		return
+	var metadata: Variant = item.get_metadata(SESSION_PICKER_NAME_COLUMN)
+	if not metadata is Dictionary or str(metadata.get("kind", "")) not in ["group", "target"]:
+		return
+	_session_picker_rebuilding = true
+	_session_picker_tree.set_block_signals(true)
+	if str(metadata.get("kind", "")) == "group":
+		_set_3d_session_picker_descendants_checked(item, item.is_checked(SESSION_PICKER_INCLUDE_COLUMN))
+	_refresh_3d_session_picker_group_checks(_session_picker_tree.get_root())
+	_session_picker_tree.set_block_signals(false)
+	_session_picker_rebuilding = false
+	_update_3d_session_picker_selection_state()
+
+
+func _on_3d_session_picker_item_selected() -> void:
+	if not _session_picker_tree or not _session_picker_reason_label:
+		return
+	var item := _session_picker_tree.get_selected()
+	if not item:
+		return
+	var metadata: Variant = item.get_metadata(SESSION_PICKER_NAME_COLUMN)
+	if metadata is Dictionary:
+		_session_picker_reason_label.text = str(metadata.get("reason", ""))
+
+
+func _on_3d_session_picker_select_all() -> void:
+	if not _session_picker_tree:
+		return
+	_set_3d_session_picker_descendants_checked(_session_picker_tree.get_root(), true)
+	_refresh_3d_session_picker_group_checks(_session_picker_tree.get_root())
+	_update_3d_session_picker_selection_state()
+
+
+func _on_3d_session_picker_select_none() -> void:
+	if not _session_picker_tree:
+		return
+	_set_3d_session_picker_descendants_checked(_session_picker_tree.get_root(), false)
+	_refresh_3d_session_picker_group_checks(_session_picker_tree.get_root())
+	_update_3d_session_picker_selection_state()
+
+
+func _get_3d_session_picker_checked_target_keys(item: TreeItem = null) -> PackedStringArray:
+	var keys := PackedStringArray()
+	if not _session_picker_tree:
+		return keys
+	var current := item if item else _session_picker_tree.get_root()
+	if not current:
+		return keys
+	var metadata: Variant = current.get_metadata(SESSION_PICKER_NAME_COLUMN)
+	if metadata is Dictionary and str(metadata.get("kind", "")) == "target" and current.is_checked(SESSION_PICKER_INCLUDE_COLUMN):
+		keys.push_back(str(metadata.get("key", "")))
+	var child := current.get_first_child()
+	while child:
+		keys.append_array(_get_3d_session_picker_checked_target_keys(child))
+		child = child.get_next()
+	return keys
+
+
+func _update_3d_session_picker_selection_state() -> void:
+	var total := (_session_picker_layer_discovery.get("targets", []) as Array).size()
+	var selected := _get_3d_session_picker_checked_target_keys().size()
+	if _session_picker_summary_label:
+		_session_picker_summary_label.text = "%d of %d textures selected" % [selected, total]
+	if _session_picker_select_all_button:
+		_session_picker_select_all_button.disabled = total == 0 or selected == total
+	if _session_picker_select_none_button:
+		_session_picker_select_none_button.disabled = selected == 0
 	if _session_picker_dialog:
-		_session_picker_dialog.get_ok_button().disabled = not supported
+		_session_picker_dialog.get_ok_button().disabled = (
+			selected == 0
+			or str(_session_picker_layer_discovery.get("status", "error")) != "ok"
+		)
+		_session_picker_dialog.get_ok_button().text = (
+			"Edit 1 Texture" if selected == 1 else "Edit %d Textures" % selected
+		)
+	if selected == 0 and _session_picker_reason_label:
+		_session_picker_reason_label.text = "Select at least one compatible texture to begin editing."
+
+
+func _make_selected_3d_session_discovery() -> Dictionary:
+	var checked_keys := {}
+	for key in _get_3d_session_picker_checked_target_keys():
+		if not key.is_empty():
+			checked_keys[key] = true
+	if checked_keys.is_empty():
+		return {}
+	var selected_targets: Array = []
+	var required_group_keys := {}
+	var groups_by_key := {}
+	for group_value in _session_picker_layer_discovery.get("groups", []):
+		if group_value is Dictionary:
+			groups_by_key[str(group_value.get("key", ""))] = group_value
+	for target_value in _session_picker_layer_discovery.get("targets", []):
+		if not target_value is Dictionary or not checked_keys.has(str(target_value.get("key", ""))):
+			continue
+		selected_targets.push_back(target_value)
+		var group_key := str(target_value.get("group_key", ""))
+		while not group_key.is_empty() and not required_group_keys.has(group_key):
+			required_group_keys[group_key] = true
+			var group: Dictionary = groups_by_key.get(group_key, {})
+			group_key = str(group.get("parent_key", ""))
+	var selected_groups: Array = []
+	for group_value in _session_picker_layer_discovery.get("groups", []):
+		if group_value is Dictionary and required_group_keys.has(str(group_value.get("key", ""))):
+			selected_groups.push_back(group_value)
+	var selected_issues: Array = []
+	for issue_value in _session_picker_layer_discovery.get("issues", []):
+		if not issue_value is Dictionary:
+			continue
+		var issue_group_key := str(issue_value.get("group_key", issue_value.get("source_key", "")))
+		if required_group_keys.has(issue_group_key):
+			selected_issues.push_back(issue_value)
+	var discovery := _session_picker_layer_discovery.duplicate(true)
+	discovery["status"] = "ok"
+	discovery["message"] = "Selected %d texture(s) across %d scene object(s)." % [selected_targets.size(), selected_groups.size()]
+	discovery["targets"] = selected_targets
+	discovery["groups"] = selected_groups
+	discovery["issues"] = selected_issues
+	return discovery
 
 
 func _confirm_3d_session_picker() -> void:
-	if not _session_picker_mesh or not _session_picker_options:
+	if str(_session_picker_layer_discovery.get("status", "error")) != "ok":
 		return
-	var selected_items := _session_picker_options.get_selected_items()
-	if selected_items.is_empty():
+	var discovery := _make_selected_3d_session_discovery()
+	if discovery.is_empty():
+		_update_3d_session_picker_selection_state()
 		return
-	var index: int = selected_items[0]
-	if index < 0 or index >= _session_picker_choices.size():
+	if _request_2d_to_3d_layer_transition(discovery):
 		return
-	var choice := _session_picker_choices[index]
-	if not bool(choice.get("supported", false)):
-		return
-	var surface_target := _session_picker_mesh
-	var slot := int(choice.get("slot", 0))
-	var missing_texture := bool(choice.get("missing_texture", false))
-	if _request_2d_to_3d_transition(surface_target, slot):
-		return
-	_begin_3d_texture_session(surface_target, false, false, slot)
-	if missing_texture:
-		_set_status("Confirm texture creation to start editing this material slot.")
+	_begin_3d_layer_session(discovery)
 
 
 func _clear_3d_session_picker() -> void:
-	_session_picker_mesh = null
-	_session_picker_choices.clear()
+	_session_picker_roots.clear()
+	_session_picker_layer_discovery.clear()
+	if _session_picker_tree:
+		_session_picker_tree.clear()
+	if _session_picker_summary_label:
+		_session_picker_summary_label.text = ""
 
 
 func _request_2d_to_3d_transition(surface_target: Node3D, material_slot: int) -> bool:
@@ -8687,16 +13392,79 @@ func _request_2d_to_3d_transition(surface_target: Node3D, material_slot: int) ->
 	_pending_session_transition = SessionTransition.START_3D_SESSION
 	_pending_session_mesh = surface_target
 	_pending_3d_material_slot = material_slot
+	_configure_document_transition_dialog(_pending_session_transition)
 	_update_document_session_preview()
 	if _document_session_dialog:
 		_document_session_dialog.call_deferred("popup_centered")
 	return true
 
 
+func _request_2d_to_3d_layer_transition(discovery: Dictionary) -> bool:
+	if discovery.is_empty():
+		return false
+	_pending_3d_layer_discovery = discovery.duplicate(true)
+	if _texture_3d_session and _texture_3d_session.has_active_session():
+		if _request_session_transition(SessionTransition.START_3D_LAYER_SESSION):
+			return true
+		return false
+	if not _is_2d_document_dirty():
+		return false
+	_pending_session_transition = SessionTransition.START_3D_LAYER_SESSION
+	_configure_document_transition_dialog(_pending_session_transition)
+	_update_document_session_preview()
+	if _document_session_dialog:
+		_document_session_dialog.call_deferred("popup_centered")
+	return true
+
+
+func _is_starting_3d_transition() -> bool:
+	return _pending_session_transition in [
+		SessionTransition.NEW_DOCUMENT,
+		SessionTransition.CLOSE_DOCUMENT,
+		SessionTransition.START_3D_SESSION,
+		SessionTransition.START_3D_LAYER_SESSION,
+		SessionTransition.LOAD_LAYER_DOCUMENT,
+	]
+
+
+func _configure_document_transition_dialog(transition: int) -> void:
+	if not _document_session_dialog:
+		return
+	var creating_new := transition == SessionTransition.NEW_DOCUMENT
+	var closing_document := transition == SessionTransition.CLOSE_DOCUMENT
+	_document_session_dialog.title = "Unsaved Document" if (creating_new or closing_document) else "Unsaved 2D Image"
+	if _document_session_prompt:
+		_document_session_prompt.text = (
+			"Save the current document before closing it?"
+			if closing_document
+			else (
+				"Save the current document before creating a new file?"
+				if creating_new
+				else "Save this independent 2D image before starting the 3D texture session?"
+			)
+		)
+	if _document_session_discard_button:
+		_document_session_discard_button.text = (
+			"Discard"
+			if closing_document
+			else ("Discard and Create New" if creating_new else "Continue Without Saving")
+		)
+	if _document_session_preview:
+		_document_session_preview.tooltip_text = (
+			"The unsaved document that will be saved or discarded before closing"
+			if closing_document
+			else (
+				"The unsaved document that will be saved or discarded before creating a new file"
+				if creating_new
+				else "The unsaved 2D image that will be preserved or saved before 3D editing"
+			)
+		)
+
+
 func _update_document_session_preview() -> void:
 	if not _document_session_preview or not _canvas:
 		return
-	var image: Image = _canvas.get_image_copy()
+	var image: Image = _get_canvas_output_image()
 	if not image or image.is_empty():
 		_document_session_preview.texture = null
 		if _document_session_preview_label:
@@ -8708,7 +13476,23 @@ func _update_document_session_preview() -> void:
 
 
 func _save_2d_before_3d_session() -> void:
-	if _pending_session_transition != SessionTransition.START_3D_SESSION:
+	if not _is_starting_3d_transition():
+		return
+	if not _layer_document_path.is_empty():
+		if _save_layered_project_to_path(_layer_document_path):
+			_continue_pending_session_transition()
+		elif _document_session_dialog:
+			_document_session_dialog.call_deferred("popup_centered")
+		return
+	if (
+		_layer_session
+		and _layer_session.has_method("requires_layered_persistence")
+		and _layer_session.requires_layered_persistence()
+	):
+		_save_2d_for_3d_transition = true
+		if _document_session_dialog:
+			_document_session_dialog.hide()
+		call_deferred("_save_layered_project")
 		return
 	if _document_path.is_empty():
 		_save_2d_for_3d_transition = true
@@ -8731,13 +13515,22 @@ func _on_document_session_custom_action(action: StringName) -> void:
 
 
 func _cancel_2d_to_3d_transition() -> void:
-	if _pending_session_transition != SessionTransition.START_3D_SESSION:
+	if not _is_starting_3d_transition():
 		return
+	var canceled_transition := _pending_session_transition
 	_save_2d_for_3d_transition = false
 	_clear_pending_session_transition()
-	if _session_picker_dialog and _session_picker_mesh:
-		_session_picker_dialog.call_deferred("popup_centered", Vector2i(600, 340))
-	_set_status("Kept the unsaved 2D workspace unchanged.")
+	if canceled_transition not in [SessionTransition.NEW_DOCUMENT, SessionTransition.CLOSE_DOCUMENT] and _session_picker_dialog and not _session_picker_roots.is_empty():
+		_session_picker_dialog.call_deferred("popup_centered", Vector2i(720, 500))
+	_set_status(
+		"Close canceled; the current document is unchanged."
+		if canceled_transition == SessionTransition.CLOSE_DOCUMENT
+		else (
+			"New file canceled; the current document is unchanged."
+			if canceled_transition == SessionTransition.NEW_DOCUMENT
+			else "Kept the unsaved 2D workspace unchanged."
+		)
+	)
 
 
 func _request_session_transition(
@@ -8751,7 +13544,7 @@ func _request_session_transition(
 		not _texture_3d_session
 		or not _texture_3d_session.has_active_session()
 		or not _canvas
-		or not _texture_3d_session.is_dirty(_canvas.get_image_copy())
+		or not _is_active_3d_paint_session_dirty(_get_canvas_output_image())
 	):
 		return false
 	_pending_session_transition = transition
@@ -8759,14 +13552,25 @@ func _request_session_transition(
 	_pending_session_image = image.duplicate() if image else null
 	_pending_session_label = label
 	_pending_session_mesh = mesh
+	if _texture_3d_layer_coordinator:
+		_show_3d_batch_save_dialog(transition)
+		return true
 	if _session_replace_dialog:
-		_session_replace_dialog.dialog_text = "Save %s before replacing this 3D texture session?" % _texture_3d_session.get_identity_text()
+		_session_replace_dialog.dialog_text = "Save %s before replacing this 3D texture session?" % _get_active_3d_paint_session_identity()
 		_session_replace_dialog.popup_centered()
 	return true
 
 
 func _save_pending_session_transition() -> void:
 	if _pending_session_transition == SessionTransition.NONE:
+		return
+	if (
+		(not _texture_3d_layer_coordinator or not _texture_3d_layer_coordinator.is_dirty())
+		and _texture_3d_session
+		and not _texture_3d_session.is_dirty(_get_canvas_output_image())
+		and _is_layered_session_save_required()
+	):
+		_complete_saved_3d_transition(_pending_session_transition)
 		return
 	_save_active_3d_texture_now(_pending_session_transition)
 
@@ -8801,8 +13605,13 @@ func _continue_pending_session_transition() -> void:
 	var image := _pending_session_image
 	var label := _pending_session_label
 	var mesh := _pending_session_mesh
+	var layer_discovery := _pending_3d_layer_discovery.duplicate(true)
 	_clear_pending_session_transition()
 	match transition:
+		SessionTransition.NEW_DOCUMENT:
+			_new_canvas_now()
+		SessionTransition.CLOSE_DOCUMENT:
+			_close_current_document_now()
 		SessionTransition.LOAD_IMAGE_PATH:
 			_load_image_file_now(path)
 		SessionTransition.LOAD_IMAGE:
@@ -8813,6 +13622,10 @@ func _continue_pending_session_transition() -> void:
 			_finalize_3d_session_exit()
 		SessionTransition.START_3D_SESSION:
 			_begin_3d_texture_session(mesh, false, true, _pending_3d_material_slot)
+		SessionTransition.START_3D_LAYER_SESSION:
+			_begin_3d_layer_session(layer_discovery, false, true)
+		SessionTransition.LOAD_LAYER_DOCUMENT:
+			_load_layered_document_now(path)
 
 
 func _clear_pending_session_transition() -> void:
@@ -8821,23 +13634,134 @@ func _clear_pending_session_transition() -> void:
 	_pending_session_image = null
 	_pending_session_label = ""
 	_pending_session_mesh = null
+	_pending_3d_layer_discovery.clear()
+
+
+func _reset_3d_scene_sync_state() -> void:
+	_scene_hierarchy_sync_enabled = false
+	_paint_3d_scene_visibility_cache.clear()
+	_paint_3d_object_group_scene_visibility_cache.clear()
 
 
 func _clear_3d_texture_session_state(restore_workspace := true) -> void:
+	if _save_3d_batch_dialog:
+		_save_3d_batch_dialog.hide()
+	_reset_3d_batch_save_workflow(false)
 	_cancel_3d_surface_shape("", false, false)
-	if _texture_3d_session:
+	_active_3d_binding_key = ""
+	_reset_3d_scene_sync_state()
+	if _texture_3d_layer_coordinator:
+		_texture_3d_layer_coordinator.clear()
+		_texture_3d_layer_coordinator = null
+	elif _texture_3d_session:
 		_texture_3d_session.clear()
+	_texture_3d_session = null
 	_paint_3d_source_available = false
 	if _canvas:
 		_canvas.clear_uv_overlay_data()
 		_canvas.clear_eraser_restore_image()
 	_clear_3d_paint_mesh()
+	if _canvas_mode_3d:
+		_apply_empty_3d_camera_pose()
 	_update_canvas_resize_control_availability()
 	_update_3d_context_control_visibility()
 	_update_3d_session_status()
 	_sync_menu_state()
 	if restore_workspace:
 		_restore_2d_workspace()
+
+
+func _begin_3d_layer_session(discovery: Dictionary, create_missing := false, skip_guard := false) -> void:
+	if discovery.is_empty() or str(discovery.get("status", "error")) != "ok":
+		_set_status("The selected 3D import scope is no longer valid.")
+		return
+	if (
+		not create_missing
+		and not skip_guard
+		and _texture_3d_session
+		and _texture_3d_session.has_active_session()
+	):
+		_pending_3d_layer_discovery = discovery.duplicate(true)
+		if _request_session_transition(SessionTransition.START_3D_LAYER_SESSION):
+			return
+	var coordinator = _make_script_instance(LAYER_3D_COORDINATOR_SCRIPT_PATH, RefCounted.new())
+	var result: Dictionary = coordinator.begin(
+		discovery,
+		_plugin,
+		create_missing,
+		_get_default_save_dir(),
+		GDDraw3DTextureSessionResource.DEFAULT_TEXTURE_SIZE
+	)
+	var status := str(result.get("status", "error"))
+	if status == "needs_create":
+		_pending_3d_layer_discovery = discovery.duplicate(true)
+		var pending_labels := PackedStringArray()
+		for pending_value in result.get("pending_targets", []):
+			if pending_value is Dictionary:
+				pending_labels.push_back("• " + str(pending_value.get("label", "3D paint target")))
+		if _create_3d_texture_dialog:
+			_create_3d_texture_dialog.title = "Create Missing 3D Textures?"
+			_create_3d_texture_dialog.dialog_text = (
+				"Create and assign the missing materials/textures for this import scope? "
+				+ "Each scene assignment is explicit and undoable.\n\n"
+				+ "\n".join(pending_labels)
+			)
+			# ConfirmationDialog emits `confirmed` before its exclusive window has
+			# fully released the parent. Opening the next exclusive dialog in that
+			# same callback is rejected by Godot and makes Import All appear to do
+			# nothing, so hand the second confirmation to the next message cycle.
+			_create_3d_texture_dialog.call_deferred("popup_centered")
+		_set_status(str(result.get("message", "Confirm creation for the missing paint targets.")))
+		return
+	if status != "ok" or not coordinator.layer_session or not coordinator.get_active_texture_session():
+		_pending_3d_layer_discovery.clear()
+		_set_status(str(result.get("message", "Could not open the discovered 3D paint targets.")))
+		return
+
+	if _saved_2d_workspace.is_empty():
+		_capture_2d_workspace()
+	_layer_document_path = ""
+	_clear_3d_paint_mesh()
+	if _texture_3d_layer_coordinator:
+		_texture_3d_layer_coordinator.clear()
+	elif _texture_3d_session:
+		_texture_3d_session.clear()
+	_reset_3d_scene_sync_state()
+	_texture_3d_layer_coordinator = coordinator
+	_layer_thumbnail_cache.clear()
+	_layer_session = coordinator.layer_session
+	_texture_3d_session = coordinator.get_active_texture_session()
+	_capture_3d_object_group_visibility_from_sources()
+	# Layer/group IDs restart for each document. Rebuild immediately after
+	# replacing the session so a clean 2D tree cannot be mistaken for the new
+	# 3D hierarchy merely because both sessions contain group-1/target-1 IDs.
+	_refresh_layers_tree()
+	if _refresh_3d_layer_scene_dependency() and _layer_session.has_method("mark_layered_saved"):
+		_layer_session.mark_layered_saved()
+	_pending_3d_session_candidate = null
+	_pending_3d_layer_discovery.clear()
+	_paint_3d_source_available = _is_active_3d_source_available()
+	if _canvas:
+		_canvas.set_display_compositor(
+			Callable(self, "_compose_active_layer_for_canvas"),
+			Callable(self, "_compose_active_layer_region_for_canvas")
+		)
+	_sync_canvas_to_active_layer()
+	var primary_binding: Dictionary = coordinator.get_primary_binding_for_target(_layer_session.active_target_id)
+	_set_active_3d_binding(str(primary_binding.get("binding_key", "")), true)
+	_sync_active_3d_uv_overlay()
+	_refresh_canvas_visible_pixels_state()
+	_history.clear()
+	_update_history_buttons()
+	_update_selection_action_buttons()
+	_clear_3d_session_picker()
+	_update_canvas_resize_control_availability()
+	_sync_3d_paint_view()
+	_initialize_default_3d_scene_sync_state()
+	_update_3d_context_control_visibility()
+	_update_3d_session_status()
+	_sync_menu_state()
+	_set_status(str(result.get("message", "Opened the selected 3D paint targets.")))
 
 
 func _begin_3d_texture_session(surface_target: Node3D, create_if_missing := false, skip_guard := false, material_slot := 0) -> void:
@@ -8885,12 +13809,53 @@ func _begin_3d_texture_session(surface_target: Node3D, create_if_missing := fals
 		return
 	if _saved_2d_workspace.is_empty():
 		_capture_2d_workspace()
+	_layer_document_path = ""
+	if _texture_3d_layer_coordinator:
+		_texture_3d_layer_coordinator.clear()
+		_texture_3d_layer_coordinator = null
+	_reset_3d_scene_sync_state()
 	_texture_3d_session = candidate
 	_paint_3d_source_available = _is_active_3d_source_available()
 	_pending_3d_session_candidate = null
 	_clear_3d_session_picker()
 	_update_canvas_resize_control_availability()
-	_canvas.set_image(image)
+	var source_label: String = candidate.target.get_source_label() if candidate.target else str(surface_target.name)
+	_replace_canvas_layer_session(
+		image,
+		"3d",
+		source_label,
+		"Albedo",
+		GDDraw3DTextureSessionResource.CHANNEL_ALBEDO,
+		{
+			"key": "%s|slot:%d|channel:%s|uv:0" % [str(surface_target.get_path()), material_slot, GDDraw3DTextureSessionResource.CHANNEL_ALBEDO],
+			"source_key": str(surface_target.get_path()),
+			"source_name": str(surface_target.name),
+			"source_class": surface_target.get_class(),
+			"material_slot": material_slot,
+			"channel": GDDraw3DTextureSessionResource.CHANNEL_ALBEDO,
+			"texture_path": str(candidate.texture_path),
+		}
+	)
+	var single_surface_target = _layer_session.get_active_target() if _layer_session else null
+	if single_surface_target:
+		var single_surface_group: Dictionary = _layer_session.get_object_group(single_surface_target.owner_group_id)
+		if not single_surface_group.is_empty():
+			single_surface_group["source_key"] = str(surface_target.get_path())
+			single_surface_group["visible"] = bool(single_surface_group.get("visible", true))
+	_capture_3d_object_group_visibility_from_sources()
+	_refresh_layers_tree()
+	var texture_layer_name := str(candidate.texture_path).strip_edges().get_file()
+	var active_texture_target = _layer_session.get_active_target() if _layer_session else null
+	var initial_texture_layer = active_texture_target.get_selected_layer() if active_texture_target else null
+	if initial_texture_layer and not texture_layer_name.is_empty():
+		initial_texture_layer.name = texture_layer_name
+		_refresh_layers_tree({
+			"kind": "paint",
+			"target_id": active_texture_target.target_id,
+			"node_id": initial_texture_layer.id,
+		})
+	if _refresh_3d_layer_scene_dependency() and _layer_session.has_method("mark_layered_saved"):
+		_layer_session.mark_layered_saved()
 	_refresh_canvas_visible_pixels_state()
 	_history.clear()
 	_update_history_buttons()
@@ -8903,6 +13868,7 @@ func _begin_3d_texture_session(surface_target: Node3D, create_if_missing := fals
 		)
 		_canvas.uv_overlay_visible = _canvas_mode_3d and _uv_overlay_toggle and _uv_overlay_toggle.button_pressed
 	_sync_3d_paint_view()
+	_initialize_default_3d_scene_sync_state()
 	_update_3d_context_control_visibility()
 	_pending_3d_mesh = null
 	_update_3d_session_status()
@@ -8911,18 +13877,24 @@ func _begin_3d_texture_session(surface_target: Node3D, create_if_missing := fals
 
 
 func _create_missing_3d_texture() -> void:
+	if not _pending_3d_layer_discovery.is_empty():
+		var discovery := _pending_3d_layer_discovery.duplicate(true)
+		_begin_3d_layer_session(discovery, true, true)
+		return
 	if _pending_3d_mesh:
 		_begin_3d_texture_session(_pending_3d_mesh, true, false, _pending_3d_material_slot)
 	_pending_3d_mesh = null
 
 
 func _cancel_missing_3d_texture() -> void:
+	var canceled_layer_scope := not _pending_3d_layer_discovery.is_empty()
+	_pending_3d_layer_discovery.clear()
 	_pending_3d_mesh = null
 	_pending_3d_session_candidate = null
 	if _canvas and (not _texture_3d_session or not _texture_3d_session.has_active_session()):
 		_canvas.clear_uv_overlay_data()
-	if _session_picker_dialog and _session_picker_mesh:
-		_session_picker_dialog.call_deferred("popup_centered", Vector2i(600, 340))
+	if _session_picker_dialog and canceled_layer_scope and not _session_picker_roots.is_empty():
+		_session_picker_dialog.call_deferred("popup_centered", Vector2i(720, 500))
 	_update_3d_context_control_visibility()
 	_set_status("Texture creation canceled; no material or texture was changed.")
 
@@ -8935,7 +13907,7 @@ func _stop_3d_texture_session() -> void:
 		return
 	if _request_session_transition(SessionTransition.STOP_SESSION):
 		if _session_replace_dialog:
-			_session_replace_dialog.dialog_text = "Save %s before stopping this 3D texture session?" % _texture_3d_session.get_identity_text()
+			_session_replace_dialog.dialog_text = "Save %s before stopping this 3D texture session?" % _get_active_3d_paint_session_identity()
 		return
 	_finalize_3d_session_exit()
 
@@ -8956,17 +13928,26 @@ func _capture_2d_workspace() -> void:
 		_saved_2d_workspace = _canvas.capture_workspace_state()
 	if _history and _history.has_method("capture_state"):
 		_saved_2d_history = _history.capture_state()
+	if _layer_session and _layer_session.has_method("capture_state"):
+		_saved_2d_layer_session = _layer_session.capture_state()
+	_saved_2d_layer_document_path = _layer_document_path
 
 
 func _restore_2d_workspace() -> void:
 	if not _canvas:
 		return
+	var restored_layers := _restore_layer_session(_saved_2d_layer_session)
+	_syncing_layer_session = true
 	if not _saved_2d_workspace.is_empty() and _canvas.has_method("restore_workspace_state"):
 		_canvas.restore_workspace_state(_saved_2d_workspace)
 	else:
 		var default_image := Image.create_empty(_get_default_canvas_size().x, _get_default_canvas_size().y, false, Image.FORMAT_RGBA8)
 		default_image.fill(Color.TRANSPARENT)
 		_canvas.set_image(default_image)
+	_syncing_layer_session = false
+	if not restored_layers:
+		_reset_layer_session_for_image(_canvas.get_image_copy(), "2d", "2D Document", "RGBA", "rgba")
+	_layer_document_path = _saved_2d_layer_document_path
 	_refresh_canvas_visible_pixels_state()
 	if _history:
 		if not _saved_2d_history.is_empty() and _history.has_method("restore_state"):
@@ -8975,6 +13956,8 @@ func _restore_2d_workspace() -> void:
 			_history.clear()
 	_saved_2d_workspace.clear()
 	_saved_2d_history.clear()
+	_saved_2d_layer_session.clear()
+	_saved_2d_layer_document_path = ""
 	_update_history_buttons()
 	_update_selection_action_buttons()
 	_on_canvas_size_changed(_canvas.get_canvas_size())
@@ -8987,10 +13970,13 @@ func _reset_2d_workspace_after_3d_session() -> void:
 	var canvas_size := _get_default_canvas_size()
 	var blank_image := Image.create_empty(canvas_size.x, canvas_size.y, false, Image.FORMAT_RGBA8)
 	blank_image.fill(Color.TRANSPARENT)
-	_canvas.set_image(blank_image)
+	_replace_canvas_layer_session(blank_image, "2d", "2D Document", "RGBA", "rgba")
 	_refresh_canvas_visible_pixels_state()
 	_saved_2d_workspace.clear()
 	_saved_2d_history.clear()
+	_saved_2d_layer_session.clear()
+	_saved_2d_layer_document_path = ""
+	_layer_document_path = ""
 	if _history:
 		_history.clear()
 	_set_2d_document_baseline("", blank_image)
@@ -9001,11 +13987,300 @@ func _reset_2d_workspace_after_3d_session() -> void:
 	_sync_menu_state()
 
 
+func _on_3d_batch_save_confirmed() -> void:
+	_start_3d_batch_save(false)
+
+
+func _on_3d_batch_save_all_requested() -> void:
+	if _batch_texture_save_stage != BatchTextureSaveStage.IDLE:
+		return
+	_batch_texture_save_rows = _save_3d_batch_dialog.get_plan()
+	_batch_texture_save_show_unchanged = true
+	_batch_texture_save_force_all = true
+	_batch_texture_save_rows = _build_3d_batch_save_plan(
+		_batch_texture_save_filter,
+		true,
+		true,
+		_batch_texture_save_rows
+	)
+	_save_3d_batch_dialog.set_plan(
+		_batch_texture_save_rows,
+		true,
+		true,
+		_save_3d_batch_dialog.get_save_layered_enabled(),
+		_save_3d_batch_dialog.get_layered_destination(),
+		int(_batch_texture_save_context.get("transition", SessionTransition.NONE)) != SessionTransition.NONE
+	)
+	_save_3d_batch_dialog.select_all_rows()
+	_start_3d_batch_save(true)
+
+
+func _on_3d_batch_discard_requested() -> void:
+	if _batch_texture_save_stage != BatchTextureSaveStage.IDLE:
+		return
+	var transition := int(_batch_texture_save_context.get("transition", SessionTransition.NONE))
+	_save_3d_batch_dialog.hide()
+	_reset_3d_batch_save_workflow(false)
+	if transition != SessionTransition.NONE:
+		_continue_pending_session_transition()
+
+
+func _on_3d_batch_save_canceled() -> void:
+	if _batch_texture_save_stage != BatchTextureSaveStage.IDLE:
+		_save_3d_batch_dialog.call_deferred("popup_centered", Vector2i(940, 700))
+		return
+	var transition := int(_batch_texture_save_context.get("transition", SessionTransition.NONE))
+	_reset_3d_batch_save_workflow(false)
+	if transition != SessionTransition.NONE:
+		_clear_pending_session_transition()
+		_set_status("Kept the active 3D hierarchy and its unsaved textures unchanged.")
+
+
+func _start_3d_batch_save(_save_all: bool) -> void:
+	if _batch_texture_save_stage != BatchTextureSaveStage.IDLE or not _validate_3d_batch_save_dialog():
+		return
+	_batch_texture_save_rows = _save_3d_batch_dialog.get_plan()
+	var selected: Array[Dictionary] = []
+	for row in _batch_texture_save_rows:
+		if bool(row.get("included", false)):
+			selected.push_back(row)
+	_batch_texture_save_context = {
+		"transition": int(_batch_texture_save_context.get("transition", SessionTransition.NONE)),
+		"rows": selected,
+		"index": 0,
+		"success_count": 0,
+		"failures": PackedStringArray(),
+		"pending_imports": [],
+		"wait_frames": 1,
+		"import_attempts": 0,
+		"scan_started": false,
+		"save_layered": _save_3d_batch_dialog.get_save_layered_enabled(),
+		"layered_path": _save_3d_batch_dialog.get_layered_destination(),
+	}
+	_batch_texture_save_stage = BatchTextureSaveStage.WRITING
+	_save_3d_batch_dialog.set_busy(true, "Preparing texture outputs…", 0, selected.size() + 1)
+
+
+func _advance_3d_batch_save_workflow() -> void:
+	match _batch_texture_save_stage:
+		BatchTextureSaveStage.IDLE:
+			return
+		BatchTextureSaveStage.WRITING:
+			_advance_3d_batch_writes()
+		BatchTextureSaveStage.WAITING_TO_SCAN:
+			_advance_3d_batch_scan()
+		BatchTextureSaveStage.WAITING_FOR_IMPORTS:
+			_advance_3d_batch_imports()
+
+
+func _advance_3d_batch_writes() -> void:
+	var rows: Array = _batch_texture_save_context.get("rows", [])
+	var row_index := int(_batch_texture_save_context.get("index", 0))
+	if row_index >= rows.size():
+		var pending_imports: Array = _batch_texture_save_context.get("pending_imports", [])
+		if pending_imports.is_empty():
+			_finish_3d_batch_save()
+		else:
+			_batch_texture_save_stage = BatchTextureSaveStage.WAITING_TO_SCAN
+			_save_3d_batch_dialog.set_busy(true, "Waiting to import %d new texture%s…" % [
+				pending_imports.size(),
+				"" if pending_imports.size() == 1 else "s",
+			], rows.size(), rows.size() + 1)
+		return
+	var row: Dictionary = rows[row_index]
+	var target = row.get("target")
+	var texture_session = row.get("session")
+	var target_id := str(row.get("target_id", ""))
+	var label := str(row.get("label", target_id))
+	var result: Dictionary
+	if not target or not texture_session or not texture_session.has_active_session():
+		result = {
+			GDDraw3DTextureSessionResource.STATUS: GDDraw3DTextureSessionResource.STATUS_ERROR,
+			GDDraw3DTextureSessionResource.MESSAGE: "The texture target is no longer active.",
+		}
+	else:
+		var image: Image = target.composite()
+		if int(row.get("action", _save_3d_batch_dialog.ACTION_SAVE)) == _save_3d_batch_dialog.ACTION_SAVE_AS:
+			var destination := str(row.get("destination", ""))
+			result = texture_session.write_image_as(image, destination)
+			if str(result.get(GDDraw3DTextureSessionResource.STATUS, "error")) == GDDraw3DTextureSessionResource.STATUS_OK:
+				var pending_imports: Array = _batch_texture_save_context.get("pending_imports", [])
+				pending_imports.push_back({
+					"row": row,
+					"image": result.get(GDDraw3DTextureSessionResource.IMAGE),
+					"path": destination,
+					"session": texture_session,
+					"assigned": false,
+				})
+				_batch_texture_save_context["pending_imports"] = pending_imports
+				_save_3d_batch_dialog.set_row_status(target_id, "Waiting for import")
+		else:
+			result = texture_session.save_image(image, _plugin)
+	var succeeded := str(result.get(GDDraw3DTextureSessionResource.STATUS, "error")) == GDDraw3DTextureSessionResource.STATUS_OK
+	if succeeded and int(row.get("action", _save_3d_batch_dialog.ACTION_SAVE)) == _save_3d_batch_dialog.ACTION_SAVE:
+		_batch_texture_save_context["success_count"] = int(_batch_texture_save_context.get("success_count", 0)) + 1
+		row["included"] = false
+		_save_3d_batch_dialog.set_row_status(target_id, "Saved")
+	elif not succeeded:
+		var failures: PackedStringArray = _batch_texture_save_context.get("failures", PackedStringArray())
+		failures.push_back("%s: %s" % [label, str(result.get(GDDraw3DTextureSessionResource.MESSAGE, "Could not write texture."))])
+		_batch_texture_save_context["failures"] = failures
+		_save_3d_batch_dialog.set_row_status(target_id, "Write failed", true)
+	_batch_texture_save_context["index"] = row_index + 1
+	_save_3d_batch_dialog.set_busy(
+		true,
+		"Writing texture %d of %d…" % [row_index + 1, rows.size()],
+		row_index + 1,
+		rows.size() + 1
+	)
+
+
+func _advance_3d_batch_scan() -> void:
+	var wait_frames := int(_batch_texture_save_context.get("wait_frames", 0))
+	if wait_frames > 0:
+		_batch_texture_save_context["wait_frames"] = wait_frames - 1
+		return
+	var filesystem: Object = _get_resource_filesystem()
+	if filesystem and (
+		(filesystem.has_method("is_scanning") and bool(filesystem.call("is_scanning")))
+		or (filesystem.has_method("is_importing") and bool(filesystem.call("is_importing")))
+	):
+		return
+	if filesystem and not bool(_batch_texture_save_context.get("scan_started", false)):
+		filesystem.call("scan")
+	_batch_texture_save_context["scan_started"] = true
+	_batch_texture_save_context["wait_frames"] = 1
+	_batch_texture_save_stage = BatchTextureSaveStage.WAITING_FOR_IMPORTS
+
+
+func _advance_3d_batch_imports() -> void:
+	var wait_frames := int(_batch_texture_save_context.get("wait_frames", 0))
+	if wait_frames > 0:
+		_batch_texture_save_context["wait_frames"] = wait_frames - 1
+		return
+	var filesystem: Object = _get_resource_filesystem()
+	if filesystem and (
+		(filesystem.has_method("is_scanning") and bool(filesystem.call("is_scanning")))
+		or (filesystem.has_method("is_importing") and bool(filesystem.call("is_importing")))
+	):
+		return
+	var pending_imports: Array = _batch_texture_save_context.get("pending_imports", [])
+	var unresolved := 0
+	for pending_value in pending_imports:
+		var pending: Dictionary = pending_value
+		if bool(pending.get("assigned", false)):
+			continue
+		var path := str(pending.get("path", ""))
+		var imported_texture: Texture2D
+		if _plugin:
+			if filesystem and filesystem.has_method("get_file_type") and str(filesystem.call("get_file_type", path)).is_empty():
+				unresolved += 1
+				continue
+			if ResourceLoader.exists(path, "Texture2D"):
+				var loaded := ResourceLoader.load(path, "Texture2D", ResourceLoader.CACHE_MODE_REPLACE)
+				if loaded is Texture2D:
+					imported_texture = loaded
+		else:
+			var image: Image = pending.get("image")
+			if image:
+				imported_texture = ImageTexture.create_from_image(image)
+				imported_texture.set_meta("gddraw_source_path", path)
+		if not imported_texture:
+			unresolved += 1
+			continue
+		var texture_session = pending.get("session")
+		var result: Dictionary = texture_session.assign_saved_image_as(
+			pending.get("image"),
+			path,
+			imported_texture,
+			_plugin
+		)
+		var row: Dictionary = pending.get("row", {})
+		var target_id := str(row.get("target_id", ""))
+		if str(result.get(GDDraw3DTextureSessionResource.STATUS, "error")) == GDDraw3DTextureSessionResource.STATUS_OK:
+			pending["assigned"] = true
+			row["included"] = false
+			_batch_texture_save_context["success_count"] = int(_batch_texture_save_context.get("success_count", 0)) + 1
+			_save_3d_batch_dialog.set_row_status(target_id, "Saved and reassigned")
+		else:
+			pending["assigned"] = true
+			var failures: PackedStringArray = _batch_texture_save_context.get("failures", PackedStringArray())
+			failures.push_back("%s: %s" % [str(row.get("label", target_id)), str(result.get(GDDraw3DTextureSessionResource.MESSAGE, "Material assignment failed."))])
+			_batch_texture_save_context["failures"] = failures
+			_save_3d_batch_dialog.set_row_status(target_id, "Assignment failed", true)
+	if unresolved <= 0:
+		_finish_3d_batch_save()
+		return
+	var attempts := int(_batch_texture_save_context.get("import_attempts", 0)) + 1
+	_batch_texture_save_context["import_attempts"] = attempts
+	if attempts < 180:
+		return
+	var failures: PackedStringArray = _batch_texture_save_context.get("failures", PackedStringArray())
+	for pending_value in pending_imports:
+		var pending: Dictionary = pending_value
+		if bool(pending.get("assigned", false)):
+			continue
+		pending["assigned"] = true
+		var row: Dictionary = pending.get("row", {})
+		var target_id := str(row.get("target_id", ""))
+		failures.push_back("%s: Godot did not finish importing %s." % [str(row.get("label", target_id)), str(pending.get("path", ""))])
+		_save_3d_batch_dialog.set_row_status(target_id, "Import timed out", true)
+	_batch_texture_save_context["failures"] = failures
+	_finish_3d_batch_save()
+
+
+func _finish_3d_batch_save() -> void:
+	var failures: PackedStringArray = _batch_texture_save_context.get("failures", PackedStringArray())
+	if failures.is_empty() and bool(_batch_texture_save_context.get("save_layered", false)):
+		if not _save_layered_project_to_path(str(_batch_texture_save_context.get("layered_path", ""))):
+			failures.push_back("Could not save the hierarchy layer document.")
+	var success_count := int(_batch_texture_save_context.get("success_count", 0))
+	var transition := int(_batch_texture_save_context.get("transition", SessionTransition.NONE))
+	_batch_texture_save_stage = BatchTextureSaveStage.IDLE
+	if not failures.is_empty():
+		_batch_texture_save_context = {"transition": transition}
+		_save_3d_batch_dialog.set_plan(
+			_batch_texture_save_rows,
+			_batch_texture_save_show_unchanged,
+			true,
+			_save_3d_batch_dialog.get_save_layered_enabled(),
+			_save_3d_batch_dialog.get_layered_destination(),
+			transition != SessionTransition.NONE
+		)
+		_save_3d_batch_dialog.set_busy(false)
+		_save_3d_batch_dialog.set_status("Saved %d texture%s; %d item%s need attention. %s" % [
+			success_count,
+			"" if success_count == 1 else "s",
+			failures.size(),
+			"" if failures.size() == 1 else "s",
+			failures[0],
+		])
+		return
+	_save_3d_batch_dialog.hide()
+	_reset_3d_batch_save_workflow(false)
+	_request_resource_filesystem_scan()
+	_update_3d_session_status()
+	_set_status("Saved %d 3D texture%s in one batch." % [success_count, "" if success_count == 1 else "s"])
+	if transition != SessionTransition.NONE:
+		_complete_saved_3d_transition(transition)
+
+
+func _reset_3d_batch_save_workflow(clear_pending_transition := false) -> void:
+	_batch_texture_save_stage = BatchTextureSaveStage.IDLE
+	_batch_texture_save_context.clear()
+	_batch_texture_save_rows.clear()
+	_batch_texture_save_filter = PackedStringArray()
+	_batch_texture_save_show_unchanged = false
+	_batch_texture_save_force_all = false
+	if clear_pending_transition:
+		_clear_pending_session_transition()
+
+
 func _save_3d_texture() -> void:
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		_set_status("Load an editable 3D surface texture before saving in 3D mode.")
 		return
-	if _texture_save_stage != TextureSaveStage.IDLE:
+	if _texture_save_stage != TextureSaveStage.IDLE or _batch_texture_save_stage != BatchTextureSaveStage.IDLE:
 		_set_status("A 3D texture save is already in progress.")
 		return
 	if _save_3d_texture_dialog:
@@ -9029,7 +14304,7 @@ func _save_active_3d_texture_now(transition := SessionTransition.NONE) -> bool:
 	if _texture_save_stage != TextureSaveStage.IDLE:
 		_set_status("A 3D texture save is already in progress.")
 		return false
-	var result: Dictionary = _texture_3d_session.save_image(_canvas.get_image_copy(), null)
+	var result: Dictionary = _texture_3d_session.save_image(_get_canvas_output_image(), _plugin)
 	_set_status(str(result.get(GDDraw3DTextureSessionResource.MESSAGE, "")))
 	var succeeded := str(result.get(GDDraw3DTextureSessionResource.STATUS, GDDraw3DTextureSessionResource.STATUS_ERROR)) == GDDraw3DTextureSessionResource.STATUS_OK
 	if succeeded:
@@ -9058,7 +14333,7 @@ func _save_3d_texture_as_to_path(path: String) -> void:
 		_abort_3d_texture_save_workflow("Choose a PNG path inside res://.")
 		return
 	var transition: int = int(_texture_save_context.get("transition", SessionTransition.NONE))
-	var result: Dictionary = _texture_3d_session.write_image_as(_canvas.get_image_copy(), normalized_path)
+	var result: Dictionary = _texture_3d_session.write_image_as(_get_canvas_output_image(), normalized_path)
 	_set_status(str(result.get(GDDraw3DTextureSessionResource.MESSAGE, "")))
 	var succeeded := str(result.get(GDDraw3DTextureSessionResource.STATUS, GDDraw3DTextureSessionResource.STATUS_ERROR)) == GDDraw3DTextureSessionResource.STATUS_OK
 	if not succeeded:
@@ -9085,14 +14360,21 @@ func _advance_3d_texture_save_workflow() -> void:
 		TextureSaveStage.NORMAL_WRITTEN:
 			if _consume_texture_save_wait_frame():
 				return
-			_scan_saved_3d_texture_path()
+			var saved_path := str(_texture_save_context.get("path", ""))
 			var normal_transition: int = int(_texture_save_context.get("transition", SessionTransition.NONE))
 			_reset_3d_texture_save_workflow()
 			_complete_saved_3d_transition(normal_transition)
+			# A normal save writes an existing PNG. Persist the layered archive and
+			# finish any stop/replace cleanup before asking EditorFileSystem to
+			# reimport it. Starting a full scan before that cleanup can reload a
+			# texture while the 3D preview still owns rendering resources.
+			if not saved_path.is_empty() and FileAccess.file_exists(saved_path):
+				_request_resource_filesystem_scan()
 		TextureSaveStage.SAVE_AS_WRITTEN:
 			if _consume_texture_save_wait_frame():
 				return
-			_scan_saved_3d_texture_path()
+			if not _scan_saved_3d_texture_path():
+				return
 			_texture_save_context["wait_frames"] = 1
 			_texture_save_stage = TextureSaveStage.WAITING_IMPORTED_TEXTURE
 		TextureSaveStage.WAITING_IMPORTED_TEXTURE:
@@ -9109,15 +14391,59 @@ func _consume_texture_save_wait_frame() -> bool:
 	return true
 
 
-func _scan_saved_3d_texture_path() -> void:
-	if not _plugin:
-		return
+func _scan_saved_3d_texture_path() -> bool:
 	var path := str(_texture_save_context.get("path", ""))
 	if path.is_empty() or not FileAccess.file_exists(path):
-		return
+		return false
+	var filesystem: Object = _get_resource_filesystem()
+	if not filesystem:
+		return true
+	if (
+		(filesystem.has_method("is_scanning") and bool(filesystem.call("is_scanning")))
+		or (filesystem.has_method("is_importing") and bool(filesystem.call("is_importing")))
+	):
+		return false
 	# This runs from _process(), after the FileDialog signal and message queue
-	# have completed. EditorFileSystem may safely create its progress task here.
-	_plugin.get_editor_interface().get_resource_filesystem().scan()
+	# have completed. Save As needs the new import before material assignment.
+	filesystem.call("scan")
+	return true
+
+
+func _request_resource_filesystem_scan(wait_frames := RESOURCE_FILESYSTEM_SCAN_DELAY_FRAMES) -> void:
+	_resource_filesystem_scan_pending = true
+	_resource_filesystem_scan_wait_frames = maxi(_resource_filesystem_scan_wait_frames, wait_frames)
+
+
+func _advance_resource_filesystem_scan() -> void:
+	if not _resource_filesystem_scan_pending:
+		return
+	if _resource_filesystem_scan_wait_frames > 0:
+		_resource_filesystem_scan_wait_frames -= 1
+		return
+	var filesystem: Object = _get_resource_filesystem()
+	if not filesystem:
+		_resource_filesystem_scan_pending = false
+		return
+	if (
+		(filesystem.has_method("is_scanning") and bool(filesystem.call("is_scanning")))
+		or (filesystem.has_method("is_importing") and bool(filesystem.call("is_importing")))
+	):
+		return
+	_resource_filesystem_scan_pending = false
+	filesystem.call("scan")
+
+
+func _get_resource_filesystem():
+	if is_instance_valid(_resource_filesystem_override):
+		return _resource_filesystem_override
+	if not _plugin:
+		return null
+	var editor_interface := _plugin.get_editor_interface()
+	return editor_interface.get_resource_filesystem() if editor_interface else null
+
+
+func set_resource_filesystem_adapter_for_tests(filesystem: Object) -> void:
+	_resource_filesystem_override = filesystem
 
 
 func _try_assign_imported_3d_texture() -> void:
@@ -9169,6 +14495,27 @@ func _complete_saved_3d_transition(transition: int) -> void:
 		_update_3d_session_status()
 		_set_status("Saved the active 3D texture.")
 		return
+	if _texture_3d_layer_coordinator and _texture_3d_layer_coordinator.is_dirty():
+		_focus_first_dirty_coordinated_target()
+		if _session_replace_dialog:
+			_session_replace_dialog.dialog_text = "Save %s before continuing?" % _get_active_3d_paint_session_identity()
+			_session_replace_dialog.call_deferred("popup_centered")
+		_set_status("Saved one target. Review the next unsaved texture before continuing.")
+		return
+	if _is_layered_session_save_required():
+		if not _layer_document_path.is_empty():
+			if not _save_layered_project_to_path(_layer_document_path):
+				if _session_replace_dialog:
+					_session_replace_dialog.call_deferred("popup_centered")
+				return
+		else:
+			_save_layered_for_3d_transition = true
+			_layered_save_transition = transition
+			if _session_replace_dialog:
+				_session_replace_dialog.hide()
+			call_deferred("_save_layered_project")
+			_set_status("Choose where to preserve the complete 3D layer stack before continuing.")
+			return
 	# STOP_SESSION was captured when Save/Save As began. It must not depend on
 	# later dialog signals or the transient pending-transition fields.
 	if transition == SessionTransition.STOP_SESSION:
@@ -9228,16 +14575,51 @@ func _set_uv_overlay_enabled(enabled: bool) -> void:
 	_on_uv_overlay_toggled(enabled)
 
 
-func _sync_3d_paint_view() -> void:
+func _sync_3d_paint_view(preserve_camera := false, texture_image: Image = null) -> void:
 	if not _paint_3d_view or not _canvas_mode_3d:
 		return
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		_clear_3d_paint_mesh()
 		return
-	_set_3d_paint_mesh_from_target(_texture_3d_session.target, _canvas.get_image_copy())
+	var camera_state := _capture_3d_camera_state() if preserve_camera else {}
+	var resolved_image: Image = texture_image if texture_image else _get_canvas_output_image()
+	_set_3d_paint_mesh_from_target(_texture_3d_session.target, resolved_image)
+	if not camera_state.is_empty():
+		_restore_3d_camera_state(camera_state)
+
+
+func _capture_3d_camera_state() -> Dictionary:
+	if not _paint_3d_camera:
+		return {}
+	return {
+		"target": _paint_3d_target,
+		"distance": _paint_3d_distance,
+		"yaw": _paint_3d_yaw,
+		"pitch": _paint_3d_pitch,
+		"basis_override_active": _paint_3d_camera_basis_override_active,
+		"basis_override": _paint_3d_camera_basis_override,
+	}
+
+
+func _restore_3d_camera_state(state: Dictionary) -> void:
+	if not _paint_3d_camera or state.is_empty():
+		return
+	_paint_3d_target = state.get("target", _paint_3d_target)
+	_paint_3d_distance = float(state.get("distance", _paint_3d_distance))
+	_paint_3d_yaw = float(state.get("yaw", _paint_3d_yaw))
+	_paint_3d_pitch = float(state.get("pitch", _paint_3d_pitch))
+	_paint_3d_camera_basis_override_active = bool(state.get("basis_override_active", false))
+	var basis_override: Variant = state.get("basis_override", _paint_3d_camera_basis_override)
+	if basis_override is Basis:
+		_paint_3d_camera_basis_override = basis_override
+	_update_3d_paint_camera()
+	_update_3d_rotation_gizmo_transform()
 
 
 func _poll_active_3d_target_geometry() -> void:
+	if _texture_3d_layer_coordinator:
+		_poll_coordinated_3d_target_geometry()
+		return
 	if not _texture_3d_session or not _texture_3d_session.target:
 		return
 	var source: Node3D
@@ -9246,20 +14628,30 @@ func _poll_active_3d_target_geometry() -> void:
 	if not is_instance_valid(source) or not source.is_inside_tree():
 		var became_unavailable := _paint_3d_source_available
 		_paint_3d_source_available = false
+		_scene_hierarchy_sync_enabled = false
 		_texture_3d_session.set_scene_transform_linked(false)
 		_apply_scene_transform_link_control_state(false)
 		_update_3d_context_control_visibility()
 		_update_3d_session_status()
 		if became_unavailable:
-			_set_status("The source scene is inactive or closed. The private 3D preview remains editable; Scene Transform Link is unavailable.")
+			_set_status("The source scene is inactive or closed. The private 3D preview remains editable; Scene Sync is unavailable.")
 		return
 	var became_available := not _paint_3d_source_available
 	_paint_3d_source_available = true
-	_apply_scene_transform_link_control_state(_texture_3d_session.is_scene_transform_linked())
+	_apply_scene_transform_link_control_state(_is_3d_scene_sync_enabled())
 	if became_available:
 		_paint_3d_geometry_dirty = true
-		_set_status("The source scene is active again; Scene Transform Link is available.")
-	if source is MeshInstance3D and (source as MeshInstance3D).mesh != _texture_3d_session.mesh_snapshot:
+		_set_status("The source scene is active again; Scene Sync is available.")
+	if (
+		source is MeshInstance3D
+		and _texture_3d_session.target.has_method("has_source_mesh_changed")
+		and _texture_3d_session.target.has_source_mesh_changed()
+	):
+		_paint_3d_geometry_dirty = true
+	if (
+		_texture_3d_session.target.has_method("has_pending_skeleton_pose_refresh")
+		and _texture_3d_session.target.has_pending_skeleton_pose_refresh()
+	):
 		_paint_3d_geometry_dirty = true
 	# CSG does not expose a stable Mesh resource whose changed signal can
 	# invalidate the cache, so retain the existing periodic snapshot check.
@@ -9270,11 +14662,90 @@ func _poll_active_3d_target_geometry() -> void:
 		_refresh_active_3d_target_geometry()
 
 
+func _poll_coordinated_3d_target_geometry() -> void:
+	if not _texture_3d_layer_coordinator or not _layer_session:
+		return
+	var active_target_id: String = _layer_session.active_target_id
+	var preview_changed := false
+	var active_texture_session = _texture_3d_layer_coordinator.get_active_texture_session()
+	for preview_entry_value in _texture_3d_layer_coordinator.get_preview_entries():
+		var preview_entry: Dictionary = preview_entry_value
+		var target_id := str(preview_entry.get("target_id", ""))
+		var texture_session = preview_entry.get("session")
+		if not texture_session or not texture_session.target:
+			continue
+		var binding_key := str(preview_entry.get("binding_key", ""))
+		var preview_id := target_id if bool(preview_entry.get("is_primary", false)) else binding_key
+		var source: Node3D
+		if is_instance_valid(texture_session.target.source_node):
+			source = texture_session.target.source_node
+		var is_active: bool = target_id == active_target_id and texture_session == active_texture_session
+		if not is_instance_valid(source) or not source.is_inside_tree():
+			texture_session.set_scene_transform_linked(false)
+			if is_active:
+				var became_unavailable := _paint_3d_source_available
+				_paint_3d_source_available = false
+				_apply_scene_transform_link_control_state(_is_3d_scene_sync_enabled())
+				_update_3d_context_control_visibility()
+				_update_3d_session_status()
+				if became_unavailable:
+					_set_status("The active source node is unavailable; Scene Sync continues for the rest of the imported hierarchy.")
+			continue
+		if is_active:
+			var became_available := not _paint_3d_source_available
+			_paint_3d_source_available = true
+			_apply_scene_transform_link_control_state(_is_3d_scene_sync_enabled())
+			if became_available:
+				_paint_3d_geometry_dirty = true
+				_set_status("The active source node is available again for Scene Sync.")
+		var mesh_resource_replaced: bool = (
+			source is MeshInstance3D
+			and texture_session.target.has_method("has_source_mesh_changed")
+			and texture_session.target.has_source_mesh_changed()
+		)
+		var skeleton_pose_changed: bool = (
+			texture_session.target.has_method("has_pending_skeleton_pose_refresh")
+			and texture_session.target.has_pending_skeleton_pose_refresh()
+		)
+		var needs_refresh: bool = (
+			bool(_paint_3d_context_geometry_dirty.get(preview_id, false))
+			or (is_active and _paint_3d_geometry_dirty)
+			or source is CSGShape3D
+			or mesh_resource_replaced
+			or skeleton_pose_changed
+		)
+		if not needs_refresh:
+			continue
+		_paint_3d_context_geometry_dirty.erase(preview_id)
+		var result: Dictionary = texture_session.refresh_geometry()
+		var status := str(result.get(GDDraw3DTextureSessionResource.STATUS, GDDraw3DTextureSessionResource.STATUS_ERROR))
+		if status != GDDraw3DTextureSessionResource.STATUS_OK:
+			_paint_3d_geometry_dirty = false
+			_clear_3d_paint_mesh()
+			_set_status(str(result.get(
+				GDDraw3DTextureSessionResource.MESSAGE,
+				"A coordinated source changed to an unsupported geometry state. Painting is paused; layer data remains available for saving or exit."
+			)))
+			return
+		preview_changed = preview_changed or mesh_resource_replaced or skeleton_pose_changed or bool(result.get("changed", false))
+	_paint_3d_geometry_dirty = false
+	if not preview_changed:
+		return
+	_texture_3d_session = _texture_3d_layer_coordinator.get_active_texture_session()
+	if _canvas and _texture_3d_session:
+		_canvas.set_uv_overlay_data(_texture_3d_session.uv_edges, _texture_3d_session.uv_vertices)
+	_sync_3d_paint_view()
+	_set_status("Refreshed the coordinated 3D preview after source geometry changed.")
+
+
 func _poll_active_3d_target_transform() -> void:
+	if _texture_3d_layer_coordinator:
+		_poll_coordinated_3d_target_transforms()
+		return
 	if (
 		not _texture_3d_session
 		or not _texture_3d_session.target
-		or not _texture_3d_session.is_scene_transform_linked()
+		or not _is_3d_scene_sync_enabled()
 	):
 		return
 	var source: Node3D
@@ -9282,17 +14753,73 @@ func _poll_active_3d_target_transform() -> void:
 		source = _texture_3d_session.target.source_node
 	if not is_instance_valid(source) or not source.is_inside_tree():
 		_paint_3d_source_available = false
+		_scene_hierarchy_sync_enabled = false
 		_texture_3d_session.set_scene_transform_linked(false)
 		_apply_scene_transform_link_control_state(false)
 		_update_3d_context_control_visibility()
 		_update_3d_session_status()
-		_set_status("The source scene is inactive or closed. The private 3D preview remains editable; Scene Transform Link is unavailable.")
+		_set_status("The source scene is inactive or closed. The private 3D preview remains editable; Scene Sync is unavailable.")
 		return
 	_paint_3d_source_available = true
 	var current_scene_transform := source.global_transform
 	_texture_3d_session.target.source_transform = current_scene_transform
 	if _texture_3d_session.update_live_source_transform(current_scene_transform):
 		_apply_3d_preview_transform(false)
+	_sync_3d_scene_visibility_from_sources()
+
+
+func _poll_coordinated_3d_target_transforms() -> void:
+	if not _texture_3d_layer_coordinator or not _layer_session or not _is_3d_scene_sync_enabled():
+		return
+	var active_target_id: String = _layer_session.active_target_id
+	var active_texture_session = _texture_3d_layer_coordinator.get_active_texture_session()
+	var available_source_count := 0
+	for preview_entry_value in _texture_3d_layer_coordinator.get_preview_entries():
+		var preview_entry: Dictionary = preview_entry_value
+		var target_id := str(preview_entry.get("target_id", ""))
+		var texture_session = preview_entry.get("session")
+		if not texture_session or not texture_session.target:
+			continue
+		var binding_key := str(preview_entry.get("binding_key", ""))
+		var preview_id := target_id if bool(preview_entry.get("is_primary", false)) else binding_key
+		var is_active: bool = target_id == active_target_id and texture_session == active_texture_session
+		var source: Node3D
+		if is_instance_valid(texture_session.target.source_node):
+			source = texture_session.target.source_node
+		if not is_instance_valid(source) or not source.is_inside_tree():
+			texture_session.set_scene_transform_linked(false)
+			if is_active:
+				_paint_3d_source_available = false
+				_update_3d_context_control_visibility()
+				_update_3d_session_status()
+			continue
+		available_source_count += 1
+		if is_active:
+			_paint_3d_source_available = true
+		var current_scene_transform := source.global_transform
+		texture_session.target.source_transform = current_scene_transform
+		var transform_changed := false
+		if not texture_session.is_scene_transform_linked():
+			transform_changed = texture_session.set_scene_transform_linked(true, current_scene_transform)
+		else:
+			transform_changed = texture_session.update_live_source_transform(current_scene_transform)
+		if not transform_changed:
+			continue
+		if is_active:
+			_apply_3d_preview_transform(false)
+		else:
+			var context_mesh := _get_3d_context_mesh_for_preview(preview_id)
+			if context_mesh:
+				context_mesh.transform = texture_session.get_preview_transform()
+	if available_source_count <= 0:
+		_scene_hierarchy_sync_enabled = false
+		_apply_scene_transform_link_control_state(false)
+		_update_3d_context_control_visibility()
+		_update_3d_session_status()
+		_set_status("The imported source hierarchy is inactive or closed. Private previews remain editable; Scene Sync is unavailable.")
+		return
+	_apply_scene_transform_link_control_state(true)
+	_sync_3d_scene_visibility_from_sources()
 
 
 func _observe_3d_paint_mesh(mesh: Mesh) -> void:
@@ -9305,6 +14832,30 @@ func _observe_3d_paint_mesh(mesh: Mesh) -> void:
 
 func _on_3d_paint_mesh_changed() -> void:
 	_paint_3d_geometry_dirty = true
+
+
+func _observe_3d_context_mesh(target_id: String, mesh: Mesh) -> void:
+	if target_id.is_empty() or not mesh:
+		return
+	var callback := Callable(self, "_on_3d_context_mesh_changed").bind(target_id)
+	if not mesh.changed.is_connected(callback):
+		mesh.changed.connect(callback)
+	_paint_3d_observed_context_meshes[target_id] = mesh
+
+
+func _clear_3d_context_mesh_observers() -> void:
+	for target_id_value in _paint_3d_observed_context_meshes:
+		var target_id := str(target_id_value)
+		var mesh: Mesh = _paint_3d_observed_context_meshes.get(target_id)
+		var callback := Callable(self, "_on_3d_context_mesh_changed").bind(target_id)
+		if mesh and mesh.changed.is_connected(callback):
+			mesh.changed.disconnect(callback)
+	_paint_3d_observed_context_meshes.clear()
+	_paint_3d_context_geometry_dirty.clear()
+
+
+func _on_3d_context_mesh_changed(target_id: String) -> void:
+	_paint_3d_context_geometry_dirty[target_id] = true
 
 
 func _refresh_active_3d_target_geometry() -> void:
@@ -9329,15 +14880,25 @@ func _refresh_active_3d_target_geometry() -> void:
 	_set_status("Refreshed the 3D preview after source geometry changed.")
 
 
-func _sync_3d_paint_texture() -> void:
+func _sync_3d_paint_texture(texture_image: Image = null) -> void:
 	if not _paint_3d_view or not _canvas_mode_3d:
 		return
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		return
 	if _canvas.is_surface_shape_previewing():
 		_set_3d_paint_texture_image(_canvas.get_surface_shape_preview_image())
+	elif (
+		_paint_3d_texture
+		and _canvas.has_method("get_display_texture_reference")
+		and _canvas.get_display_texture_reference() == _paint_3d_texture
+	):
+		# The live composite already updated this shared ImageTexture. Rebinding is
+		# sufficient; uploading the same 4K image again would create a visible hitch.
+		if _paint_3d_material:
+			_paint_3d_material.albedo_texture = _paint_3d_texture
+		_bind_shared_target_context_texture()
 	else:
-		_set_3d_paint_texture_image(_canvas.get_image_copy())
+		_set_3d_paint_texture_image(texture_image if texture_image else _get_canvas_output_image())
 
 
 func _clear_3d_paint_mesh() -> void:
@@ -9345,6 +14906,7 @@ func _clear_3d_paint_mesh() -> void:
 	_cancel_3d_rotation_gizmo_drag(false)
 	_set_3d_rotation_gizmo_hover_axis(-1)
 	_observe_3d_paint_mesh(null)
+	_clear_3d_context_mesh_observers()
 	_hide_3d_hover_debug_marker("3D mesh cleared")
 	_hide_3d_brush_preview()
 	# Hide preview content synchronously. queue_free() alone leaves it rendered
@@ -9359,6 +14921,16 @@ func _clear_3d_paint_mesh() -> void:
 		if preview_node and is_instance_valid(preview_node):
 			preview_node.visible = false
 			preview_node.queue_free()
+	for context_mesh in _paint_3d_context_meshes:
+		if context_mesh and is_instance_valid(context_mesh):
+			context_mesh.visible = false
+			context_mesh.queue_free()
+	_paint_3d_context_meshes.clear()
+	_paint_3d_context_materials.clear()
+	_paint_3d_context_textures.clear()
+	_paint_3d_context_caches.clear()
+	_paint_3d_context_material_by_target.clear()
+	_paint_3d_target_display_cache.clear()
 	_paint_3d_hover_debug_marker = null
 	_paint_3d_hover_triangle = null
 	_paint_3d_brush_preview = null
@@ -9366,10 +14938,12 @@ func _clear_3d_paint_mesh() -> void:
 	_paint_3d_mesh = null
 	_paint_3d_texture = null
 	_paint_3d_material = null
+	_paint_3d_hidden_surface_material = null
 	_paint_3d_mesh_cache = null
 	_paint_3d_triangle_cache.clear()
 	_paint_3d_island_cache.clear()
 	_paint_3d_geometry_dirty = false
+	_paint_3d_pending_accessory_refresh = false
 	_paint_3d_pending_motion = false
 	_paint_3d_pending_2d_hover = false
 	_update_3d_rotation_gizmo_visibility()
@@ -9390,10 +14964,23 @@ func _set_3d_paint_mesh_from_target(surface_target, texture_image: Image) -> voi
 	_paint_3d_mesh.mesh = preview_mesh
 	_paint_3d_mesh.transform = _get_3d_preview_transform(surface_target)
 	_paint_3d_mesh.lod_bias = PAINT_3D_PREVIEW_LOD_BIAS
+	if _layer_session and _layer_session.get_active_target():
+		var active_paint_target = _layer_session.get_active_target()
+		if texture_image and not texture_image.is_empty():
+			_paint_3d_target_display_cache[active_paint_target.target_id] = texture_image
+		var active_binding_key := str(active_paint_target.binding.get("key", ""))
+		_paint_3d_mesh.set_meta("gddraw_target_id", active_paint_target.target_id)
+		_paint_3d_mesh.set_meta("gddraw_binding_key", active_binding_key)
+		_paint_3d_mesh.set_meta("gddraw_preview_id", active_paint_target.target_id)
+		_initialize_3d_preview_scene_visibility(_paint_3d_mesh, active_paint_target.target_id, active_binding_key)
+		var active_group_id := _get_object_group_id_for_source_node(source)
+		if active_group_id.is_empty():
+			active_group_id = str(active_paint_target.owner_group_id)
+		_paint_3d_mesh.set_meta("gddraw_group_id", active_group_id)
 	var paint_material := _make_3d_paint_material(source, texture_image)
-	for surface_slot in surface_target.preview_surface_slots:
-		_paint_3d_mesh.set_surface_override_material(surface_slot, paint_material)
+	_apply_3d_target_preview_materials(_paint_3d_mesh, surface_target, paint_material)
 	_paint_3d_root.add_child(_paint_3d_mesh)
+	_build_3d_coordinated_context_previews()
 	_set_status("Indexing mesh geometry for responsive 3D painting…")
 	Input.set_default_cursor_shape(Input.CURSOR_WAIT)
 	_build_3d_mesh_paint_cache(preview_mesh, surface_target)
@@ -9404,7 +14991,8 @@ func _set_3d_paint_mesh_from_target(surface_target, texture_image: Image) -> voi
 			str(int(cache_stats.get("triangle_count", 0))),
 			float(cache_stats.get("build_time_usec", 0)) / 1000.0,
 		])
-	_observe_3d_paint_mesh(preview_mesh)
+	var observed_source_mesh: Mesh = surface_target.source_mesh if surface_target.source_mesh else preview_mesh
+	_observe_3d_paint_mesh(observed_source_mesh)
 	_paint_3d_brush_preview = MeshInstance3D.new()
 	_paint_3d_brush_preview.name = "3D Brush Preview"
 	_paint_3d_brush_preview.visible = false
@@ -9427,11 +15015,309 @@ func _set_3d_paint_mesh_from_target(surface_target, texture_image: Image) -> voi
 	_paint_3d_wire_mesh.transform = _paint_3d_mesh.transform
 	_paint_3d_wire_mesh.material_override = _make_3d_wire_overlay_material()
 	_paint_3d_root.add_child(_paint_3d_wire_mesh)
-	_update_3d_wire_overlay_visibility()
-	_establish_3d_preview_stage(preview_mesh)
-	_frame_3d_paint_mesh(preview_mesh)
+	_apply_3d_object_group_visibility()
+	_establish_3d_preview_stage_for_visible_meshes()
+	_frame_3d_visible_meshes()
 	_update_3d_rotation_gizmo_transform()
 	_update_3d_rotation_gizmo_visibility()
+
+
+func _build_3d_coordinated_context_previews() -> void:
+	if not _texture_3d_layer_coordinator or not _layer_session or not _paint_3d_root:
+		return
+	var active_target_id: String = _layer_session.active_target_id
+	var active_texture_session = _texture_3d_layer_coordinator.get_active_texture_session()
+	for preview_entry_value in _texture_3d_layer_coordinator.get_preview_entries():
+		var preview_entry: Dictionary = preview_entry_value
+		var target_id := str(preview_entry.get("target_id", ""))
+		var texture_session = preview_entry.get("session")
+		if target_id == active_target_id and texture_session == active_texture_session:
+			continue
+		var paint_target = _layer_session.get_target(target_id)
+		if not texture_session or not texture_session.target or not texture_session.target.mesh_snapshot or not paint_target:
+			continue
+		var binding_key := str(preview_entry.get("binding_key", ""))
+		var preview_id := target_id if bool(preview_entry.get("is_primary", false)) else binding_key
+		if preview_id.is_empty():
+			preview_id = "%s:%d" % [target_id, _paint_3d_context_meshes.size()]
+		var context_mesh := MeshInstance3D.new()
+		context_mesh.name = "%s Context Preview" % texture_session.target.get_source_name()
+		context_mesh.mesh = texture_session.target.mesh_snapshot
+		context_mesh.transform = texture_session.get_preview_transform()
+		context_mesh.lod_bias = PAINT_3D_PREVIEW_LOD_BIAS
+		context_mesh.set_meta("gddraw_target_id", target_id)
+		context_mesh.set_meta("gddraw_binding_key", binding_key)
+		context_mesh.set_meta("gddraw_preview_id", preview_id)
+		_initialize_3d_preview_scene_visibility(context_mesh, target_id, binding_key)
+		var descriptor: Dictionary = preview_entry.get("descriptor", {})
+		var group_key := str(descriptor.get("group_key", descriptor.get("source_key", "")))
+		context_mesh.set_meta("gddraw_group_id", _get_object_group_id_for_source_key(group_key))
+		var context_composite: Image = paint_target.composite()
+		_paint_3d_target_display_cache[target_id] = context_composite
+		var context_material := _make_3d_context_preview_material(
+			texture_session,
+			context_composite,
+			_paint_3d_texture if target_id == active_target_id else null
+		)
+		_apply_3d_target_preview_materials(context_mesh, texture_session.target, context_material)
+		_paint_3d_root.add_child(context_mesh)
+		_paint_3d_context_meshes.push_back(context_mesh)
+		_paint_3d_context_materials.push_back(context_material)
+		_paint_3d_context_material_by_target[preview_id] = context_material
+		var cache_script: Script = load(MESH_PAINT_CACHE_SCRIPT_PATH)
+		if cache_script:
+			var context_cache = cache_script.new()
+			context_cache.build(
+				texture_session.target.mesh_snapshot,
+				texture_session.target.preview_surface_slots,
+				str(texture_session.target.geometry_signature)
+			)
+			_paint_3d_context_caches[preview_id] = context_cache
+			var observed_source_mesh: Mesh = (
+				texture_session.target.source_mesh
+				if texture_session.target.source_mesh
+				else texture_session.target.mesh_snapshot
+			)
+			_observe_3d_context_mesh(preview_id, observed_source_mesh)
+
+
+func _get_3d_context_mesh_for_target(target_id: String) -> MeshInstance3D:
+	for context_mesh in _paint_3d_context_meshes:
+		if context_mesh and str(context_mesh.get_meta("gddraw_target_id", "")) == target_id:
+			return context_mesh
+	return null
+
+
+func _get_3d_context_mesh_for_preview(preview_id: String) -> MeshInstance3D:
+	for context_mesh in _paint_3d_context_meshes:
+		if context_mesh and str(context_mesh.get_meta("gddraw_preview_id", "")) == preview_id:
+			return context_mesh
+	return null
+
+
+func _promote_cached_3d_preview(target_id: String, binding_key: String) -> bool:
+	if not _texture_3d_layer_coordinator or not _paint_3d_mesh:
+		return false
+	var active_target_id := str(_paint_3d_mesh.get_meta("gddraw_target_id", ""))
+	var active_binding_key := str(_paint_3d_mesh.get_meta("gddraw_binding_key", ""))
+	if active_target_id == target_id and (binding_key.is_empty() or active_binding_key == binding_key):
+		return true
+	var next_mesh: MeshInstance3D
+	for context_mesh in _paint_3d_context_meshes:
+		if not context_mesh or str(context_mesh.get_meta("gddraw_target_id", "")) != target_id:
+			continue
+		if not binding_key.is_empty() and str(context_mesh.get_meta("gddraw_binding_key", "")) != binding_key:
+			continue
+		next_mesh = context_mesh
+		break
+	if not next_mesh:
+		return false
+	var next_preview_id := str(next_mesh.get_meta("gddraw_preview_id", target_id))
+	var next_cache = _paint_3d_context_caches.get(next_preview_id)
+	var next_material: StandardMaterial3D = _paint_3d_context_material_by_target.get(next_preview_id)
+	if not next_cache or not next_cache.is_valid() or not next_material:
+		return false
+
+	var previous_mesh := _paint_3d_mesh
+	var previous_cache = _paint_3d_mesh_cache
+	var previous_material := _paint_3d_material
+	var previous_preview_id := str(previous_mesh.get_meta(
+		"gddraw_preview_id",
+		previous_mesh.get_meta("gddraw_target_id", "")
+	))
+	_paint_3d_context_meshes.erase(next_mesh)
+	if previous_mesh and not _paint_3d_context_meshes.has(previous_mesh):
+		_paint_3d_context_meshes.push_back(previous_mesh)
+	if not previous_preview_id.is_empty():
+		_paint_3d_context_caches[previous_preview_id] = previous_cache
+		_paint_3d_context_material_by_target[previous_preview_id] = previous_material
+	_paint_3d_mesh = next_mesh
+	_paint_3d_mesh_cache = next_cache
+	_paint_3d_material = next_material
+	_paint_3d_texture = next_material.albedo_texture as ImageTexture
+	_paint_3d_pending_accessory_refresh = true
+	if _paint_3d_wire_mesh:
+		_paint_3d_wire_mesh.visible = false
+	_update_3d_rotation_gizmo_transform()
+	_update_3d_rotation_gizmo_visibility()
+	return true
+
+
+func _refresh_promoted_3d_preview_accessories() -> void:
+	if not _paint_3d_pending_accessory_refresh:
+		return
+	_paint_3d_pending_accessory_refresh = false
+	if _paint_3d_wire_mesh and _paint_3d_mesh and _paint_3d_mesh.mesh:
+		_paint_3d_wire_mesh.mesh = _make_3d_wire_overlay_mesh(_paint_3d_mesh.mesh)
+		_paint_3d_wire_mesh.transform = _paint_3d_mesh.transform
+	_update_3d_wire_overlay_visibility()
+
+
+func _get_3d_preview_entry_id(preview_entry: Dictionary) -> String:
+	var target_id := str(preview_entry.get("target_id", ""))
+	var binding_key := str(preview_entry.get("binding_key", ""))
+	return target_id if bool(preview_entry.get("is_primary", false)) or binding_key.is_empty() else binding_key
+
+
+func _get_3d_scene_sync_key(target_id: String, binding_key: String) -> String:
+	return binding_key if not binding_key.is_empty() else target_id
+
+
+func _initialize_3d_preview_scene_visibility(preview_mesh: MeshInstance3D, target_id: String, binding_key: String) -> void:
+	if not preview_mesh:
+		return
+	var sync_key := _get_3d_scene_sync_key(target_id, binding_key)
+	preview_mesh.set_meta("gddraw_scene_sync_key", sync_key)
+	preview_mesh.set_meta("gddraw_scene_visible", bool(_paint_3d_scene_visibility_cache.get(sync_key, true)))
+
+
+func _get_3d_preview_mesh_for_entry(preview_entry: Dictionary) -> MeshInstance3D:
+	if not _texture_3d_layer_coordinator or not _layer_session:
+		return _paint_3d_mesh
+	var preview_id := _get_3d_preview_entry_id(preview_entry)
+	var active_preview_id := str(_paint_3d_mesh.get_meta(
+		"gddraw_preview_id",
+		_paint_3d_mesh.get_meta("gddraw_target_id", "")
+	)) if _paint_3d_mesh else ""
+	if not preview_id.is_empty() and preview_id == active_preview_id:
+		return _paint_3d_mesh
+	return _get_3d_context_mesh_for_preview(preview_id)
+
+
+func _sync_3d_scene_visibility_from_sources() -> void:
+	if not _is_3d_scene_sync_enabled():
+		return
+	var visibility_changed := false
+	var group_visibility_changed := _sync_3d_object_group_scene_visibility_cache()
+	if _texture_3d_layer_coordinator:
+		for preview_entry_value in _texture_3d_layer_coordinator.get_preview_entries():
+			var preview_entry: Dictionary = preview_entry_value
+			var texture_session = preview_entry.get("session")
+			if not texture_session or not texture_session.target:
+				continue
+			var source: Node3D = texture_session.target.source_node if is_instance_valid(texture_session.target.source_node) else null
+			if not is_instance_valid(source) or not source.is_inside_tree():
+				continue
+			var target_id := str(preview_entry.get("target_id", ""))
+			var binding_key := str(preview_entry.get("binding_key", ""))
+			var sync_key := _get_3d_scene_sync_key(target_id, binding_key)
+			var source_visible := source.is_visible_in_tree()
+			_paint_3d_scene_visibility_cache[sync_key] = source_visible
+			var preview_mesh := _get_3d_preview_mesh_for_entry(preview_entry)
+			if preview_mesh and bool(preview_mesh.get_meta("gddraw_scene_visible", true)) != source_visible:
+				preview_mesh.set_meta("gddraw_scene_visible", source_visible)
+				visibility_changed = true
+	elif _texture_3d_session and _texture_3d_session.target and _paint_3d_mesh:
+		var source := _get_active_3d_source_node()
+		if is_instance_valid(source) and source.is_inside_tree():
+			var target_id := str(_paint_3d_mesh.get_meta("gddraw_target_id", "active"))
+			var binding_key := str(_paint_3d_mesh.get_meta("gddraw_binding_key", ""))
+			var sync_key := _get_3d_scene_sync_key(target_id, binding_key)
+			var source_visible := source.is_visible_in_tree()
+			_paint_3d_scene_visibility_cache[sync_key] = source_visible
+			if bool(_paint_3d_mesh.get_meta("gddraw_scene_visible", true)) != source_visible:
+				_paint_3d_mesh.set_meta("gddraw_scene_visible", source_visible)
+				visibility_changed = true
+	if visibility_changed:
+		_apply_3d_object_group_visibility()
+	if group_visibility_changed:
+		_refresh_3d_object_group_visibility_buttons()
+
+
+func _sync_3d_object_group_scene_visibility_cache() -> bool:
+	if not _layer_session or _layer_session.session_kind != "3d":
+		return false
+	var next_cache := {}
+	for group in _layer_session.object_groups:
+		var group_id := str(group.get("id", ""))
+		if group_id.is_empty():
+			continue
+		var source_node := _resolve_object_group_source_node(group_id)
+		if is_instance_valid(source_node) and source_node is Node3D and source_node.is_inside_tree():
+			next_cache[group_id] = source_node.is_visible_in_tree()
+	var changed := next_cache != _paint_3d_object_group_scene_visibility_cache
+	_paint_3d_object_group_scene_visibility_cache = next_cache
+	return changed
+
+
+func _apply_all_3d_preview_transforms() -> void:
+	if not _texture_3d_layer_coordinator:
+		_apply_3d_preview_transform(false)
+		return
+	var active_applied := false
+	for preview_entry_value in _texture_3d_layer_coordinator.get_preview_entries():
+		var preview_entry: Dictionary = preview_entry_value
+		var texture_session = preview_entry.get("session")
+		if not texture_session or not texture_session.target:
+			continue
+		var preview_mesh := _get_3d_preview_mesh_for_entry(preview_entry)
+		if preview_mesh == _paint_3d_mesh:
+			if not active_applied:
+				_apply_3d_preview_transform(false)
+				active_applied = true
+		elif preview_mesh:
+			preview_mesh.transform = texture_session.get_preview_transform()
+
+
+func _apply_3d_object_group_visibility() -> void:
+	if not _layer_session or _layer_session.session_kind != "3d":
+		return
+	var preview_meshes: Array[MeshInstance3D] = []
+	if _paint_3d_mesh:
+		preview_meshes.push_back(_paint_3d_mesh)
+	preview_meshes.append_array(_paint_3d_context_meshes)
+	for preview_mesh in preview_meshes:
+		if not preview_mesh:
+			continue
+		var group_id := str(preview_mesh.get_meta("gddraw_group_id", ""))
+		preview_mesh.visible = (
+			not group_id.is_empty()
+			and _layer_session.is_object_group_effectively_visible(group_id)
+			and bool(preview_mesh.get_meta("gddraw_scene_visible", true))
+		)
+	var active_visible := _paint_3d_mesh != null and _paint_3d_mesh.visible
+	if not active_visible:
+		_hide_3d_hover_debug_marker("The active 3D object is hidden in the Layers panel")
+		_hide_3d_hover_triangle()
+		_hide_3d_brush_preview()
+	_update_3d_wire_overlay_visibility()
+	_update_3d_rotation_gizmo_visibility()
+
+
+func _apply_3d_target_preview_materials(
+	preview_mesh: MeshInstance3D,
+	surface_target,
+	target_material: Material
+) -> void:
+	if not preview_mesh or not preview_mesh.mesh or not surface_target or not target_material:
+		return
+	# A singular texture session keeps the source materials visible, matching the
+	# established preview. Coordinated sessions may contain two paint targets on
+	# different material slots of the same Mesh, so each preview instance must
+	# render only the slots it owns. Otherwise duplicated full meshes overlap and
+	# both visual selection and hit routing become ambiguous.
+	if _texture_3d_layer_coordinator:
+		if not _paint_3d_hidden_surface_material:
+			_paint_3d_hidden_surface_material = _make_3d_hidden_surface_material()
+		for surface_slot in range(preview_mesh.mesh.get_surface_count()):
+			preview_mesh.set_surface_override_material(surface_slot, _paint_3d_hidden_surface_material)
+	for surface_slot_value in surface_target.preview_surface_slots:
+		var surface_slot := int(surface_slot_value)
+		if surface_slot >= 0 and surface_slot < preview_mesh.mesh.get_surface_count():
+			preview_mesh.set_surface_override_material(surface_slot, target_material)
+
+
+func _make_3d_hidden_surface_material() -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.resource_name = "GDDraw Hidden Coordinated Surface"
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = Color(0.0, 0.0, 0.0, 0.0)
+	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.disable_receive_shadows = true
+	material.disable_fog = true
+	return material
 
 
 func _get_3d_preview_transform(surface_target) -> Transform3D:
@@ -9487,6 +15373,21 @@ func _set_3d_paint_texture_image(texture_image: Image) -> void:
 		_paint_3d_texture.update(preview_image)
 	if _paint_3d_material:
 		_paint_3d_material.albedo_texture = _paint_3d_texture
+	_bind_shared_target_context_texture()
+
+
+func _bind_shared_target_context_texture() -> void:
+	if not _texture_3d_layer_coordinator or not _layer_session or not _paint_3d_texture:
+		return
+	var active_target_id: String = _layer_session.active_target_id
+	for context_mesh in _paint_3d_context_meshes:
+		if not context_mesh or str(context_mesh.get_meta("gddraw_target_id", "")) != active_target_id:
+			continue
+		var preview_id := str(context_mesh.get_meta("gddraw_preview_id", active_target_id))
+		var context_material: StandardMaterial3D = _paint_3d_context_material_by_target.get(preview_id)
+		if not context_material:
+			continue
+		context_material.albedo_texture = _paint_3d_texture
 
 
 func _make_3d_paint_material(source: Node3D, texture_image: Image) -> StandardMaterial3D:
@@ -9535,9 +15436,56 @@ func _make_3d_paint_material(source: Node3D, texture_image: Image) -> StandardMa
 	return material
 
 
+func _make_3d_context_preview_material(
+	texture_session,
+	texture_image: Image,
+	shared_preview_texture: ImageTexture = null
+) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	var source_name := "3D Surface"
+	if texture_session and texture_session.target:
+		source_name = texture_session.target.get_source_name()
+	material.resource_name = source_name + " GDDraw Context Preview"
+	material.shading_mode = (
+		BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		if _preview_light_enabled
+		else BaseMaterial3D.SHADING_MODE_UNSHADED
+	)
+	material.albedo_color = Color.WHITE
+	material.roughness = 1.0
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	material.texture_repeat = false
+	material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+	material.disable_receive_shadows = true
+	material.disable_fog = true
+	material.vertex_color_use_as_albedo = false
+	var source_material: StandardMaterial3D = texture_session.material as StandardMaterial3D if texture_session else null
+	if source_material:
+		material.uv1_scale = source_material.uv1_scale
+		material.uv1_offset = source_material.uv1_offset
+		material.uv1_triplanar = source_material.uv1_triplanar
+	if shared_preview_texture:
+		material.albedo_texture = shared_preview_texture
+	else:
+		var preview_image := _make_3d_preview_image(texture_image)
+		if not preview_image:
+			return material
+		var preview_texture := ImageTexture.create_from_image(preview_image)
+		_paint_3d_context_textures.push_back(preview_texture)
+		material.albedo_texture = preview_texture
+	return material
+
+
 func _make_3d_preview_image(source_image: Image) -> Image:
 	if not source_image or source_image.is_empty():
 		return null
+	if (
+		not source_image.is_compressed()
+		and not source_image.has_mipmaps()
+		and source_image.get_format() == Image.FORMAT_RGBA8
+	):
+		return source_image
 	var image := source_image.duplicate()
 	if image.is_compressed():
 		var error: Error = image.decompress()
@@ -9831,8 +15779,9 @@ func _3d_triangle_key(surface_index: int, triangle_index: int) -> String:
 func _get_3d_hover_island_hits(hit: Dictionary) -> Array:
 	if hit.is_empty():
 		return []
-	if _paint_3d_mesh_cache and _paint_3d_mesh_cache.is_valid():
-		var cached_hits: Array = _paint_3d_mesh_cache.get_island_triangles(
+	var hit_cache = _get_3d_mesh_cache_for_hit(hit)
+	if hit_cache and hit_cache.is_valid():
+		var cached_hits: Array = hit_cache.get_island_triangles(
 			int(hit.get("surface_index", -1)),
 			int(hit.get("triangle_index", -1))
 		)
@@ -9847,6 +15796,22 @@ func _get_3d_hover_island_hits(hit: Dictionary) -> Array:
 	if hits.is_empty():
 		hits.push_back(hit)
 	return hits
+
+
+func _get_3d_mesh_cache_for_hit(hit: Dictionary):
+	var target_id := str(hit.get("target_id", ""))
+	var preview_id := str(hit.get("preview_id", target_id))
+	var active_preview_id := str(_paint_3d_mesh.get_meta(
+		"gddraw_preview_id",
+		_paint_3d_mesh.get_meta("gddraw_target_id", "")
+	)) if _paint_3d_mesh else ""
+	if (
+		_texture_3d_layer_coordinator
+		and not preview_id.is_empty()
+		and preview_id != active_preview_id
+	):
+		return _paint_3d_context_caches.get(preview_id)
+	return _paint_3d_mesh_cache
 
 
 func _add_3d_wire_triangle(wire_mesh: ImmediateMesh, edge_keys: Dictionary, vertices: PackedVector3Array, a: int, b: int, c: int) -> void:
@@ -9875,7 +15840,13 @@ func _vertex_key(vertex: Vector3) -> String:
 
 func _update_3d_wire_overlay_visibility() -> void:
 	if _paint_3d_wire_mesh:
-		_paint_3d_wire_mesh.visible = _canvas_mode_3d and _uv_overlay_toggle and _uv_overlay_toggle.button_pressed
+		_paint_3d_wire_mesh.visible = (
+			_canvas_mode_3d
+			and _uv_overlay_toggle
+			and _uv_overlay_toggle.button_pressed
+			and _paint_3d_mesh != null
+			and _paint_3d_mesh.visible
+		)
 
 
 func _frame_3d_paint_mesh(mesh: Mesh) -> void:
@@ -9885,6 +15856,19 @@ func _frame_3d_paint_mesh(mesh: Mesh) -> void:
 	if _paint_3d_mesh and _paint_3d_mesh.mesh == mesh:
 		preview_transform = _paint_3d_mesh.transform
 	var aabb := _get_transformed_3d_aabb(mesh.get_aabb(), preview_transform)
+	_frame_3d_aabb(aabb)
+
+
+func _frame_3d_visible_meshes() -> void:
+	var combined := _get_3d_visible_meshes_aabb()
+	if combined.size == Vector3.ZERO:
+		return
+	_frame_3d_aabb(combined)
+
+
+func _frame_3d_aabb(aabb: AABB) -> void:
+	if not _paint_3d_camera:
+		return
 	_paint_3d_target = aabb.get_center()
 	var largest_axis := maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
 	_paint_3d_distance = maxf(largest_axis * 1.8, 1.0)
@@ -9902,6 +15886,22 @@ func _frame_3d_paint_mesh(mesh: Mesh) -> void:
 	_update_3d_paint_camera()
 	_resize_3d_paint_viewport()
 	_update_3d_rotation_gizmo_transform()
+
+
+func _get_3d_visible_meshes_aabb() -> AABB:
+	var combined := AABB()
+	var has_bounds := false
+	var visible_meshes: Array[MeshInstance3D] = []
+	if _paint_3d_mesh:
+		visible_meshes.push_back(_paint_3d_mesh)
+	visible_meshes.append_array(_paint_3d_context_meshes)
+	for mesh_instance in visible_meshes:
+		if not mesh_instance or not mesh_instance.visible or not mesh_instance.mesh:
+			continue
+		var bounds := _get_transformed_3d_aabb(mesh_instance.mesh.get_aabb(), mesh_instance.transform)
+		combined = bounds if not has_bounds else combined.merge(bounds)
+		has_bounds = true
+	return combined
 
 
 func _get_3d_editor_view_camera_basis() -> Variant:
@@ -10300,15 +16300,20 @@ func _establish_3d_preview_stage(mesh: Mesh) -> void:
 	_update_3d_paint_stage(aabb, maxf(PAINT_3D_STAGE_MIN_SIZE, largest_axis * PAINT_3D_STAGE_PADDING))
 
 
-func _update_3d_paint_stage(aabb: AABB, stage_size: float) -> void:
+func _establish_3d_preview_stage_for_visible_meshes() -> void:
+	var aabb := _get_3d_visible_meshes_aabb()
+	var largest_axis := maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
+	_update_3d_paint_stage(aabb, maxf(PAINT_3D_STAGE_MIN_SIZE, largest_axis * PAINT_3D_STAGE_PADDING))
+
+
+func _update_3d_paint_stage(_aabb: AABB, stage_size: float) -> void:
 	if not _paint_3d_stage_root or not _paint_3d_stage_floor or not _paint_3d_stage_grid:
 		return
-	var center := aabb.get_center()
-	var floor_y := aabb.position.y
-	if aabb.size == Vector3.ZERO:
-		center = Vector3.ZERO
-		floor_y = -0.5
-	_paint_3d_stage_root.position = Vector3(center.x, floor_y - 0.01, center.z)
+	# The stage is a scene-coordinate reference, so its colored axes must stay at
+	# the authored world origin. Framing still uses the mesh bounds, but moving
+	# this root to those bounds makes asymmetrical or multi-object scenes appear
+	# translated even when every preview mesh has the correct source transform.
+	_paint_3d_stage_root.transform = Transform3D.IDENTITY
 	var grid_extent := _get_3d_stage_grid_extent(stage_size)
 	var floor_mesh := _paint_3d_stage_floor.mesh as PlaneMesh
 	if floor_mesh:
@@ -10421,6 +16426,7 @@ func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
 			_paint_3d_panning = event.pressed and navigation_mode == NAVIGATION_3D_PAN
 			_paint_3d_orbiting = event.pressed and navigation_mode == NAVIGATION_3D_ORBIT
 			_paint_3d_last_mouse_position = event.position
+			_update_3d_paint_cursor(false)
 			_paint_3d_view.accept_event()
 		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			if _paint_3d_freelooking:
@@ -10520,36 +16526,81 @@ func _get_3d_mouse_navigation_mode(event: InputEventMouseButton) -> int:
 func _pick_3d_paint_uv(view_position: Vector2) -> Dictionary:
 	if not _paint_3d_camera or not _paint_3d_mesh or not _paint_3d_mesh_cache or not _paint_3d_mesh_cache.is_valid():
 		return {}
-
 	var ray_origin := _paint_3d_camera.project_ray_origin(view_position)
 	var ray_direction := _paint_3d_camera.project_ray_normal(view_position).normalized()
 	if ray_direction.length_squared() <= 0.0:
 		return {}
+	var started := Time.get_ticks_usec()
+	var active_target_id := str(_paint_3d_mesh.get_meta(
+		"gddraw_target_id",
+		_layer_session.active_target_id if _layer_session else ""
+	))
+	var best_hit := _query_3d_preview_mesh_hit(
+		_paint_3d_mesh,
+		_paint_3d_mesh_cache,
+		ray_origin,
+		ray_direction,
+		active_target_id,
+		_paint_3d_material
+	)
+	if _texture_3d_layer_coordinator:
+		for context_mesh in _paint_3d_context_meshes:
+			var target_id := str(context_mesh.get_meta("gddraw_target_id", ""))
+			var preview_id := str(context_mesh.get_meta("gddraw_preview_id", target_id))
+			var context_hit := _query_3d_preview_mesh_hit(
+				context_mesh,
+				_paint_3d_context_caches.get(preview_id),
+				ray_origin,
+				ray_direction,
+				target_id,
+				_paint_3d_context_material_by_target.get(preview_id)
+			)
+			if context_hit.is_empty():
+				continue
+			if best_hit.is_empty() or float(context_hit.get("world_distance", INF)) < float(best_hit.get("world_distance", INF)):
+				best_hit = context_hit
+	if not best_hit.is_empty():
+		best_hit["ray_query_usec"] = Time.get_ticks_usec() - started
+	if DEBUG_MESH_PAINT_PERFORMANCE:
+		print("GDDraw coordinated ray query hit=", best_hit.get("target_id", ""), " usec=", Time.get_ticks_usec() - started)
+	return best_hit
 
-	var local_origin := _paint_3d_mesh.to_local(ray_origin)
-	var local_end := _paint_3d_mesh.to_local(ray_origin + ray_direction * _paint_3d_camera.far)
+
+func _query_3d_preview_mesh_hit(
+	preview_mesh: MeshInstance3D,
+	mesh_cache,
+	ray_origin: Vector3,
+	ray_direction: Vector3,
+	target_id: String,
+	preview_material: StandardMaterial3D
+) -> Dictionary:
+	if not preview_mesh or not preview_mesh.visible or not mesh_cache or not mesh_cache.is_valid():
+		return {}
+	var local_origin := preview_mesh.to_local(ray_origin)
+	var local_end := preview_mesh.to_local(ray_origin + ray_direction * _paint_3d_camera.far)
 	var local_direction := local_end - local_origin
 	var local_ray_length := local_direction.length()
 	if local_ray_length <= 0.0:
 		return {}
 	local_direction /= local_ray_length
-
-	var started := Time.get_ticks_usec()
-	var query: Dictionary = _paint_3d_mesh_cache.query_ray(local_origin, local_direction, local_ray_length)
-	var best_hit: Dictionary = query.get("hit", {})
-	if not best_hit.is_empty():
-		best_hit["ray_candidate_triangle_count"] = int(query.get("candidate_count", 0))
-		best_hit["ray_triangles_examined"] = int(query.get("triangles_examined", 0))
-		best_hit["ray_nodes_examined"] = int(query.get("nodes_examined", 0))
-		best_hit["ray_query_usec"] = Time.get_ticks_usec() - started
-		_add_3d_texture_uv_to_hit(best_hit)
-	if DEBUG_MESH_PAINT_PERFORMANCE:
-		print("GDDraw ray query: ", query, " usec=", Time.get_ticks_usec() - started)
-	return best_hit
+	var query: Dictionary = mesh_cache.query_ray(local_origin, local_direction, local_ray_length)
+	var hit: Dictionary = query.get("hit", {})
+	if hit.is_empty():
+		return {}
+	hit["ray_candidate_triangle_count"] = int(query.get("candidate_count", 0))
+	hit["ray_triangles_examined"] = int(query.get("triangles_examined", 0))
+	hit["ray_nodes_examined"] = int(query.get("nodes_examined", 0))
+	hit["target_id"] = target_id
+	hit["binding_key"] = str(preview_mesh.get_meta("gddraw_binding_key", ""))
+	hit["preview_id"] = str(preview_mesh.get_meta("gddraw_preview_id", target_id))
+	hit["preview_transform"] = preview_mesh.global_transform
+	hit["world_distance"] = ray_origin.distance_to(preview_mesh.to_global(hit.get("position", Vector3.ZERO)))
+	_add_3d_texture_uv_to_hit(hit, preview_material)
+	return hit
 
 
 func _find_3d_paint_hit_from_uv(uv: Vector2) -> Dictionary:
-	if not _paint_3d_camera or not _paint_3d_mesh or not _paint_3d_mesh_cache or not _paint_3d_mesh_cache.is_valid():
+	if not _paint_3d_camera or not _paint_3d_mesh or not _paint_3d_mesh.visible or not _paint_3d_mesh_cache or not _paint_3d_mesh_cache.is_valid():
 		return {}
 	var started := Time.get_ticks_usec()
 	var best_hit := {}
@@ -10604,22 +16655,27 @@ func _find_3d_paint_hit_from_uv(uv: Vector2) -> Dictionary:
 	return best_hit
 
 
-func _add_3d_texture_uv_to_hit(hit: Dictionary) -> void:
+func _add_3d_texture_uv_to_hit(hit: Dictionary, preview_material: StandardMaterial3D = null) -> void:
 	if hit.is_empty():
 		return
-	hit["texture_uv"] = _mesh_uv_to_texture_uv(hit.get("uv", Vector2.ZERO))
+	var material := preview_material if preview_material else _paint_3d_material
+	hit["texture_uv"] = _mesh_uv_to_texture_uv_with_material(hit.get("uv", Vector2.ZERO), material)
 	var mesh_triangle_uvs: PackedVector2Array = hit.get("triangle_uvs", PackedVector2Array())
 	var texture_triangle_uvs := PackedVector2Array()
 	for mesh_triangle_uv in mesh_triangle_uvs:
-		texture_triangle_uvs.push_back(_mesh_uv_to_texture_uv(mesh_triangle_uv))
+		texture_triangle_uvs.push_back(_mesh_uv_to_texture_uv_with_material(mesh_triangle_uv, material))
 	hit["texture_triangle_uvs"] = texture_triangle_uvs
 
 
 func _mesh_uv_to_texture_uv(uv: Vector2) -> Vector2:
-	if not _paint_3d_material:
+	return _mesh_uv_to_texture_uv_with_material(uv, _paint_3d_material)
+
+
+func _mesh_uv_to_texture_uv_with_material(uv: Vector2, material: StandardMaterial3D) -> Vector2:
+	if not material:
 		return uv
-	var scale := _paint_3d_material.uv1_scale
-	var offset := _paint_3d_material.uv1_offset
+	var scale := material.uv1_scale
+	var offset := material.uv1_offset
 	return Vector2(uv.x * scale.x + offset.x, uv.y * scale.y + offset.y)
 
 
@@ -10842,10 +16898,11 @@ func _pick_3d_paint_triangle_uv(ray_origin: Vector3, ray_direction: Vector3, ray
 
 
 func _count_3d_uv_overlaps(hit: Dictionary) -> int:
-	if not _paint_3d_mesh_cache or not _paint_3d_mesh_cache.is_valid() or hit.is_empty():
+	var hit_cache = _get_3d_mesh_cache_for_hit(hit)
+	if not hit_cache or not hit_cache.is_valid() or hit.is_empty():
 		return 0
 	var started := Time.get_ticks_usec()
-	var result: Dictionary = _paint_3d_mesh_cache.count_uv_overlaps(hit, _get_3d_uv_overlap_distance_epsilon())
+	var result: Dictionary = hit_cache.count_uv_overlaps(hit, _get_3d_uv_overlap_distance_epsilon())
 	if DEBUG_MESH_PAINT_PERFORMANCE:
 		print("GDDraw UV overlap query: ", result, " usec=", Time.get_ticks_usec() - started)
 	return int(result.get("overlap_count", 0))
@@ -10918,8 +16975,9 @@ func _update_3d_brush_preview(hit: Dictionary) -> void:
 		return
 	var local_position: Vector3 = hit.get("position", Vector3.ZERO)
 	var local_normal: Vector3 = hit.get("normal", Vector3.UP)
-	var world_position := _paint_3d_mesh.to_global(local_position)
-	var world_normal := _local_3d_paint_normal_to_world(local_normal)
+	var preview_transform: Transform3D = hit.get("preview_transform", _paint_3d_mesh.global_transform)
+	var world_position := preview_transform * local_position
+	var world_normal := _local_3d_paint_normal_to_world(local_normal, preview_transform)
 	if world_normal.length_squared() <= 0.0000001:
 		world_normal = Vector3.UP
 	var camera_direction := Vector3.ZERO
@@ -10950,8 +17008,9 @@ func _update_3d_hover_debug_marker(hit: Dictionary) -> void:
 		return
 	var local_position: Vector3 = hit["position"]
 	var local_normal: Vector3 = hit["normal"]
-	var world_position := _paint_3d_mesh.to_global(local_position)
-	var world_normal := _local_3d_paint_normal_to_world(local_normal)
+	var preview_transform: Transform3D = hit.get("preview_transform", _paint_3d_mesh.global_transform)
+	var world_position := preview_transform * local_position
+	var world_normal := _local_3d_paint_normal_to_world(local_normal, preview_transform)
 	if world_normal.length_squared() <= 0.0000001:
 		_hide_3d_hover_debug_marker("UV hit normal is invalid")
 		return
@@ -10980,10 +17039,15 @@ func _is_valid_3d_hover_debug_hit(hit: Dictionary) -> bool:
 	return triangle_uvs.size() >= 3 and triangle_positions.size() >= 3
 
 
-func _local_3d_paint_normal_to_world(local_normal: Vector3) -> Vector3:
-	if not _paint_3d_mesh:
+func _local_3d_paint_normal_to_world(local_normal: Vector3, preview_transform: Variant = null) -> Vector3:
+	var resolved_transform: Transform3D
+	if preview_transform is Transform3D:
+		resolved_transform = preview_transform
+	elif _paint_3d_mesh:
+		resolved_transform = _paint_3d_mesh.global_transform
+	else:
 		return local_normal.normalized()
-	var basis := _paint_3d_mesh.global_transform.basis
+	var basis := resolved_transform.basis
 	if is_zero_approx(basis.determinant()):
 		return Vector3.ZERO
 	return (basis.inverse().transposed() * local_normal).normalized()
@@ -11019,7 +17083,7 @@ func _update_3d_hover_triangle(hit: Dictionary) -> void:
 		_hide_3d_hover_triangle()
 		return
 	_paint_3d_hover_triangle.mesh = _make_3d_hover_triangle_mesh(hit)
-	_paint_3d_hover_triangle.transform = _paint_3d_mesh.transform if _paint_3d_mesh else Transform3D.IDENTITY
+	_paint_3d_hover_triangle.transform = hit.get("preview_transform", _paint_3d_mesh.transform if _paint_3d_mesh else Transform3D.IDENTITY)
 	_paint_3d_hover_triangle.visible = true
 
 
@@ -11058,14 +17122,15 @@ func _update_2d_hover_from_3d_hit(hit: Dictionary) -> void:
 func _update_3d_paint_cursor(has_surface_hit: bool) -> void:
 	if not _paint_3d_view:
 		return
+	var uses_surface_preview: bool = has_surface_hit and _canvas != null and (
+		_canvas.active_tool in [GDDrawCanvasControl.ToolMode.BRUSH, GDDrawCanvasControl.ToolMode.ERASER]
+		or _is_3d_surface_shape_tool(_canvas.active_tool)
+	)
 	var cursor_shape := Control.CURSOR_ARROW
 	if _paint_3d_orbiting or _paint_3d_panning or _paint_3d_freelooking or _paint_3d_gizmo_dragging or _paint_3d_gizmo_hover_axis >= 0:
 		cursor_shape = Control.CURSOR_DRAG
-	elif has_surface_hit and _canvas and (
-		_canvas.active_tool in [GDDrawCanvasControl.ToolMode.BRUSH, GDDrawCanvasControl.ToolMode.ERASER]
-		or _is_3d_surface_shape_tool(_canvas.active_tool)
-	):
-		cursor_shape = Control.CURSOR_CROSS
+		uses_surface_preview = false
+	_set_3d_surface_cursor_hidden(uses_surface_preview)
 	_paint_3d_view.mouse_default_cursor_shape = cursor_shape
 	# SplitContainer can leave its resize cursor active after the pointer enters
 	# a child viewport. Reassert the active tool cursor while this view handles
@@ -11073,9 +17138,32 @@ func _update_3d_paint_cursor(has_surface_hit: bool) -> void:
 	_set_input_cursor_shape_for_3d_view(cursor_shape)
 
 
+func _set_3d_surface_cursor_hidden(hidden: bool) -> void:
+	if hidden:
+		if _paint_3d_surface_cursor_hidden:
+			return
+		var current_mode := Input.mouse_mode
+		if current_mode not in [Input.MOUSE_MODE_VISIBLE, Input.MOUSE_MODE_CONFINED]:
+			return
+		_paint_3d_surface_cursor_previous_mouse_mode = current_mode
+		_paint_3d_surface_cursor_hidden = true
+		Input.mouse_mode = (
+			Input.MOUSE_MODE_CONFINED_HIDDEN
+			if current_mode == Input.MOUSE_MODE_CONFINED
+			else Input.MOUSE_MODE_HIDDEN
+		)
+		return
+	if not _paint_3d_surface_cursor_hidden:
+		return
+	_paint_3d_surface_cursor_hidden = false
+	if Input.mouse_mode in [Input.MOUSE_MODE_HIDDEN, Input.MOUSE_MODE_CONFINED_HIDDEN]:
+		Input.mouse_mode = _paint_3d_surface_cursor_previous_mouse_mode
+
+
 func _on_3d_paint_view_mouse_exited() -> void:
 	_cancel_3d_rotation_gizmo_drag(true)
 	_set_3d_rotation_gizmo_hover_axis(-1)
+	_set_3d_surface_cursor_hidden(false)
 	Input.set_default_cursor_shape(Input.CURSOR_ARROW)
 
 
@@ -11202,6 +17290,7 @@ func _start_3d_freelook() -> void:
 	if _paint_3d_freelooking:
 		return
 	_release_3d_editor_camera_basis_override()
+	_set_3d_surface_cursor_hidden(false)
 	_paint_3d_freelooking = true
 	_paint_3d_previous_mouse_mode = Input.mouse_mode
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -11269,6 +17358,19 @@ func _update_3d_paint_camera() -> void:
 	_update_3d_view_readout()
 
 
+func _apply_empty_3d_camera_pose() -> void:
+	if not _paint_3d_camera:
+		return
+	if _texture_3d_session and _texture_3d_session.has_active_session():
+		return
+	_paint_3d_target = Vector3.ZERO
+	_paint_3d_distance = EMPTY_3D_CAMERA_DISTANCE
+	_paint_3d_yaw = EMPTY_3D_CAMERA_YAW
+	_paint_3d_pitch = EMPTY_3D_CAMERA_PITCH
+	_paint_3d_camera_basis_override_active = false
+	_update_3d_paint_camera()
+
+
 func _resize_3d_paint_viewport() -> void:
 	if not _paint_3d_viewport or not _paint_3d_view:
 		return
@@ -11294,10 +17396,56 @@ func _disconnect_editor_selection_changed() -> void:
 
 
 func _on_editor_selection_changed() -> void:
-	if not _canvas_mode_3d:
+	if not _canvas_mode_3d or _syncing_editor_selection_from_target:
 		return
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		_update_3d_selection_status()
+		return
+	if not _texture_3d_layer_coordinator or not _layer_session or not _editor_selection:
+		return
+	var selected_binding: Dictionary = {}
+	var selected_group_id := ""
+	for selected_node in _editor_selection.get_selected_nodes():
+		if selected_group_id.is_empty():
+			selected_group_id = _get_object_group_id_for_source_node(selected_node)
+		selected_binding = _texture_3d_layer_coordinator.get_binding_for_source_node(selected_node)
+		if not selected_binding.is_empty():
+			break
+	if selected_binding.is_empty():
+		if not selected_group_id.is_empty():
+			_sync_layers_tree_selection({
+				"kind": "object",
+				"group_id": selected_group_id,
+			})
+		return
+	var target_id := str(selected_binding.get("target_id", ""))
+	var binding_key := str(selected_binding.get("binding_key", ""))
+	if target_id.is_empty():
+		return
+	if target_id != _layer_session.active_target_id:
+		if not _layer_session.route_hit_to_target(target_id):
+			_set_status("Target Lock kept %s as the active paint target." % _layer_session.get_active_target().label)
+			_refresh_layers_tree()
+			return
+		var promoted := _promote_cached_3d_preview(target_id, binding_key)
+		if not _sync_canvas_to_active_layer(false, promoted):
+			return
+	else:
+		_promote_cached_3d_preview(target_id, binding_key)
+	_set_active_3d_binding(binding_key, false)
+	var binding_group_id := selected_group_id
+	if binding_group_id.is_empty():
+		var group_key := str(selected_binding.get("group_key", ""))
+		for group in _layer_session.object_groups:
+			if str(group.get("source_key", "")) == group_key:
+				binding_group_id = str(group.get("id", ""))
+				break
+	if not binding_group_id.is_empty():
+		_sync_layers_tree_selection({
+			"kind": "object",
+			"group_id": binding_group_id,
+		})
+	_set_status("Selected %s as the active 3D paint target." % _layer_session.get_active_target().label)
 
 
 func _update_3d_selection_status() -> void:
@@ -11305,9 +17453,9 @@ func _update_3d_selection_status() -> void:
 		return
 	var surface_target := _get_selected_3d_surface_node()
 	if surface_target:
-		_set_status("Selected %s. Use the selected-surface button to inspect its texture." % surface_target.name)
+		_set_status("Selected %s. Use Selected 3D Object to inspect its compatible texture scope." % surface_target.name)
 	else:
-		_set_status("No 3D session. Select or drag a mesh or supported CSG shape into GDDraw.")
+		_set_status("No 3D session. Select or drag an individual editable surface or hierarchy root into GDDraw.")
 
 
 func _get_3d_target_mesh_instance():
@@ -11327,6 +17475,44 @@ func _get_selected_3d_surface_node() -> Node3D:
 		if surface_target:
 			return surface_target
 	return null
+
+
+func _extract_drop_scene_roots(data: Variant) -> Array[Node]:
+	var roots: Array[Node] = []
+	_collect_drop_scene_roots(data, roots)
+	return roots
+
+
+func _collect_drop_scene_roots(data: Variant, roots: Array[Node]) -> void:
+	if data is Node:
+		var node := data as Node
+		if is_instance_valid(node) and not roots.has(node):
+			roots.push_back(node)
+		return
+	if data is Array or data is PackedStringArray:
+		for item in data:
+			_collect_drop_scene_roots(item, roots)
+		return
+	if not data is Dictionary or not data.has("nodes"):
+		return
+	var node_values: Variant = data["nodes"]
+	var nodes: Array = []
+	if node_values is Array or node_values is PackedStringArray:
+		for node_value in node_values:
+			nodes.push_back(node_value)
+	else:
+		nodes.push_back(node_values)
+	for node_value in nodes:
+		var node := _get_dragged_scene_node(node_value)
+		if node and not roots.has(node):
+			roots.push_back(node)
+	# Godot keeps Scene-dock drag nodes selected. Retain the existing fallback for
+	# editor-version-specific NodePath payloads, but preserve every selected root
+	# rather than collapsing the hierarchy to its first editable descendant.
+	if roots.is_empty():
+		for selected_node in _get_selected_scene_nodes():
+			if not roots.has(selected_node):
+				roots.push_back(selected_node)
 
 
 func _extract_drop_mesh_instance(data: Variant):
@@ -11644,7 +17830,7 @@ func _create_sprite() -> void:
 		_set_status("Draw or load visible pixels before creating a Sprite2D.")
 		_sync_menu_state()
 		return
-	var result: Dictionary = _sprite_creator.create_sprite(_plugin, _canvas.get_image_copy())
+	var result: Dictionary = _sprite_creator.create_sprite(_plugin, _get_canvas_output_image())
 	_set_status(str(result.get(GDDrawSpriteCreatorHelper.MESSAGE, "")))
 
 
@@ -11706,7 +17892,7 @@ func _update_create_textured_csg_validation(_unused: Variant = null) -> void:
 	var options := _get_create_textured_csg_options()
 	var image: Image
 	if options[GDDrawSpriteCreatorHelper.OPTION_ASSIGN_CURRENT_IMAGE] and _canvas:
-		image = _canvas.get_image_copy()
+		image = _get_canvas_output_image()
 	var result: Dictionary = _sprite_creator.validate_csg_creation(
 		_plugin,
 		image,
@@ -11727,7 +17913,7 @@ func _confirm_create_textured_csg() -> void:
 	var options := _get_create_textured_csg_options()
 	var image: Image
 	if options[GDDrawSpriteCreatorHelper.OPTION_ASSIGN_CURRENT_IMAGE] and _canvas:
-		image = _canvas.get_image_copy()
+		image = _get_canvas_output_image()
 	var result: Dictionary = _sprite_creator.create_textured_csg(
 		_plugin,
 		image,
@@ -11743,7 +17929,7 @@ func _confirm_create_textured_csg() -> void:
 
 func _save_png_to_path(path: String) -> void:
 	var succeeded := _save_2d_document_to_path(path)
-	if _save_2d_for_3d_transition and _pending_session_transition == SessionTransition.START_3D_SESSION:
+	if _save_2d_for_3d_transition and _is_starting_3d_transition():
 		_save_2d_for_3d_transition = false
 		if succeeded:
 			_continue_pending_session_transition()
@@ -11764,7 +17950,7 @@ func _save_2d_document_to_path(path: String) -> bool:
 		return false
 
 	_canvas.finish_text_draft(true)
-	var saved_image: Image = _canvas.get_image_copy()
+	var saved_image: Image = _get_canvas_output_image()
 	error = saved_image.save_png(normalized_path)
 	if error != OK:
 		_set_status("Could not save PNG. Error: " + str(error))
@@ -11774,21 +17960,12 @@ func _save_2d_document_to_path(path: String) -> bool:
 	_set_2d_document_baseline(normalized_path, saved_image)
 	if _plugin:
 		_plugin.get_editor_interface().get_resource_filesystem().scan()
-	if not _load_after_save_path.is_empty() or _load_after_save_image != null:
-		var image_path := _load_after_save_path
-		var image := _load_after_save_image
-		var label := _load_after_save_label
-		_load_after_save_path = ""
-		_load_after_save_image = null
-		_load_after_save_label = ""
-		_load_pending_drop(image_path, image, label)
-		return true
 	_set_status("Saved " + normalized_path)
 	return true
 
 
 func _cancel_2d_save_as() -> void:
-	if not _save_2d_for_3d_transition or _pending_session_transition != SessionTransition.START_3D_SESSION:
+	if not _save_2d_for_3d_transition or not _is_starting_3d_transition():
 		return
 	_save_2d_for_3d_transition = false
 	if _document_session_dialog:
@@ -11809,7 +17986,19 @@ func _set_2d_document_baseline(path: String, image: Image) -> void:
 func _is_2d_document_dirty() -> bool:
 	if not _canvas or not _document_baseline_image:
 		return false
-	return _canvas.has_text_draft() or not _images_equal_rgba8(_canvas.get_image_copy(), _document_baseline_image)
+	if _canvas.has_text_draft():
+		return true
+	if not _layer_document_path.is_empty() and _layer_session and _layer_session.has_method("is_layered_dirty"):
+		return _layer_session.is_layered_dirty()
+	if (
+		_layer_session
+		and _layer_session.has_method("requires_layered_persistence")
+		and _layer_session.requires_layered_persistence()
+		and _layer_session.has_method("is_layered_dirty")
+		and _layer_session.is_layered_dirty()
+	):
+		return true
+	return not _images_equal_rgba8(_get_canvas_output_image(), _document_baseline_image)
 
 
 func _images_equal_rgba8(left: Image, right: Image) -> bool:
@@ -11837,6 +18026,17 @@ func _make_default_png_name() -> String:
 
 func _normalize_png_path(path: String) -> String:
 	return _png_io.normalize_png_path(path)
+
+
+func _normalize_layer_document_path(path: String) -> String:
+	var normalized := path.strip_edges().replace("\\", "/")
+	if not normalized.begins_with("res://"):
+		return ""
+	if normalized.get_extension().to_lower() != "gddraw":
+		normalized = normalized.get_basename() + ".gddraw"
+	if normalized.begins_with("res://addons/GDDraw/") or normalized == "res://addons/GDDraw.gddraw":
+		return ""
+	return normalized
 
 
 func _ensure_resource_dir(path: String) -> int:
@@ -11993,7 +18193,54 @@ func _on_font_location_selected(path: String) -> void:
 
 
 func _push_undo(image: Image) -> void:
+	if (
+		_layer_session
+		and _layer_session.has_method("capture_history_state_with_active_layer_image")
+		and _history.has_method("push_undo_state_owned")
+	):
+		var previous_origin = (
+			_canvas.get_history_origin(image)
+			if _canvas and _canvas.has_method("get_history_origin")
+			else null
+		)
+		var previous_state: Dictionary = _layer_session.capture_history_state_with_active_layer_image(image, previous_origin)
+		if not previous_state.is_empty():
+			_history.push_undo_state_owned(previous_state)
+			return
+	elif (
+		_layer_session
+		and _layer_session.has_method("capture_state_with_active_layer_image")
+		and _history.has_method("push_undo_state")
+	):
+		var previous_origin = (
+			_canvas.get_history_origin(image)
+			if _canvas and _canvas.has_method("get_history_origin")
+			else null
+		)
+		var previous_state: Dictionary = _layer_session.capture_state_with_active_layer_image(image, previous_origin)
+		if not previous_state.is_empty():
+			_history.push_undo_state(previous_state)
+			return
 	_history.push_undo(image)
+
+
+func _push_layer_session_undo() -> bool:
+	if not _layer_session or not _history or not _history.has_method("push_undo_state"):
+		return false
+	var state: Dictionary = _layer_session.capture_state()
+	return _push_layer_session_state_undo(state)
+
+
+func _push_layer_session_state_undo(state: Dictionary) -> bool:
+	if state.is_empty() or not _history or not _history.has_method("push_undo_state"):
+		return false
+	if _history.has_method("push_undo_state_owned"):
+		_history.push_undo_state_owned(state)
+	else:
+		_history.push_undo_state(state)
+	_history.clear_redo()
+	_update_history_buttons()
+	return true
 
 
 func _update_history_buttons() -> void:
@@ -12125,8 +18372,8 @@ func _update_tool_options_visibility() -> void:
 		_fill_end_separator.visible = is_fill
 	if _shape_origin_separator:
 		_shape_origin_separator.visible = tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE
-	if _shape_fill_mode:
-		_shape_fill_mode.visible = tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE
+	if _shape_fill_toggle:
+		_shape_fill_toggle.visible = tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE
 	_update_fill_settings_button()
 
 
@@ -12200,8 +18447,8 @@ func _move_shared_paint_controls(target_row: HBoxContainer) -> void:
 		_shape_options.move_child(_brush_size_label, 6)
 		_shape_options.move_child(_brush_size, 7)
 		_shape_options.move_child(_paint_size_separator, 8)
-		if _shape_fill_mode:
-			_shape_options.move_child(_shape_fill_mode, 9)
+		if _shape_fill_toggle:
+			_shape_options.move_child(_shape_fill_toggle, 9)
 		if _shape_origin_separator:
 			_shape_options.move_child(_shape_origin_separator, 10)
 		if _shape_origin_mode:

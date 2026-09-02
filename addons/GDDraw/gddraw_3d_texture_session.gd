@@ -130,7 +130,7 @@ func begin_from_target(node: Node, editor_plugin: EditorPlugin, create_if_missin
 	}
 
 
-func save_image(image: Image, _editor_plugin: EditorPlugin) -> Dictionary:
+func save_image(image: Image, editor_plugin: EditorPlugin) -> Dictionary:
 	if not has_active_session():
 		return _result(STATUS_ERROR, "No active 3D texture session.")
 	if texture_path.is_empty() and material:
@@ -146,7 +146,13 @@ func save_image(image: Image, _editor_plugin: EditorPlugin) -> Dictionary:
 	# Normal Save keeps the existing material/texture identity. Save As is the
 	# only operation that needs to create and assign a different texture.
 	if texture is ImageTexture:
-		(texture as ImageTexture).update(editable_image)
+		if texture.get_width() == editable_image.get_width() and texture.get_height() == editable_image.get_height():
+			(texture as ImageTexture).update(editable_image)
+		else:
+			var resized_texture := ImageTexture.create_from_image(editable_image)
+			if not _assign_active_texture(editor_plugin, resized_texture):
+				return _result(STATUS_ERROR, "Saved the resized PNG, but could not update its material texture reference.")
+			texture = resized_texture
 	baseline_image = editable_image.duplicate()
 	return _result(STATUS_OK, "Saved " + texture_path)
 
@@ -347,6 +353,8 @@ func refresh_geometry() -> Dictionary:
 
 
 func clear() -> void:
+	if target and target.has_method("release"):
+		target.release()
 	target = null
 	source_node = null
 	mesh_snapshot = null

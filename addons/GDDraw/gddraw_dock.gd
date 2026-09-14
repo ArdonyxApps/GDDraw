@@ -568,6 +568,7 @@ enum MenuCommand {
 	HELP_ABOUT,
 	HELP_CHECK_UPDATES,
 	HELP_UPDATE_AVAILABLE,
+	HELP_WHATS_NEW,
 }
 enum SessionTransition {
 	NONE,
@@ -1885,6 +1886,7 @@ func _populate_help_menu(show_update := false) -> void:
 		_help_menu.set_item_tooltip(0, "Open details for GDDraw v%s" % _latest_available_version)
 		_help_menu.add_separator()
 	_help_menu.add_item("Documentation...", MenuCommand.HELP_DOCUMENTATION)
+	_help_menu.add_item("What's New...", MenuCommand.HELP_WHATS_NEW)
 	_help_menu.add_separator()
 	_help_menu.add_item("Check for Updates...", MenuCommand.HELP_CHECK_UPDATES)
 	_help_menu.add_separator()
@@ -2081,6 +2083,8 @@ func _on_menu_command(command_id: int) -> void:
 			_save_3d_texture()
 		MenuCommand.HELP_DOCUMENTATION:
 			_open_documentation("index.md")
+		MenuCommand.HELP_WHATS_NEW:
+			_open_documentation("whats-new.md")
 		MenuCommand.HELP_CHECK_UPDATES:
 			_check_for_updates(false)
 		MenuCommand.HELP_UPDATE_AVAILABLE:
@@ -8386,7 +8390,9 @@ func _recover_update_transaction() -> void:
 		return
 	var recovery: Dictionary = _updater.recover_incomplete_transaction()
 	var recovery_status := str(recovery.get("status", "none"))
-	if recovery_status == "rolled_back":
+	if recovery_status == "completed":
+		_show_whats_new_after_update(recovery)
+	elif recovery_status == "rolled_back":
 		_present_update_overlay(
 			"GDDraw Update Rolled Back",
 			str(recovery.get("message", "The previous verified package was restored.")),
@@ -8398,6 +8404,24 @@ func _recover_update_transaction() -> void:
 			str(recovery.get("message", "Update recovery data was preserved under user://gddraw/updates/.")),
 			"", Color("#FF7A85"), false, false, "Close"
 		)
+
+
+func _show_whats_new_after_update(recovery: Dictionary) -> void:
+	# Only a validated updater transaction triggers this notice. Fresh installs,
+	# ordinary editor starts, and failed or rolled-back updates stay quiet.
+	var version := str(recovery.get("target_version", ""))
+	if str(recovery.get("status", "")) != "completed" or version.is_empty():
+		return
+	if version != _get_installed_plugin_version() or not _documentation_browser:
+		return
+	var settings := _get_editor_settings()
+	if not settings or str(settings.get_project_metadata(SETTINGS_SECTION, "whats_new_shown_version", "")) == version:
+		return
+	if not FileAccess.file_exists("res://addons/GDDraw/docs/whats-new.md"):
+		return
+	_open_documentation("whats-new.md")
+	if _documentation_browser.visible and _documentation_browser.get_current_page_path() == "whats-new.md":
+		settings.set_project_metadata(SETTINGS_SECTION, "whats_new_shown_version", version)
 
 
 func _format_update_bytes(byte_count: int) -> String:

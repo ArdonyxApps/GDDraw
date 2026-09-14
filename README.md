@@ -12,6 +12,7 @@ GDDraw 0.3.0 is a Godot editor plugin for layered prototype art and multi-object
 GDDraw includes an offline user manual under **Help > Documentation**. The same canonical Markdown pages render directly on GitHub:
 
 - [Getting Started](addons/GDDraw/docs/getting-started.md)
+- [What's New](addons/GDDraw/docs/whats-new.md)
 - [Interface](addons/GDDraw/docs/interface.md)
 - [Preferences](addons/GDDraw/docs/preferences.md)
 - [Tools](addons/GDDraw/docs/tools.md)

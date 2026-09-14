@@ -14,6 +14,8 @@ GDDraw 0.3.0 is a Godot editor plugin for layered 2D artwork and multi-object al
 
 ## Start here
 
+See [What's New](whats-new.md) for the latest changes and highlights from earlier releases.
+
 New users should begin with [Getting Started](getting-started.md), then read [Interface](interface.md) and [Tools](tools.md).
 
 For layered artwork, continue with [Layers](layers.md). For model textures, see [Painting in 3D](3d-painting.md).

@@ -6,6 +6,7 @@
       "title": "Getting Started",
       "pages": [
         {"title": "Welcome to GDDraw", "path": "index.md", "description": "Overview of GDDraw and this manual."},
+        {"title": "What's New", "path": "whats-new.md", "description": "Features, improvements, and fixes, with the latest release first."},
         {"title": "Getting Started", "path": "getting-started.md", "description": "Install GDDraw and create the first 2D or 3D session."},
         {"title": "Interface", "path": "interface.md", "description": "Learn the menus, tool rail, canvas, and workspace panels."},
         {"title": "Preferences", "path": "preferences.md", "description": "Configure brush, view, canvas, save-folder, and font settings."}

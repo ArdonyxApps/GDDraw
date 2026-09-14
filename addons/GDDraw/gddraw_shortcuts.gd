@@ -11,6 +11,16 @@ const ACTION_CANCEL := "cancel"
 const ACTION_SELECT_ALL := "select_all"
 const ACTION_DUPLICATE := "duplicate"
 const ACTION_COMMIT := "commit"
+const ACTION_NEW_PAINT_LAYER := "new_paint_layer"
+const ACTION_NEW_GROUP := "new_group"
+
+const LAYER_TREE_CUT_ACCELERATOR := KEY_MASK_CTRL | KEY_X
+const LAYER_TREE_COPY_ACCELERATOR := KEY_MASK_CTRL | KEY_C
+const LAYER_TREE_PASTE_ACCELERATOR := KEY_MASK_CTRL | KEY_V
+const LAYER_TREE_DUPLICATE_ACCELERATOR := KEY_MASK_CTRL | KEY_J
+const LAYER_TREE_DELETE_ACCELERATOR := KEY_DELETE
+const LAYER_TREE_NEW_PAINT_ACCELERATOR := KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_N
+const LAYER_TREE_NEW_GROUP_ACCELERATOR := KEY_MASK_CTRL | KEY_G
 
 const SHORTCUTS := [
 	{"action": ACTION_COPY, "keycode": KEY_C, "ctrl": true},
@@ -23,12 +33,32 @@ const SHORTCUTS := [
 	{"action": ACTION_CANCEL, "keycode": KEY_ESCAPE},
 ]
 
+const LAYER_TREE_SHORTCUTS := [
+	{"action": ACTION_CUT, "keycode": KEY_X, "ctrl": true},
+	{"action": ACTION_COPY, "keycode": KEY_C, "ctrl": true},
+	{"action": ACTION_PASTE, "keycode": KEY_V, "ctrl": true},
+	{"action": ACTION_DUPLICATE, "keycode": KEY_J, "ctrl": true},
+	{"action": ACTION_DELETE, "keycode": KEY_DELETE},
+	{"action": ACTION_NEW_PAINT_LAYER, "keycode": KEY_N, "ctrl": true, "shift": true},
+	{"action": ACTION_NEW_GROUP, "keycode": KEY_G, "ctrl": true},
+]
+
 
 func get_action(event: InputEvent) -> String:
 	if not _is_shortcut_event(event):
 		return ACTION_NONE
 
 	for shortcut in SHORTCUTS:
+		if _matches_shortcut(event, shortcut):
+			return str(shortcut.get("action", ACTION_NONE))
+	return ACTION_NONE
+
+
+func get_layer_tree_action(event: InputEvent) -> String:
+	if not _is_shortcut_event(event):
+		return ACTION_NONE
+
+	for shortcut in LAYER_TREE_SHORTCUTS:
 		if _matches_shortcut(event, shortcut):
 			return str(shortcut.get("action", ACTION_NONE))
 	return ACTION_NONE

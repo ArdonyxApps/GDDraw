@@ -8,6 +8,8 @@ signal view_changed(zoom_percent: int)
 signal color_picked(color: Color, pixel: Vector2i)
 signal selection_committed(selection_rect: Rect2i)
 signal selection_cleared()
+signal floating_selection_committed()
+signal floating_selection_canceled()
 signal image_drop_requested(data: Variant)
 signal image_changed(image: Image)
 signal hover_uv_changed(uv: Vector2, has_hover: bool)
@@ -33,7 +35,8 @@ const DEFAULT_IMAGE_SIZE := Vector2i(128, 128)
 const CHECKER_SIZE := 16
 const MIN_IMAGE_SIZE := 1
 const MAX_IMAGE_SIZE := 4096
-const MIN_ZOOM := 0.1
+const MAX_WORKSPACE_SIZE := 16384
+const MIN_ZOOM := 0.01
 const MAX_PIXEL_VIEWPORT_FRACTION := 0.5
 const MAX_ZOOM_SAFETY_CEILING := 10000.0
 const ZOOM_STEP := 1.25
@@ -44,6 +47,23 @@ const TEXT_MIN_BOX_SIZE := Vector2i(8, 8)
 const TEXT_DEFAULT_BOX_SIZE := Vector2i(200, 80)
 const TEXT_MEANINGFUL_DRAG := 3
 const TEXT_CARET_BLINK_INTERVAL := 0.53
+const LIVE_COMPOSITE_TILE_SIZE := 128
+const NAVIGATOR_MAX_PREVIEW_SIZE := Vector2(160.0, 110.0)
+const NAVIGATOR_MIN_PREVIEW_SIZE := Vector2(72.0, 48.0)
+const NAVIGATOR_HEADER_HEIGHT := 18.0
+const NAVIGATOR_PADDING := 4.0
+const NAVIGATOR_MARGIN := 12.0
+const NAVIGATOR_VIEWPORT_FILL_COLOR := Color(0.77, 0.77, 0.77, 0.20)
+const NAVIGATOR_VIEWPORT_OUTLINE_COLOR := Color(0.125, 0.125, 0.125, 1.0)
+const CANVAS_SCROLLBAR_THICKNESS := 12.0
+const CANVAS_SCROLLBAR_MARGIN := 4.0
+const CANVAS_SCROLLBAR_HOVER_ZONE := 22.0
+const EYEDROPPER_LOUPE_SAMPLE_DIMENSION := 7
+const EYEDROPPER_LOUPE_CELL_SIZE := 8.0
+const EYEDROPPER_LOUPE_PADDING := 4.0
+const EYEDROPPER_LOUPE_GAP := 4.0
+const EYEDROPPER_LOUPE_SWATCH_HEIGHT := 18.0
+const EYEDROPPER_LOUPE_POINTER_GAP := 18.0
 # TextServer's grapheme-space flag covers spaces, tabs, and mandatory breaks;
 # they advance layout but never contribute glyph coverage.
 const TEXT_GLYPH_FLAG_SPACE := 1 << 3
@@ -148,6 +168,11 @@ enum TextWrapping {
 	NO_WRAP,
 }
 
+enum TextFillMode {
+	NONE,
+	BACKGROUND,
+}
+
 enum TextDragMode {
 	NONE,
 	CREATE,
@@ -159,6 +184,19 @@ enum TextDragMode {
 
 # Public tool/view state configured by the dock.
 # brush_color remains the foreground color for rasterization and integrations.
+var editing_enabled := true:
+	set(value):
+		if editing_enabled == value:
+			return
+		editing_enabled = value
+		if editing_enabled:
+			return
+		_cancel_stroke()
+		cancel_surface_shape_preview()
+		cancel_text_draft()
+		_selection_nudge_previous_image = null
+		_set_canvas_mouse_hidden(false)
+
 var brush_color := Color.BLACK:
 	set(value):
 		brush_color = value
@@ -286,6 +324,10 @@ var text_wrapping := TextWrapping.WORD_WRAP:
 	set(value):
 		text_wrapping = clampi(value, TextWrapping.WORD_WRAP, TextWrapping.NO_WRAP)
 		_refresh_text_layout()
+var text_fill_mode := TextFillMode.NONE:
+	set(value):
+		text_fill_mode = clampi(value, TextFillMode.NONE, TextFillMode.BACKGROUND)
+		queue_redraw()
 var active_tool := ToolMode.BRUSH:
 	set(value):
 		var tool_changed := active_tool != value
@@ -300,6 +342,7 @@ var active_tool := ToolMode.BRUSH:
 			_stroke_coverage = PackedFloat32Array()
 		if not _is_shape_tool():
 			_is_shape_previewing = false
+			_use_lightweight_shape_preview = false
 			_clear_shape_preview_image()
 			_set_canvas_mouse_hidden(false)
 		if active_tool == ToolMode.TEXT:
@@ -372,6 +415,12 @@ var tile_preview_enabled := false:
 	set(value):
 		tile_preview_enabled = value
 		queue_redraw()
+var navigator_enabled := true:
+	set(value):
+		navigator_enabled = value
+		if not value:
+			_navigator_drag_mode = 0
+		queue_redraw()
 var uv_overlay_visible := false:
 	set(value):
 		uv_overlay_visible = value
@@ -390,6 +439,17 @@ var zoom_multiplier := 1.0:
 # Internal canvas, stroke, selection, preview, and overlay state.
 var _image := Image.create_empty(DEFAULT_IMAGE_SIZE.x, DEFAULT_IMAGE_SIZE.y, false, Image.FORMAT_RGBA8)
 var _texture := ImageTexture.create_from_image(_image)
+## The editable backing image may be larger than the export canvas. The fixed
+## document/UV frame is stored in backing-image coordinates.
+var _document_rect := Rect2i(Vector2i.ZERO, DEFAULT_IMAGE_SIZE)
+var _workspace_origin := Vector2i.ZERO
+var _workspace_origin_before_expansion := Vector2i.ZERO
+var _display_compositor := Callable()
+var _display_region_compositor := Callable()
+var _display_image_cache: Image
+var _live_composite_dirty_tiles: Dictionary = {}
+var _live_composite_refresh_pending := false
+var _stroke_has_changes := false
 var _image_rect := Rect2()
 var _is_drawing := false
 var _is_panning := false
@@ -408,9 +468,13 @@ var _shape_preview_texture: ImageTexture
 var _shape_preview_rect := Rect2i()
 var _is_shape_preview_rasterizing := false
 var _shape_preview_original_pixels := {}
+var _use_lightweight_shape_preview := false
 var _surface_shape_previewing := false
 var _surface_shape_endpoint_valid := false
+var _surface_shape_scaled_preview_only := false
 var _surface_shape_settings: Dictionary = {}
+var _surface_shape_base_preview_image: Image
+var _surface_shape_base_preview_max_dimension := 0
 var _suspend_shape_preview_refresh := false
 var _is_shape_outline_rasterizing := false
 var _is_shape_fill_rasterizing := false
@@ -493,6 +557,18 @@ var _text_background_preview_image: Image
 var _text_background_preview_texture: ImageTexture
 var _text_caret_blink_elapsed := 0.0
 var _text_caret_visible := true
+var _navigator_position := Vector2(-1.0, -1.0)
+var _navigator_drag_mode := 0
+var _navigator_drag_offset := Vector2.ZERO
+var _navigator_hovered := false
+var _horizontal_scrollbar: HScrollBar
+var _vertical_scrollbar: VScrollBar
+var _syncing_canvas_scrollbars := false
+var _horizontal_scrollbar_pointer_near := false
+var _vertical_scrollbar_pointer_near := false
+var _horizontal_scrollbar_hovered := false
+var _vertical_scrollbar_hovered := false
+var _canvas_scrollbar_dragging := false
 
 
 # Lifecycle and public image/session API.
@@ -506,8 +582,10 @@ func _init() -> void:
 	clip_contents = true
 	mouse_entered.connect(_emit_hover_at_mouse)
 	mouse_exited.connect(_clear_preview)
+	mouse_exited.connect(_on_canvas_mouse_exited_for_scrollbars)
 	_clear_image(Color(0, 0, 0, 0))
 	_build_text_editor()
+	_build_canvas_scrollbars()
 
 
 func _enter_tree() -> void:
@@ -526,6 +604,7 @@ func _notification(what: int) -> void:
 
 
 func _process(delta: float) -> void:
+	_flush_live_composite_refresh()
 	if not _has_text_draft or not _text_editor:
 		return
 	var display_text := _get_text_editor_display_text()
@@ -546,15 +625,159 @@ func get_image_copy() -> Image:
 	return copied_image
 
 
+func get_display_image_copy() -> Image:
+	if not _has_floating_selection and _display_image_cache and not _display_image_cache.is_empty():
+		_flush_live_composite_refresh()
+		return _display_image_cache.duplicate()
+	return _make_display_image(get_image_copy())
+
+
+func get_display_image_reference() -> Image:
+	if _has_floating_selection:
+		return null
+	_flush_live_composite_refresh()
+	return _display_image_cache
+
+
+func get_eyedropper_sample_at_uv(uv: Vector2) -> Dictionary:
+	_flush_live_composite_refresh()
+	var sample_image: Image = (
+		_display_image_cache
+		if _display_image_cache and not _display_image_cache.is_empty()
+		else _image
+	)
+	if not sample_image or sample_image.is_empty():
+		return {}
+	return {
+		"image": sample_image,
+		"pixel": _uv_to_image_pixel(uv),
+	}
+
+
+func get_display_texture_reference() -> ImageTexture:
+	return _texture
+
+
+func get_document_display_image_copy() -> Image:
+	var display := get_display_image_copy()
+	return _get_document_region(display)
+
+
+func _get_document_region(source: Image) -> Image:
+	var display := source
+	if not display or display.is_empty():
+		return null
+	if _document_rect == Rect2i(Vector2i.ZERO, display.get_size()):
+		return display
+	var clipped := _document_rect.intersection(Rect2i(Vector2i.ZERO, display.get_size()))
+	if clipped.size != _document_rect.size:
+		var output := Image.create_empty(_document_rect.size.x, _document_rect.size.y, false, Image.FORMAT_RGBA8)
+		output.fill(Color.TRANSPARENT)
+		if clipped.has_area():
+			output.blit_rect(display, clipped, clipped.position - _document_rect.position)
+		return output
+	return display.get_region(_document_rect)
+
+
+func set_display_compositor(compositor: Callable, region_compositor := Callable()) -> void:
+	_display_compositor = compositor if compositor.is_valid() else Callable()
+	_display_region_compositor = region_compositor if region_compositor.is_valid() else Callable()
+	_refresh_display_texture()
+	queue_redraw()
+
+
+func clear_display_compositor() -> void:
+	_display_compositor = Callable()
+	_display_region_compositor = Callable()
+	_refresh_display_texture()
+	queue_redraw()
+
+
 func get_canvas_size() -> Vector2i:
-	return Vector2i(_image.get_width(), _image.get_height())
+	return _document_rect.size
+
+
+func get_workspace_origin() -> Vector2i:
+	return _workspace_origin
+
+
+func get_history_origin(previous_image: Image) -> Vector2i:
+	if previous_image and previous_image.get_size() != _image.get_size():
+		return _workspace_origin_before_expansion
+	return _workspace_origin
+
+
+func set_layer_workspace(layer_image: Image, layer_origin: Vector2i, document_size: Vector2i) -> void:
+	_set_layer_workspace_internal(layer_image, layer_origin, document_size, false, false)
+
+
+func set_layer_workspace_shared(
+	layer_image: Image,
+	layer_origin: Vector2i,
+	document_size: Vector2i,
+	preserve_display := false,
+	prepared_display: Image = null,
+	prepared_texture: ImageTexture = null
+) -> void:
+	_set_layer_workspace_internal(
+		layer_image,
+		layer_origin,
+		document_size,
+		true,
+		preserve_display,
+		prepared_display,
+		prepared_texture
+	)
+
+
+func _set_layer_workspace_internal(
+	layer_image: Image,
+	layer_origin: Vector2i,
+	document_size: Vector2i,
+	share_exact_workspace: bool,
+	preserve_display: bool,
+	prepared_display: Image = null,
+	prepared_texture: ImageTexture = null
+) -> void:
+	if not layer_image or layer_image.is_empty() or document_size.x <= 0 or document_size.y <= 0:
+		return
+	var layer_bounds := Rect2i(layer_origin, layer_image.get_size())
+	var workspace_bounds := layer_bounds.merge(Rect2i(Vector2i.ZERO, document_size))
+	if workspace_bounds.size.x > MAX_WORKSPACE_SIZE or workspace_bounds.size.y > MAX_WORKSPACE_SIZE:
+		return
+	var exact_workspace: bool = layer_bounds == workspace_bounds
+	var workspace: Image
+	if exact_workspace and share_exact_workspace and not layer_image.has_mipmaps() and layer_image.get_format() == Image.FORMAT_RGBA8:
+		workspace = layer_image
+	else:
+		workspace = Image.create_empty(workspace_bounds.size.x, workspace_bounds.size.y, false, Image.FORMAT_RGBA8)
+		workspace.fill(Color.TRANSPARENT)
+		var normalized := layer_image.duplicate()
+		if normalized.has_mipmaps():
+			normalized.clear_mipmaps()
+		if normalized.get_format() != Image.FORMAT_RGBA8:
+			normalized.convert(Image.FORMAT_RGBA8)
+		workspace.blit_rect(normalized, Rect2i(Vector2i.ZERO, normalized.get_size()), layer_origin - workspace_bounds.position)
+	_set_workspace_image(
+		workspace,
+		workspace_bounds.position,
+		document_size,
+		true,
+		preserve_display,
+		prepared_display,
+		prepared_texture
+	)
 
 
 func capture_workspace_state() -> Dictionary:
 	return {
 		"image": _image.duplicate(),
+		"workspace_origin": _workspace_origin,
+		"document_size": _document_rect.size,
 		"zoom": zoom_multiplier,
 		"pan": _pan_offset,
+		"navigator_enabled": navigator_enabled,
+		"navigator_position": _navigator_position,
 		"active_tool": active_tool,
 		"eraser_enabled": eraser_enabled,
 		"pan_tool_enabled": pan_tool_enabled,
@@ -579,9 +802,13 @@ func restore_workspace_state(state: Dictionary) -> void:
 	if not image or image.is_empty():
 		image = Image.create_empty(DEFAULT_IMAGE_SIZE.x, DEFAULT_IMAGE_SIZE.y, false, Image.FORMAT_RGBA8)
 		image.fill(Color.TRANSPARENT)
-	set_image(image)
+	var workspace_origin: Vector2i = state.get("workspace_origin", Vector2i.ZERO)
+	var document_size: Vector2i = state.get("document_size", image.get_size())
+	_set_workspace_image(image, workspace_origin, document_size)
 	zoom_multiplier = float(state.get("zoom", 1.0))
 	_pan_offset = state.get("pan", Vector2.ZERO)
+	navigator_enabled = bool(state.get("navigator_enabled", true))
+	_navigator_position = state.get("navigator_position", Vector2(-1.0, -1.0))
 	mirror_mode = int(state.get("mirror_mode", MirrorMode.OFF))
 	show_grid = bool(state.get("show_grid", false))
 	tile_preview_enabled = bool(state.get("tile_preview_enabled", false))
@@ -614,29 +841,81 @@ func restore_workspace_state(state: Dictionary) -> void:
 
 
 func has_visible_pixels() -> bool:
-	var image := get_image_copy()
-	for y in range(image.get_height()):
-		for x in range(image.get_width()):
-			if image.get_pixel(x, y).a > 0.0:
-				return true
-	return false
+	var image: Image = _display_image_cache
+	if not image or image.is_empty():
+		image = _make_display_image(_image)
+	# Image.get_used_rect() performs the alpha scan natively and avoids both a
+	# full-resolution duplicate and millions of interpreted get_pixel() calls.
+	return image.get_used_rect().has_area()
 
 
 func set_image(image: Image) -> void:
+	_set_workspace_image(image, Vector2i.ZERO, image.get_size())
+
+
+func _set_workspace_image(
+	image: Image,
+	workspace_origin: Vector2i,
+	document_size: Vector2i,
+	adopt_image := false,
+	preserve_display := false,
+	prepared_display: Image = null,
+	prepared_texture: ImageTexture = null
+) -> void:
 	cancel_text_draft()
-	_image = image.duplicate()
+	var next_document_rect := Rect2i(-workspace_origin, document_size)
+	var keep_current_display := (
+		preserve_display
+		and _display_image_cache
+		and _display_image_cache.get_size() == image.get_size()
+		and _workspace_origin == workspace_origin
+		and _document_rect == next_document_rect
+	)
+	_image = image if adopt_image else image.duplicate()
 	if _image.has_mipmaps():
 		_image.clear_mipmaps()
 	if _image.get_format() != Image.FORMAT_RGBA8:
 		_image.convert(Image.FORMAT_RGBA8)
-	_texture = ImageTexture.create_from_image(_image)
+	_workspace_origin = workspace_origin
+	_workspace_origin_before_expansion = workspace_origin
+	_document_rect = next_document_rect
+	_live_composite_dirty_tiles.clear()
+	_live_composite_refresh_pending = false
+	var can_use_prepared_display := (
+		prepared_display
+		and not prepared_display.is_empty()
+		and prepared_display.get_size() == _image.get_size()
+		and not prepared_display.has_mipmaps()
+		and prepared_display.get_format() == Image.FORMAT_RGBA8
+	)
+	if can_use_prepared_display:
+		_display_image_cache = prepared_display
+		if (
+			prepared_texture
+			and prepared_texture.get_width() == prepared_display.get_width()
+			and prepared_texture.get_height() == prepared_display.get_height()
+		):
+			# Coordinated 3D targets already own an up-to-date GPU texture. Reuse it
+			# when switching targets instead of synchronously uploading the same
+			# high-resolution composite into the 2D canvas texture again.
+			_texture = prepared_texture
+		elif (
+			_texture
+			and _texture.get_width() == prepared_display.get_width()
+			and _texture.get_height() == prepared_display.get_height()
+		):
+			_texture.update(prepared_display)
+		else:
+			_texture = ImageTexture.create_from_image(prepared_display)
+	elif not keep_current_display:
+		_refresh_display_texture()
 	_has_crop_preview = false
 	_crop_preview_rect = Rect2i()
 	_clear_selection()
 	_clear_floating_selection()
 	_clamp_pan_offset()
 	canvas_size_changed.emit(get_canvas_size())
-	image_changed.emit(get_image_copy())
+	image_changed.emit(_image)
 	queue_redraw()
 
 
@@ -647,6 +926,13 @@ func set_eraser_restore_image(image: Image) -> void:
 			_eraser_restore_image.convert(Image.FORMAT_RGBA8)
 	else:
 		_eraser_restore_image = null
+
+
+func set_eraser_restore_image_reference(image: Image) -> void:
+	if image and not image.is_empty() and image.get_format() == Image.FORMAT_RGBA8 and not image.has_mipmaps():
+		_eraser_restore_image = image
+	else:
+		set_eraser_restore_image(image)
 
 
 func clear_eraser_restore_image() -> void:
@@ -706,6 +992,8 @@ func clear_uv_overlay_data() -> void:
 
 
 func begin_uv_stroke(uv: Vector2) -> void:
+	if not editing_enabled and active_tool != ToolMode.EYEDROPPER:
+		return
 	var pixel := _uv_to_image_pixel(uv)
 	if active_tool == ToolMode.FILL:
 		var previous_image := get_image_copy()
@@ -714,11 +1002,11 @@ func begin_uv_stroke(uv: Vector2) -> void:
 			stroke_committed.emit(previous_image)
 		return
 	if active_tool == ToolMode.EYEDROPPER:
-		color_picked.emit(_image.get_pixel(pixel.x, pixel.y), pixel)
+		color_picked.emit(_make_display_image(_image).get_pixel(pixel.x, pixel.y), pixel)
 		return
 	if not _is_stroke_tool():
 		return
-	_is_drawing = true
+	_begin_live_stroke_state()
 	_stroke_start_image = get_image_copy()
 	_begin_stroke_coverage()
 	_last_pixel = pixel
@@ -727,6 +1015,8 @@ func begin_uv_stroke(uv: Vector2) -> void:
 
 
 func continue_uv_stroke(uv: Vector2) -> void:
+	if not editing_enabled:
+		return
 	if not _is_drawing:
 		return
 	var pixel := _uv_to_image_pixel(uv)
@@ -740,6 +1030,8 @@ func end_uv_stroke() -> void:
 
 
 func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array) -> void:
+	if not editing_enabled and active_tool != ToolMode.EYEDROPPER:
+		return
 	var pixel := _uv_to_image_pixel(uv)
 	if active_tool == ToolMode.FILL:
 		var previous_image := get_image_copy()
@@ -748,11 +1040,11 @@ func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array) -> 
 			stroke_committed.emit(previous_image)
 		return
 	if active_tool == ToolMode.EYEDROPPER:
-		color_picked.emit(_image.get_pixel(pixel.x, pixel.y), pixel)
+		color_picked.emit(_make_display_image(_image).get_pixel(pixel.x, pixel.y), pixel)
 		return
 	if not _is_stroke_tool():
 		return
-	_is_drawing = true
+	_begin_live_stroke_state()
 	_stroke_start_image = get_image_copy()
 	_begin_stroke_coverage()
 	_last_pixel = pixel
@@ -761,6 +1053,8 @@ func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array) -> 
 
 
 func continue_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array, connect_from_previous := true) -> void:
+	if not editing_enabled:
+		return
 	if not _is_drawing:
 		return
 	var pixel := _uv_to_image_pixel(uv)
@@ -783,25 +1077,35 @@ func image_pixel_from_uv(uv: Vector2) -> Vector2i:
 	return _uv_to_image_pixel(uv)
 
 
-func begin_surface_shape_preview(from_pixel: Vector2i, to_pixel := Vector2i(-1, -1)) -> bool:
-	if not _is_shape_tool() or _image.is_empty():
+func begin_surface_shape_preview(
+	from_pixel: Vector2i,
+	to_pixel := Vector2i(-1, -1),
+	scaled_preview_only := false
+) -> bool:
+	if not editing_enabled or not _is_shape_tool() or _image.is_empty():
 		return false
 	if _is_shape_previewing:
 		cancel_surface_shape_preview()
 	_surface_shape_previewing = true
 	_surface_shape_endpoint_valid = true
+	_surface_shape_scaled_preview_only = scaled_preview_only
+	_use_lightweight_shape_preview = false
 	_surface_shape_settings = _capture_shape_raster_settings()
+	_clear_surface_shape_base_preview()
 	_is_shape_previewing = true
 	_shape_start_pixel = _clip_image_pixel(from_pixel)
 	_shape_pointer_pixel = _shape_start_pixel if to_pixel.x < 0 or to_pixel.y < 0 else _clip_image_pixel(to_pixel)
 	_has_preview = false
-	_refresh_shape_preview_image()
+	if not _surface_shape_scaled_preview_only:
+		_refresh_shape_preview_image()
+	else:
+		_clear_shape_preview_image()
 	queue_redraw()
 	return true
 
 
 func update_surface_shape_preview(to_pixel: Vector2i, endpoint_valid := true) -> bool:
-	if not _surface_shape_previewing or not _is_shape_previewing:
+	if not editing_enabled or not _surface_shape_previewing or not _is_shape_previewing:
 		return false
 	_surface_shape_endpoint_valid = endpoint_valid
 	if not endpoint_valid:
@@ -809,13 +1113,32 @@ func update_surface_shape_preview(to_pixel: Vector2i, endpoint_valid := true) ->
 		queue_redraw()
 		return true
 	_shape_pointer_pixel = _clip_image_pixel(to_pixel)
-	_refresh_shape_preview_image()
+	if not _surface_shape_scaled_preview_only:
+		_refresh_shape_preview_image()
+	else:
+		_clear_shape_preview_image()
 	queue_redraw()
 	return true
 
 
-func get_surface_shape_preview_image() -> Image:
-	var composed := get_image_copy()
+func get_surface_shape_preview_image(maximum_dimension := 0) -> Image:
+	if maximum_dimension > 0:
+		if _surface_shape_scaled_preview_only:
+			return _get_lightweight_surface_shape_preview_image(maximum_dimension)
+		return _get_scaled_surface_shape_preview_image(maximum_dimension)
+	# Preserve the exact full-resolution API for tests, exports, and callers that
+	# explicitly request it. Interactive 3D hover uses the capped path above and
+	# therefore never pays for this lazy rasterization during pointer motion.
+	if (
+		_surface_shape_scaled_preview_only
+		and _surface_shape_previewing
+		and _surface_shape_endpoint_valid
+		and not _shape_preview_image
+	):
+		_surface_shape_scaled_preview_only = false
+		_refresh_shape_preview_image()
+		_surface_shape_scaled_preview_only = true
+	var composed := get_display_image_copy()
 	if (
 		_surface_shape_previewing
 		and _surface_shape_endpoint_valid
@@ -827,11 +1150,119 @@ func get_surface_shape_preview_image() -> Image:
 			Rect2i(Vector2i.ZERO, _shape_preview_image.get_size()),
 			_shape_preview_rect.position
 		)
+	return _get_document_region(composed)
+
+
+func _get_scaled_surface_shape_preview_image(maximum_dimension: int) -> Image:
+	var base_preview: Image = _get_surface_shape_base_preview(maximum_dimension)
+	if not base_preview or base_preview.is_empty():
+		return null
+	var composed: Image = base_preview.duplicate()
+	if (
+		not _surface_shape_previewing
+		or not _surface_shape_endpoint_valid
+		or not _shape_preview_image
+		or _shape_preview_image.is_empty()
+		or not _shape_preview_rect.has_area()
+	):
+		return composed
+	var preview_bounds := _shape_preview_rect.intersection(_document_rect)
+	if not preview_bounds.has_area() or not _document_rect.has_area():
+		return composed
+	var source_rect := Rect2i(preview_bounds.position - _shape_preview_rect.position, preview_bounds.size)
+	var preview_region: Image = _shape_preview_image.get_region(source_rect)
+	var output_size: Vector2i = composed.get_size()
+	var document_size: Vector2i = _document_rect.size
+	var relative_start := Vector2(preview_bounds.position - _document_rect.position) / Vector2(document_size)
+	var relative_end := Vector2(preview_bounds.end - _document_rect.position) / Vector2(document_size)
+	var destination_start := Vector2i(floori(relative_start.x * output_size.x), floori(relative_start.y * output_size.y))
+	var destination_end := Vector2i(ceili(relative_end.x * output_size.x), ceili(relative_end.y * output_size.y))
+	var destination_rect := Rect2i(
+		destination_start,
+		(destination_end - destination_start).max(Vector2i.ONE)
+	).intersection(Rect2i(Vector2i.ZERO, output_size))
+	if not destination_rect.has_area():
+		return composed
+	preview_region.resize(destination_rect.size.x, destination_rect.size.y, Image.INTERPOLATE_BILINEAR)
+	composed.blit_rect(
+		preview_region,
+		Rect2i(Vector2i.ZERO, preview_region.get_size()),
+		destination_rect.position
+	)
+	return composed
+
+
+func _get_surface_shape_base_preview(maximum_dimension: int) -> Image:
+	var resolved_maximum := maxi(1, maximum_dimension)
+	if (
+		_surface_shape_base_preview_image
+		and not _surface_shape_base_preview_image.is_empty()
+		and _surface_shape_base_preview_max_dimension == resolved_maximum
+	):
+		return _surface_shape_base_preview_image
+	var base_preview: Image = get_document_display_image_copy()
+	if not base_preview or base_preview.is_empty():
+		return null
+	var largest_dimension := maxi(base_preview.get_width(), base_preview.get_height())
+	if largest_dimension > resolved_maximum:
+		var scale := float(resolved_maximum) / float(largest_dimension)
+		base_preview.resize(
+			maxi(1, roundi(float(base_preview.get_width()) * scale)),
+			maxi(1, roundi(float(base_preview.get_height()) * scale)),
+			Image.INTERPOLATE_BILINEAR
+		)
+	_surface_shape_base_preview_image = base_preview
+	_surface_shape_base_preview_max_dimension = resolved_maximum
+	return _surface_shape_base_preview_image
+
+
+func _clear_surface_shape_base_preview() -> void:
+	_surface_shape_base_preview_image = null
+	_surface_shape_base_preview_max_dimension = 0
+
+
+func _get_lightweight_surface_shape_preview_image(maximum_dimension: int) -> Image:
+	var base_preview: Image = _get_surface_shape_base_preview(maximum_dimension)
+	if not base_preview or base_preview.is_empty():
+		return null
+	var composed: Image = base_preview.duplicate()
+	if not _surface_shape_endpoint_valid or not _document_rect.has_area():
+		return composed
+	var endpoints := _get_active_shape_endpoints()
+	var output_size: Vector2i = composed.get_size()
+	var scale := Vector2(output_size) / Vector2(_document_rect.size)
+	var from_pixel := Vector2i(
+		roundi(float(endpoints[0].x - _document_rect.position.x) * scale.x),
+		roundi(float(endpoints[0].y - _document_rect.position.y) * scale.y)
+	)
+	var to_pixel := Vector2i(
+		roundi(float(endpoints[1].x - _document_rect.position.x) * scale.x),
+		roundi(float(endpoints[1].y - _document_rect.position.y) * scale.y)
+	)
+	var settings: Dictionary = _surface_shape_settings
+	var preview_brush_size := maxi(1, roundi(float(settings.get("brush_size", brush_size)) * minf(scale.x, scale.y)))
+	var preview_fill_mode := int(settings.get("shape_fill_mode", shape_fill_mode))
+	var preview_outline: Color = settings.get("brush_color", brush_color)
+	var preview_fill: Color = (
+		settings.get("background_color", background_color)
+		if preview_fill_mode == ShapeFillMode.BACKGROUND
+		else preview_outline
+	)
+	_native_draw_shape_on_image(
+		composed,
+		active_tool,
+		from_pixel,
+		to_pixel,
+		preview_brush_size,
+		preview_outline,
+		preview_fill_mode,
+		preview_fill
+	)
 	return composed
 
 
 func commit_surface_shape_preview() -> bool:
-	if not _surface_shape_previewing or not _surface_shape_endpoint_valid:
+	if not editing_enabled or not _surface_shape_previewing or not _surface_shape_endpoint_valid:
 		cancel_surface_shape_preview()
 		return false
 	return _commit_current_shape()
@@ -842,7 +1273,10 @@ func cancel_surface_shape_preview() -> bool:
 		return false
 	_surface_shape_previewing = false
 	_surface_shape_endpoint_valid = false
+	_surface_shape_scaled_preview_only = false
+	_use_lightweight_shape_preview = false
 	_surface_shape_settings.clear()
+	_clear_surface_shape_base_preview()
 	_is_shape_previewing = false
 	_clear_shape_preview_image()
 	_set_canvas_mouse_hidden(false)
@@ -892,6 +1326,8 @@ func _apply_shape_raster_settings(settings: Dictionary) -> void:
 
 
 func resize_canvas(new_size: Vector2i, keep_pixels: bool) -> Image:
+	if not editing_enabled:
+		return get_image_copy()
 	finish_text_draft(true)
 	new_size = Vector2i(
 		clampi(new_size.x, MIN_IMAGE_SIZE, MAX_IMAGE_SIZE),
@@ -907,7 +1343,9 @@ func resize_canvas(new_size: Vector2i, keep_pixels: bool) -> Image:
 		)
 		resized_image.blit_rect(previous_image, Rect2i(Vector2i.ZERO, copy_size), Vector2i.ZERO)
 	_image = resized_image
-	_texture = ImageTexture.create_from_image(_image)
+	_workspace_origin = Vector2i.ZERO
+	_document_rect = Rect2i(Vector2i.ZERO, new_size)
+	_refresh_display_texture()
 	_has_crop_preview = false
 	_crop_preview_rect = Rect2i()
 	_clear_selection()
@@ -920,7 +1358,8 @@ func resize_canvas(new_size: Vector2i, keep_pixels: bool) -> Image:
 
 func scale_image(new_size: Vector2i, interpolation := ScaleInterpolation.NEAREST) -> bool:
 	if (
-		new_size.x < MIN_IMAGE_SIZE
+		not editing_enabled
+		or new_size.x < MIN_IMAGE_SIZE
 		or new_size.y < MIN_IMAGE_SIZE
 		or new_size.x > MAX_IMAGE_SIZE
 		or new_size.y > MAX_IMAGE_SIZE
@@ -937,7 +1376,9 @@ func scale_image(new_size: Vector2i, interpolation := ScaleInterpolation.NEAREST
 	if scaled_image.get_format() != Image.FORMAT_RGBA8:
 		scaled_image.convert(Image.FORMAT_RGBA8)
 	_image = scaled_image
-	_texture = ImageTexture.create_from_image(_image)
+	_workspace_origin = Vector2i.ZERO
+	_document_rect = Rect2i(Vector2i.ZERO, new_size)
+	_refresh_display_texture()
 	_has_crop_preview = false
 	_crop_preview_rect = Rect2i()
 	_clear_selection()
@@ -1074,6 +1515,8 @@ func _is_supported_drop_image_path(path: String) -> bool:
 
 # Public document, crop, selection, and view commands used by the dock.
 func clear_canvas() -> Image:
+	if not editing_enabled:
+		return get_image_copy()
 	finish_text_draft(true)
 	var previous_image := get_image_copy()
 	_clear_selection()
@@ -1090,18 +1533,85 @@ func has_floating_selection() -> bool:
 	return _has_floating_selection or _is_transforming_selection
 
 
+func begin_imported_floating_selection(image: Image) -> bool:
+	if not editing_enabled or not image or image.is_empty() or has_floating_selection():
+		return false
+	var floating_image := image.duplicate()
+	if floating_image.has_mipmaps():
+		floating_image.clear_mipmaps()
+	if floating_image.get_format() != Image.FORMAT_RGBA8:
+		floating_image.convert(Image.FORMAT_RGBA8)
+	var floating_size: Vector2i = floating_image.get_size()
+	var floating_position := _get_centered_paste_position(floating_size)
+	_clear_selection()
+	_set_floating_selection(
+		floating_image,
+		Rect2i(floating_position, floating_size),
+		null,
+		get_image_copy()
+	)
+	# The dock owns the single layer-level history entry for an imported image.
+	# Suppress the canvas-level pixel entry when the floating pixels are committed.
+	_floating_history_recorded = true
+	selection_committed.emit(_selection_rect)
+	queue_redraw()
+	return true
+
+
+func cancel_imported_floating_selection() -> bool:
+	if _is_transforming_selection:
+		_cancel_selection_transform()
+	if not _has_floating_selection:
+		return false
+	var restore_image := _floating_cancel_image
+	_clear_floating_selection(false)
+	if restore_image:
+		_image = restore_image.duplicate()
+		_refresh_display_texture()
+	_clear_selection()
+	selection_cleared.emit()
+	image_changed.emit(get_image_copy())
+	floating_selection_canceled.emit()
+	queue_redraw()
+	return true
+
+
+func frame_floating_selection() -> void:
+	if not _has_floating_selection:
+		return
+	var viewport_size := _get_drawable_viewport_size()
+	var available := viewport_size - Vector2(32.0, 32.0)
+	var image_size := Vector2(_image.get_size())
+	var floating_size := Vector2(_floating_rect.size)
+	if available.x <= 0.0 or available.y <= 0.0 or image_size.x <= 0.0 or image_size.y <= 0.0:
+		return
+	if floating_size.x <= 0.0 or floating_size.y <= 0.0:
+		return
+	var fit_scale := _get_fit_scale_for_viewport(viewport_size)
+	if fit_scale <= 0.0:
+		return
+	var floating_fit_scale := minf(available.x / floating_size.x, available.y / floating_size.y)
+	zoom_multiplier = floating_fit_scale / fit_scale
+	_pan_offset = Vector2.ZERO
+	_clamp_pan_offset()
+	queue_redraw()
+
+
 func get_selection_crop_rect() -> Rect2i:
+	var workspace_rect := Rect2i()
 	if _has_floating_selection:
-		return _clip_pixel_rect(_floating_rect)
-	if not _has_selection:
+		workspace_rect = _clip_pixel_rect(_floating_rect)
+	elif not _has_selection:
 		return Rect2i()
-	var clipped_rect := _clip_pixel_rect(_selection_rect)
-	if clipped_rect.size.x <= 0 or clipped_rect.size.y <= 0 or not _selection_mask:
-		return clipped_rect
-	var occupied := _get_mask_occupied_rect(_selection_mask)
-	if occupied.size.x <= 0 or occupied.size.y <= 0:
-		return Rect2i()
-	return _clip_pixel_rect(Rect2i(_selection_rect.position + occupied.position, occupied.size))
+	else:
+		workspace_rect = _clip_pixel_rect(_selection_rect)
+		if workspace_rect.has_area() and _selection_mask:
+			var occupied := _get_mask_occupied_rect(_selection_mask)
+			if not occupied.has_area():
+				return Rect2i()
+			workspace_rect = _clip_pixel_rect(Rect2i(_selection_rect.position + occupied.position, occupied.size))
+	workspace_rect = workspace_rect.intersection(_document_rect)
+	return Rect2i(workspace_rect.position - _document_rect.position, workspace_rect.size) if workspace_rect.has_area() else Rect2i()
 
 
 func get_transparent_bounds() -> Rect2i:
@@ -1127,10 +1637,11 @@ func begin_crop_preview(pixel_rect: Rect2i) -> Rect2i:
 
 
 func update_crop_preview(pixel_rect: Rect2i) -> Rect2i:
-	_crop_preview_rect = _clip_pixel_rect(pixel_rect)
+	var document_rect := pixel_rect.intersection(Rect2i(Vector2i.ZERO, _document_rect.size))
+	_crop_preview_rect = Rect2i(_document_rect.position + document_rect.position, document_rect.size)
 	_has_crop_preview = _crop_preview_rect.size.x > 0 and _crop_preview_rect.size.y > 0
 	queue_redraw()
-	return _crop_preview_rect
+	return document_rect
 
 
 func cancel_crop_preview() -> bool:
@@ -1147,7 +1658,7 @@ func has_crop_preview() -> bool:
 
 
 func get_crop_preview_rect() -> Rect2i:
-	return _crop_preview_rect if _has_crop_preview else Rect2i()
+	return Rect2i(_crop_preview_rect.position - _document_rect.position, _crop_preview_rect.size) if _has_crop_preview else Rect2i()
 
 
 func get_crop_preview_image() -> Image:
@@ -1157,23 +1668,27 @@ func get_crop_preview_image() -> Image:
 
 
 func crop_to_selection() -> bool:
-	return crop_to_rect(get_selection_crop_rect())
+	return editing_enabled and crop_to_rect(get_selection_crop_rect())
 
 
 func trim_transparent_bounds() -> bool:
+	if not editing_enabled:
+		return false
 	finish_text_draft(true)
 	return crop_to_rect(get_transparent_bounds())
 
 
 func apply_crop_preview() -> bool:
-	if not _has_crop_preview:
+	if not editing_enabled or not _has_crop_preview:
 		return false
 	return crop_to_rect(_crop_preview_rect)
 
 
 func crop_to_rect(pixel_rect: Rect2i) -> bool:
+	if not editing_enabled:
+		return false
 	var crop_rect := _clip_pixel_rect(pixel_rect)
-	var full_rect := Rect2i(Vector2i.ZERO, get_canvas_size())
+	var full_rect := Rect2i(Vector2i.ZERO, _image.get_size())
 	if crop_rect.size.x <= 0 or crop_rect.size.y <= 0 or crop_rect == full_rect:
 		return false
 	finish_text_draft(true)
@@ -1184,7 +1699,7 @@ func crop_to_rect(pixel_rect: Rect2i) -> bool:
 	if cropped_image.get_format() != Image.FORMAT_RGBA8:
 		cropped_image.convert(Image.FORMAT_RGBA8)
 	_image = cropped_image
-	_texture = ImageTexture.create_from_image(_image)
+	_refresh_display_texture()
 	_has_crop_preview = false
 	_crop_preview_rect = Rect2i()
 	_clear_selection()
@@ -1218,7 +1733,7 @@ func set_clipboard_image(image: Image) -> bool:
 func select_all() -> bool:
 	if _has_floating_selection:
 		_commit_floating_selection()
-	_selection_rect = Rect2i(Vector2i.ZERO, get_canvas_size())
+	_selection_rect = Rect2i(Vector2i.ZERO, _image.get_size())
 	_selection_mask = null
 	_has_selection = true
 	selection_committed.emit(_selection_rect)
@@ -1242,12 +1757,15 @@ func copy_selection() -> bool:
 
 
 func cut_selection() -> bool:
+	if not editing_enabled:
+		return false
 	if _has_floating_selection:
 		var previous_image := get_image_copy()
 		_clipboard_image = _get_rotated_floating_image()
 		_clear_floating_selection()
 		_clear_selection()
 		stroke_committed.emit(previous_image)
+		floating_selection_canceled.emit()
 		queue_redraw()
 		return true
 	if not _has_selection:
@@ -1263,7 +1781,7 @@ func cut_selection() -> bool:
 
 
 func paste_selection() -> bool:
-	if not has_clipboard_image():
+	if not editing_enabled or not has_clipboard_image():
 		return false
 
 	var previous_image := get_image_copy()
@@ -1281,7 +1799,7 @@ func paste_selection() -> bool:
 
 
 func duplicate_selection() -> bool:
-	if not has_active_selection():
+	if not editing_enabled or not has_active_selection():
 		return false
 	if _has_floating_selection:
 		_commit_floating_selection()
@@ -1299,15 +1817,15 @@ func duplicate_selection() -> bool:
 
 
 func rotate_selection_clockwise() -> bool:
-	return _rotate_selection_quarter_turn(true)
+	return editing_enabled and _rotate_selection_quarter_turn(true)
 
 
 func rotate_selection_counterclockwise() -> bool:
-	return _rotate_selection_quarter_turn(false)
+	return editing_enabled and _rotate_selection_quarter_turn(false)
 
 
 func rotate_selection_degrees(degrees: float) -> bool:
-	if not has_active_selection():
+	if not editing_enabled or not has_active_selection():
 		return false
 	var normalized := fposmod(degrees, 360.0)
 	if is_zero_approx(normalized) or is_equal_approx(normalized, 360.0):
@@ -1344,7 +1862,7 @@ func rotate_selection_degrees(degrees: float) -> bool:
 
 
 func nudge_selection(delta: Vector2i, begin_sequence := true, end_sequence := true) -> bool:
-	if not has_active_selection() or delta == Vector2i.ZERO:
+	if not editing_enabled or not has_active_selection() or delta == Vector2i.ZERO:
 		return false
 	if begin_sequence or not _selection_nudge_previous_image:
 		_selection_nudge_previous_image = get_image_copy()
@@ -1380,6 +1898,8 @@ func finish_selection_nudge_sequence() -> void:
 
 
 func commit_active_selection_transform() -> bool:
+	if not editing_enabled:
+		return false
 	if _is_transforming_selection:
 		_commit_selection_transform()
 		return true
@@ -1402,24 +1922,27 @@ func get_tile_preview_rects() -> Array[Rect2]:
 
 
 func flip_selection_horizontal() -> bool:
-	return _flip_selection(true)
+	return editing_enabled and _flip_selection(true)
 
 
 func flip_selection_vertical() -> bool:
-	return _flip_selection(false)
+	return editing_enabled and _flip_selection(false)
 
 
 func delete_active_selection() -> bool:
+	if not editing_enabled:
+		return false
 	if _has_floating_selection:
 		var restore_image := _floating_cancel_image
 		_clear_floating_selection()
 		if restore_image:
 			_image = restore_image.duplicate()
-			_texture = ImageTexture.create_from_image(_image)
+			_refresh_display_texture()
 			_clear_selection()
 			selection_cleared.emit()
 			image_changed.emit(get_image_copy())
 			queue_redraw()
+		floating_selection_canceled.emit()
 		return true
 	if not _has_selection:
 		return false
@@ -1437,6 +1960,7 @@ func cancel_active_selection_or_preview() -> bool:
 			cancel_surface_shape_preview()
 		else:
 			_is_shape_previewing = false
+			_use_lightweight_shape_preview = false
 			_clear_shape_preview_image()
 			_set_canvas_mouse_hidden(false)
 			queue_redraw()
@@ -1457,11 +1981,12 @@ func cancel_active_selection_or_preview() -> bool:
 		_clear_floating_selection()
 		if restore_image:
 			_image = restore_image.duplicate()
-			_texture = ImageTexture.create_from_image(_image)
+			_refresh_display_texture()
 			_clear_selection()
 			selection_cleared.emit()
 			image_changed.emit(get_image_copy())
 			queue_redraw()
+		floating_selection_canceled.emit()
 		return true
 	if _has_selection:
 		_clear_selection()
@@ -1569,7 +2094,7 @@ func get_text_draft_image_copy() -> Image:
 	for y in range(copied_image.get_height()):
 		for x in range(copied_image.get_width()):
 			var composed := Color.TRANSPARENT
-			if _text_background_preview_image:
+			if text_fill_mode == TextFillMode.BACKGROUND and _text_background_preview_image:
 				var background_source := background_color
 				background_source.a *= _text_background_preview_image.get_pixel(x, y).a
 				if background_source.a > 0.0:
@@ -1602,7 +2127,7 @@ func copy_text_draft_contextual() -> bool:
 
 
 func rotate_text_draft_degrees(degrees: float) -> bool:
-	if not _has_text_draft or not is_finite(degrees) or is_zero_approx(degrees):
+	if not editing_enabled or not _has_text_draft or not is_finite(degrees) or is_zero_approx(degrees):
 		return false
 	_text_rotation = wrapf(_text_rotation + deg_to_rad(degrees), -PI, PI)
 	_refresh_text_rotated_preview()
@@ -1618,6 +2143,8 @@ func focus_text_editor() -> void:
 
 
 func create_text_draft(pixel_rect: Rect2i, initial_text := "") -> void:
+	if not editing_enabled:
+		return
 	if _has_text_draft:
 		finish_text_draft(true)
 	_text_box = Rect2i(
@@ -1636,7 +2163,7 @@ func create_text_draft(pixel_rect: Rect2i, initial_text := "") -> void:
 
 
 func commit_text_draft() -> bool:
-	if not _has_text_draft:
+	if not editing_enabled or not _has_text_draft:
 		return false
 	if not _text_editor or _text_editor.text.strip_edges().is_empty():
 		_clear_text_draft(false)
@@ -1652,7 +2179,7 @@ func commit_text_draft() -> bool:
 	var previous_image := get_image_copy()
 	var changed := false
 	var coverage_position: Vector2i = _text_preview_rect.position if _text_preview_image else _text_box.position
-	var background_coverage: Image = _text_background_preview_image
+	var background_coverage: Image = _text_background_preview_image if text_fill_mode == TextFillMode.BACKGROUND else null
 	if background_coverage and not background_coverage.is_empty() and background_color.a > 0.0:
 		for source_y in range(background_coverage.get_height()):
 			var target_y := coverage_position.y + source_y
@@ -2087,15 +2614,19 @@ func _select_text_editor_global_range(from_index: int, to_index: int) -> void:
 func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), CANVAS_AREA_BACKGROUND_COLOR, true)
 	_image_rect = _get_image_rect()
+	var document_local_rect := _image_pixels_to_local_rect(_document_rect)
 	_draw_tile_preview()
-	_draw_checkerboard(_image_rect)
+	_draw_checkerboard(document_local_rect)
 	_draw_image_texture(_image_rect)
-	_draw_shape_preview_image()
+	if _use_lightweight_shape_preview and _is_shape_previewing and not _surface_shape_previewing:
+		_draw_shape_preview()
+	else:
+		_draw_shape_preview_image()
 	if show_grid:
-		_draw_pixel_grid(_image_rect)
+		_draw_pixel_grid(document_local_rect)
 	if uv_overlay_visible:
-		_draw_uv_overlay(_image_rect)
-	_draw_canvas_outline(_image_rect)
+		_draw_uv_overlay(document_local_rect)
+	_draw_canvas_outline(document_local_rect)
 	_draw_floating_selection()
 	_draw_selection_transform_preview()
 	_draw_selection()
@@ -2104,6 +2635,259 @@ func _draw() -> void:
 	_draw_crop_preview()
 	_draw_stroke_preview()
 	_draw_external_hover_preview()
+	_draw_navigator()
+
+
+func _draw_navigator() -> void:
+	if not is_navigator_visible():
+		return
+	var window_rect := _get_navigator_window_rect()
+	var preview_rect := _get_navigator_preview_rect(window_rect)
+	draw_rect(window_rect, Color(0.055, 0.06, 0.07, 0.96), true)
+	draw_rect(window_rect, Color(0.42, 0.45, 0.50, 0.95), false, 1.0)
+	draw_rect(Rect2(window_rect.position, Vector2(window_rect.size.x, NAVIGATOR_HEADER_HEIGHT)), Color(0.10, 0.11, 0.13, 1.0), true)
+	draw_string(
+		ThemeDB.fallback_font,
+		window_rect.position + Vector2(6.0, 13.0),
+		"Navigator",
+		HORIZONTAL_ALIGNMENT_LEFT,
+		-1.0,
+		10,
+		Color(0.78, 0.80, 0.84, 1.0)
+	)
+	draw_rect(preview_rect, Color(0.20, 0.20, 0.20, 1.0), true)
+	if _texture:
+		draw_texture_rect(_texture, preview_rect, false)
+	var document_preview := _image_pixels_to_navigator_rect(_document_rect, preview_rect)
+	if document_preview.has_area():
+		draw_rect(document_preview, Color(0.86, 0.86, 0.86, 0.8), false, 1.0)
+	var viewport_preview := _get_navigator_viewport_rect(preview_rect)
+	if viewport_preview.has_area():
+		draw_rect(viewport_preview, NAVIGATOR_VIEWPORT_FILL_COLOR, true)
+		draw_rect(viewport_preview, NAVIGATOR_VIEWPORT_OUTLINE_COLOR, false, 2.0)
+
+
+func is_navigator_visible() -> bool:
+	if not navigator_enabled or not _image or _image.is_empty():
+		return false
+	var work_rect := _get_work_rect()
+	var image_rect := _get_image_rect()
+	if not work_rect.has_area() or not image_rect.has_area():
+		return false
+	return not work_rect.encloses(image_rect)
+
+
+func _get_navigator_window_rect() -> Rect2:
+	var work_rect := _get_work_rect()
+	var image_size := Vector2(_image.get_size())
+	var preview_scale := minf(
+		NAVIGATOR_MAX_PREVIEW_SIZE.x / maxf(1.0, image_size.x),
+		NAVIGATOR_MAX_PREVIEW_SIZE.y / maxf(1.0, image_size.y)
+	)
+	var preview_size := image_size * preview_scale
+	if preview_size.x < NAVIGATOR_MIN_PREVIEW_SIZE.x:
+		preview_size *= NAVIGATOR_MIN_PREVIEW_SIZE.x / maxf(1.0, preview_size.x)
+	if preview_size.y < NAVIGATOR_MIN_PREVIEW_SIZE.y:
+		preview_size *= NAVIGATOR_MIN_PREVIEW_SIZE.y / maxf(1.0, preview_size.y)
+	preview_size = preview_size.min(NAVIGATOR_MAX_PREVIEW_SIZE)
+	var window_size := preview_size + Vector2(NAVIGATOR_PADDING * 2.0, NAVIGATOR_HEADER_HEIGHT + NAVIGATOR_PADDING)
+	var bottom_margin := NAVIGATOR_MARGIN + CANVAS_SCROLLBAR_THICKNESS + CANVAS_SCROLLBAR_MARGIN
+	if _navigator_position.x < 0.0 or _navigator_position.y < 0.0:
+		_navigator_position = Vector2(
+			work_rect.position.x + NAVIGATOR_MARGIN,
+			work_rect.end.y - window_size.y - bottom_margin
+		)
+	var maximum_position := Vector2(
+		work_rect.end.x - window_size.x - NAVIGATOR_MARGIN,
+		work_rect.end.y - window_size.y - bottom_margin
+	).max(work_rect.position)
+	var minimum_position := (work_rect.position + Vector2(NAVIGATOR_MARGIN, NAVIGATOR_MARGIN)).min(maximum_position)
+	_navigator_position = _navigator_position.clamp(minimum_position, maximum_position)
+	return Rect2(_navigator_position, window_size)
+
+
+func _get_navigator_preview_rect(window_rect: Rect2) -> Rect2:
+	return Rect2(
+		window_rect.position + Vector2(NAVIGATOR_PADDING, NAVIGATOR_HEADER_HEIGHT),
+		window_rect.size - Vector2(NAVIGATOR_PADDING * 2.0, NAVIGATOR_HEADER_HEIGHT + NAVIGATOR_PADDING)
+	)
+
+
+func _image_pixels_to_navigator_rect(pixel_rect: Rect2i, preview_rect: Rect2) -> Rect2:
+	var image_size := Vector2(_image.get_size())
+	if image_size.x <= 0.0 or image_size.y <= 0.0:
+		return Rect2()
+	return Rect2(
+		preview_rect.position + Vector2(pixel_rect.position) / image_size * preview_rect.size,
+		Vector2(pixel_rect.size) / image_size * preview_rect.size
+	).intersection(preview_rect)
+
+
+func _get_navigator_viewport_rect(preview_rect: Rect2) -> Rect2:
+	var image_rect := _get_image_rect()
+	var visible_local := image_rect.intersection(_get_work_rect())
+	if not image_rect.has_area() or not visible_local.has_area():
+		return Rect2()
+	var normalized := Rect2(
+		(visible_local.position - image_rect.position) / image_rect.size,
+		visible_local.size / image_rect.size
+	)
+	var result := Rect2(
+		preview_rect.position + normalized.position * preview_rect.size,
+		normalized.size * preview_rect.size
+	).intersection(preview_rect)
+	result.size = result.size.max(Vector2(2.0, 2.0))
+	return result.intersection(preview_rect)
+
+
+func _build_canvas_scrollbars() -> void:
+	_horizontal_scrollbar = HScrollBar.new()
+	_horizontal_scrollbar.name = "Canvas Horizontal Scrollbar"
+	_horizontal_scrollbar.anchor_left = 0.0
+	_horizontal_scrollbar.anchor_top = 1.0
+	_horizontal_scrollbar.anchor_right = 1.0
+	_horizontal_scrollbar.anchor_bottom = 1.0
+	_horizontal_scrollbar.offset_left = CANVAS_SCROLLBAR_MARGIN
+	_horizontal_scrollbar.offset_top = -(CANVAS_SCROLLBAR_THICKNESS + CANVAS_SCROLLBAR_MARGIN)
+	_horizontal_scrollbar.offset_right = -(CANVAS_SCROLLBAR_THICKNESS + CANVAS_SCROLLBAR_MARGIN * 2.0)
+	_horizontal_scrollbar.offset_bottom = -CANVAS_SCROLLBAR_MARGIN
+	_horizontal_scrollbar.focus_mode = Control.FOCUS_NONE
+	_horizontal_scrollbar.mouse_filter = Control.MOUSE_FILTER_STOP
+	_horizontal_scrollbar.visible = false
+	_horizontal_scrollbar.value_changed.connect(_on_canvas_horizontal_scrollbar_changed)
+	_horizontal_scrollbar.mouse_entered.connect(_on_canvas_scrollbar_mouse_entered.bind(true))
+	_horizontal_scrollbar.mouse_exited.connect(_on_canvas_scrollbar_mouse_exited.bind(true))
+	_horizontal_scrollbar.gui_input.connect(_on_canvas_scrollbar_gui_input)
+	add_child(_horizontal_scrollbar)
+
+	_vertical_scrollbar = VScrollBar.new()
+	_vertical_scrollbar.name = "Canvas Vertical Scrollbar"
+	_vertical_scrollbar.anchor_left = 1.0
+	_vertical_scrollbar.anchor_top = 0.0
+	_vertical_scrollbar.anchor_right = 1.0
+	_vertical_scrollbar.anchor_bottom = 1.0
+	_vertical_scrollbar.offset_left = -(CANVAS_SCROLLBAR_THICKNESS + CANVAS_SCROLLBAR_MARGIN)
+	_vertical_scrollbar.offset_top = CANVAS_SCROLLBAR_MARGIN
+	_vertical_scrollbar.offset_right = -CANVAS_SCROLLBAR_MARGIN
+	_vertical_scrollbar.offset_bottom = -(CANVAS_SCROLLBAR_THICKNESS + CANVAS_SCROLLBAR_MARGIN * 2.0)
+	_vertical_scrollbar.focus_mode = Control.FOCUS_NONE
+	_vertical_scrollbar.mouse_filter = Control.MOUSE_FILTER_STOP
+	_vertical_scrollbar.visible = false
+	_vertical_scrollbar.value_changed.connect(_on_canvas_vertical_scrollbar_changed)
+	_vertical_scrollbar.mouse_entered.connect(_on_canvas_scrollbar_mouse_entered.bind(false))
+	_vertical_scrollbar.mouse_exited.connect(_on_canvas_scrollbar_mouse_exited.bind(false))
+	_vertical_scrollbar.gui_input.connect(_on_canvas_scrollbar_gui_input)
+	add_child(_vertical_scrollbar)
+
+
+func _update_canvas_scrollbars() -> void:
+	if _syncing_canvas_scrollbars or not _horizontal_scrollbar or not _vertical_scrollbar:
+		return
+	var limits := _get_canvas_pan_limits()
+	if limits.is_empty():
+		_horizontal_scrollbar.visible = false
+		_vertical_scrollbar.visible = false
+		return
+	var available: Vector2 = limits["available"]
+	var display_size: Vector2 = limits["display_size"]
+	var minimum_pan: Vector2 = limits["minimum"]
+	var maximum_pan: Vector2 = limits["maximum"]
+	var horizontal_needed := display_size.x > available.x + 0.5
+	var vertical_needed := display_size.y > available.y + 0.5
+	_syncing_canvas_scrollbars = true
+	_horizontal_scrollbar.min_value = 0.0
+	_horizontal_scrollbar.max_value = maxf(display_size.x, available.x)
+	_horizontal_scrollbar.page = available.x
+	_horizontal_scrollbar.step = 1.0
+	_horizontal_scrollbar.set_value_no_signal(clampf(maximum_pan.x - _pan_offset.x, 0.0, maximum_pan.x - minimum_pan.x))
+	_vertical_scrollbar.min_value = 0.0
+	_vertical_scrollbar.max_value = maxf(display_size.y, available.y)
+	_vertical_scrollbar.page = available.y
+	_vertical_scrollbar.step = 1.0
+	_vertical_scrollbar.set_value_no_signal(clampf(maximum_pan.y - _pan_offset.y, 0.0, maximum_pan.y - minimum_pan.y))
+	_syncing_canvas_scrollbars = false
+	_horizontal_scrollbar.visible = horizontal_needed and (
+		_horizontal_scrollbar_pointer_near or _horizontal_scrollbar_hovered or _canvas_scrollbar_dragging
+	)
+	_vertical_scrollbar.visible = vertical_needed and (
+		_vertical_scrollbar_pointer_near or _vertical_scrollbar_hovered or _canvas_scrollbar_dragging
+	)
+
+
+func _update_canvas_scrollbar_proximity(local_position: Vector2) -> void:
+	var viewport_size := _get_drawable_viewport_size()
+	_horizontal_scrollbar_pointer_near = local_position.y >= viewport_size.y - CANVAS_SCROLLBAR_HOVER_ZONE
+	_vertical_scrollbar_pointer_near = local_position.x >= viewport_size.x - CANVAS_SCROLLBAR_HOVER_ZONE
+	_update_canvas_scrollbars()
+
+
+func _on_canvas_scrollbar_mouse_entered(horizontal: bool) -> void:
+	if horizontal:
+		_horizontal_scrollbar_hovered = true
+	else:
+		_vertical_scrollbar_hovered = true
+	_update_canvas_scrollbars()
+
+
+func _on_canvas_scrollbar_mouse_exited(horizontal: bool) -> void:
+	if horizontal:
+		_horizontal_scrollbar_hovered = false
+	else:
+		_vertical_scrollbar_hovered = false
+	call_deferred("_refresh_canvas_scrollbar_visibility_from_mouse")
+
+
+func _on_canvas_mouse_exited_for_scrollbars() -> void:
+	_horizontal_scrollbar_pointer_near = false
+	_vertical_scrollbar_pointer_near = false
+	call_deferred("_refresh_canvas_scrollbar_visibility_from_mouse")
+
+
+func _refresh_canvas_scrollbar_visibility_from_mouse() -> void:
+	if not is_inside_tree():
+		return
+	var local_mouse := get_local_mouse_position()
+	var viewport_size := _get_drawable_viewport_size()
+	if Rect2(Vector2.ZERO, viewport_size).has_point(local_mouse):
+		_horizontal_scrollbar_pointer_near = local_mouse.y >= viewport_size.y - CANVAS_SCROLLBAR_HOVER_ZONE
+		_vertical_scrollbar_pointer_near = local_mouse.x >= viewport_size.x - CANVAS_SCROLLBAR_HOVER_ZONE
+	else:
+		_horizontal_scrollbar_pointer_near = false
+		_vertical_scrollbar_pointer_near = false
+	_update_canvas_scrollbars()
+
+
+func _on_canvas_scrollbar_gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		_canvas_scrollbar_dragging = event.pressed
+		if not event.pressed:
+			call_deferred("_refresh_canvas_scrollbar_visibility_from_mouse")
+		else:
+			_update_canvas_scrollbars()
+
+
+func _on_canvas_horizontal_scrollbar_changed(value: float) -> void:
+	if _syncing_canvas_scrollbars:
+		return
+	var limits := _get_canvas_pan_limits()
+	if limits.is_empty():
+		return
+	var maximum_pan: Vector2 = limits["maximum"]
+	_pan_offset.x = maximum_pan.x - value
+	_clamp_pan_offset()
+	queue_redraw()
+
+
+func _on_canvas_vertical_scrollbar_changed(value: float) -> void:
+	if _syncing_canvas_scrollbars:
+		return
+	var limits := _get_canvas_pan_limits()
+	if limits.is_empty():
+		return
+	var maximum_pan: Vector2 = limits["maximum"]
+	_pan_offset.y = maximum_pan.y - value
+	_clamp_pan_offset()
+	queue_redraw()
 
 
 func _draw_text_draft() -> void:
@@ -2111,7 +2895,8 @@ func _draw_text_draft() -> void:
 		return
 	var local_box := _image_pixels_to_local_rect(_text_box)
 	if _text_paragraph:
-		_draw_text_preview_layer(_text_background_preview_texture, background_color)
+		if text_fill_mode == TextFillMode.BACKGROUND:
+			_draw_text_preview_layer(_text_background_preview_texture, background_color)
 		_draw_text_preview_layer(_text_preview_texture, brush_color)
 	if is_zero_approx(_text_rotation):
 		_draw_text_editor_selection(local_box)
@@ -2300,27 +3085,28 @@ func _draw_checkerboard(canvas_rect: Rect2, clip_rect := Rect2()) -> void:
 
 
 func _draw_tile_preview() -> void:
-	if not tile_preview_enabled or _image_rect.size.x <= 0.0 or _image_rect.size.y <= 0.0:
+	var document_local_rect := _image_pixels_to_local_rect(_document_rect)
+	if not tile_preview_enabled or document_local_rect.size.x <= 0.0 or document_local_rect.size.y <= 0.0:
 		return
 	for tile_y in range(-1, 2):
 		for tile_x in range(-1, 2):
 			if tile_x == 0 and tile_y == 0:
 				continue
 			var tile_rect := Rect2(
-				_image_rect.position + Vector2(tile_x * _image_rect.size.x, tile_y * _image_rect.size.y),
-				_image_rect.size
+				document_local_rect.position + Vector2(tile_x * document_local_rect.size.x, tile_y * document_local_rect.size.y),
+				document_local_rect.size
 			)
 			var clipped := tile_rect.intersection(_get_work_rect())
 			if not clipped.has_area():
 				continue
 			_draw_checkerboard(tile_rect, _get_work_rect())
 			var source_position := Vector2(
-				(clipped.position.x - tile_rect.position.x) / tile_rect.size.x * float(_image.get_width()),
-				(clipped.position.y - tile_rect.position.y) / tile_rect.size.y * float(_image.get_height())
+				float(_document_rect.position.x) + (clipped.position.x - tile_rect.position.x) / tile_rect.size.x * float(_document_rect.size.x),
+				float(_document_rect.position.y) + (clipped.position.y - tile_rect.position.y) / tile_rect.size.y * float(_document_rect.size.y)
 			)
 			var source_size := Vector2(
-				clipped.size.x / tile_rect.size.x * float(_image.get_width()),
-				clipped.size.y / tile_rect.size.y * float(_image.get_height())
+				clipped.size.x / tile_rect.size.x * float(_document_rect.size.x),
+				clipped.size.y / tile_rect.size.y * float(_document_rect.size.y)
 			)
 			draw_texture_rect_region(_texture, clipped, Rect2(source_position, source_size), Color(1, 1, 1, 0.72))
 			draw_rect(tile_rect, Color(0.08, 0.08, 0.08, 0.8), false, 1.0)
@@ -2416,8 +3202,8 @@ func _uv_to_local(uv: Vector2, canvas_rect: Rect2) -> Vector2:
 
 func _uv_to_image_pixel(uv: Vector2) -> Vector2i:
 	return Vector2i(
-		clampi(floori(clampf(uv.x, 0.0, 1.0) * float(_image.get_width())), 0, _image.get_width() - 1),
-		clampi(floori(clampf(uv.y, 0.0, 1.0) * float(_image.get_height())), 0, _image.get_height() - 1)
+		_document_rect.position.x + clampi(floori(clampf(uv.x, 0.0, 1.0) * float(_document_rect.size.x)), 0, _document_rect.size.x - 1),
+		_document_rect.position.y + clampi(floori(clampf(uv.y, 0.0, 1.0) * float(_document_rect.size.y)), 0, _document_rect.size.y - 1)
 	)
 
 
@@ -2449,10 +3235,12 @@ func _draw_stroke_preview() -> void:
 
 	if active_tool == ToolMode.EYEDROPPER:
 		var sample_rect := _image_pixels_to_local_rect(Rect2i(preview_pixel, Vector2i.ONE))
-		var sample_color := _image.get_pixel(preview_pixel.x, preview_pixel.y)
+		var sample_image := _display_image_cache if _display_image_cache and not _display_image_cache.is_empty() else _image
+		var sample_color := sample_image.get_pixel(preview_pixel.x, preview_pixel.y)
 		sample_color.a = maxf(0.35, sample_color.a)
 		draw_rect(sample_rect, sample_color, true)
 		draw_rect(sample_rect, Color.WHITE, false, 1.5)
+		_draw_eyedropper_loupe(_preview_position, sample_image, preview_pixel)
 		return
 
 	if not _uses_brush_hover_preview():
@@ -2477,6 +3265,79 @@ func _draw_external_hover_preview() -> void:
 		preview_color.a = brush_color.a
 	preview_color.a *= 0.18
 	_draw_brush_coverage_preview(preview_pixel, preview_color)
+
+
+func _draw_eyedropper_loupe(pointer_position: Vector2, sample_image: Image, center_pixel: Vector2i) -> void:
+	if not sample_image or sample_image.is_empty():
+		return
+	var panel_rect := _get_eyedropper_loupe_rect(pointer_position)
+	var grid_size := Vector2.ONE * float(EYEDROPPER_LOUPE_SAMPLE_DIMENSION) * EYEDROPPER_LOUPE_CELL_SIZE
+	var grid_rect := Rect2(panel_rect.position + Vector2.ONE * EYEDROPPER_LOUPE_PADDING, grid_size)
+	var swatch_rect := Rect2(
+		Vector2(grid_rect.position.x, grid_rect.end.y + EYEDROPPER_LOUPE_GAP),
+		Vector2(grid_rect.size.x, EYEDROPPER_LOUPE_SWATCH_HEIGHT)
+	)
+	draw_rect(panel_rect, Color(0.045, 0.05, 0.06, 0.97), true)
+	draw_rect(panel_rect, Color(0.55, 0.58, 0.64, 1.0), false, 1.0)
+	var sample_radius := floori(float(EYEDROPPER_LOUPE_SAMPLE_DIMENSION) * 0.5)
+	for sample_y in range(EYEDROPPER_LOUPE_SAMPLE_DIMENSION):
+		for sample_x in range(EYEDROPPER_LOUPE_SAMPLE_DIMENSION):
+			var cell_rect := Rect2(
+				grid_rect.position + Vector2(sample_x, sample_y) * EYEDROPPER_LOUPE_CELL_SIZE,
+				Vector2.ONE * EYEDROPPER_LOUPE_CELL_SIZE
+			)
+			var checker := Color(0.62, 0.62, 0.62, 1.0) if (sample_x + sample_y) % 2 == 0 else Color(0.42, 0.42, 0.42, 1.0)
+			draw_rect(cell_rect, checker, true)
+			var image_pixel := center_pixel + Vector2i(sample_x - sample_radius, sample_y - sample_radius)
+			if Rect2i(Vector2i.ZERO, sample_image.get_size()).has_point(image_pixel):
+				draw_rect(cell_rect, sample_image.get_pixelv(image_pixel), true)
+			draw_rect(cell_rect, Color(0.08, 0.08, 0.08, 0.24), false, 1.0)
+	var center_cell := Rect2(
+		grid_rect.position + Vector2.ONE * float(sample_radius) * EYEDROPPER_LOUPE_CELL_SIZE,
+		Vector2.ONE * EYEDROPPER_LOUPE_CELL_SIZE
+	)
+	draw_rect(center_cell.grow(1.0), Color(0.02, 0.02, 0.02, 0.95), false, 3.0)
+	draw_rect(center_cell, Color.WHITE, false, 1.5)
+	_draw_eyedropper_swatch_checker(swatch_rect)
+	draw_rect(swatch_rect, sample_image.get_pixelv(center_pixel), true)
+	draw_rect(swatch_rect, Color(0.86, 0.88, 0.92, 1.0), false, 1.0)
+
+
+func _get_eyedropper_loupe_rect(pointer_position: Vector2) -> Rect2:
+	var grid_extent := float(EYEDROPPER_LOUPE_SAMPLE_DIMENSION) * EYEDROPPER_LOUPE_CELL_SIZE
+	var panel_size := Vector2(
+		grid_extent + EYEDROPPER_LOUPE_PADDING * 2.0,
+		EYEDROPPER_LOUPE_PADDING * 2.0 + grid_extent + EYEDROPPER_LOUPE_GAP + EYEDROPPER_LOUPE_SWATCH_HEIGHT
+	)
+	var work_rect := _get_work_rect()
+	var position := pointer_position + Vector2(
+		EYEDROPPER_LOUPE_POINTER_GAP,
+		-panel_size.y - EYEDROPPER_LOUPE_POINTER_GAP
+	)
+	if position.x + panel_size.x > work_rect.end.x:
+		position.x = pointer_position.x - panel_size.x - EYEDROPPER_LOUPE_POINTER_GAP
+	if position.y < work_rect.position.y:
+		position.y = pointer_position.y + EYEDROPPER_LOUPE_POINTER_GAP
+	var maximum_position := (work_rect.end - panel_size).max(work_rect.position)
+	position = position.clamp(work_rect.position, maximum_position)
+	return Rect2(position, panel_size)
+
+
+func _draw_eyedropper_swatch_checker(swatch_rect: Rect2) -> void:
+	var checker_size := 6.0
+	var columns := ceili(swatch_rect.size.x / checker_size)
+	var rows := ceili(swatch_rect.size.y / checker_size)
+	for y in range(rows):
+		for x in range(columns):
+			var cell := Rect2(
+				swatch_rect.position + Vector2(x, y) * checker_size,
+				Vector2(
+					minf(checker_size, swatch_rect.end.x - (swatch_rect.position.x + x * checker_size)),
+					minf(checker_size, swatch_rect.end.y - (swatch_rect.position.y + y * checker_size))
+				)
+			)
+			var color := Color(0.68, 0.68, 0.68, 1.0) if (x + y) % 2 == 0 else Color(0.46, 0.46, 0.46, 1.0)
+			draw_rect(cell, color, true)
 
 
 func _draw_external_hover_island_outline(display_scale: float) -> void:
@@ -2541,6 +3402,8 @@ func _draw_brush_coverage_preview(center: Vector2i, color: Color) -> void:
 
 # Input routing and high-level tool dispatch.
 func _gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion or event is InputEventMouseButton:
+		_update_canvas_scrollbar_proximity(event.position)
 	if active_tool == ToolMode.TEXT and _has_text_draft and event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
 			cancel_text_draft()
@@ -2550,6 +3413,9 @@ func _gui_input(event: InputEvent) -> void:
 			commit_text_draft()
 			accept_event()
 			return
+	if _handle_navigator_input(event):
+		accept_event()
+		return
 	var previous_shift_constrain := _shift_constrain
 	if event is InputEventKey and event.keycode == KEY_SHIFT:
 		_shift_constrain = event.pressed
@@ -2643,7 +3509,8 @@ func _gui_input(event: InputEvent) -> void:
 				_begin_selection_transform(event.position, SelectionTransformMode.SCALE, scale_handle)
 				accept_event()
 				return
-			if _image_pixels_to_local_rect(_clip_pixel_rect(_selection_rect)).has_point(event.position):
+			var selection_hit_rect := _selection_rect if _has_floating_selection else _clip_pixel_rect(_selection_rect)
+			if _image_pixels_to_local_rect(selection_hit_rect).has_point(event.position):
 				_begin_selection_transform(event.position, SelectionTransformMode.MOVE)
 				accept_event()
 				return
@@ -2691,7 +3558,86 @@ func _gui_input(event: InputEvent) -> void:
 		accept_event()
 
 
+func _handle_navigator_input(event: InputEvent) -> bool:
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_LEFT and not event.pressed and _navigator_drag_mode != 0:
+			_navigator_drag_mode = 0
+			_set_navigator_hovered(_is_point_over_navigator(event.position))
+			return true
+		var over_navigator := _is_point_over_navigator(event.position)
+		_set_navigator_hovered(over_navigator)
+		if not over_navigator:
+			return false
+		# Treat the navigator as a UI surface so paint, selection, and canvas-pan
+		# gestures cannot begin underneath it.
+		if event.button_index != MOUSE_BUTTON_LEFT or not event.pressed:
+			return true
+		var window_rect := _get_navigator_window_rect()
+		var header_rect := Rect2(window_rect.position, Vector2(window_rect.size.x, NAVIGATOR_HEADER_HEIGHT))
+		if header_rect.has_point(event.position):
+			_navigator_drag_mode = 1
+			_navigator_drag_offset = event.position - window_rect.position
+		else:
+			_navigator_drag_mode = 2
+			_pan_from_navigator(event.position, _get_navigator_preview_rect(window_rect))
+		return true
+	if event is InputEventMouseMotion:
+		if _navigator_drag_mode != 0:
+			_set_navigator_hovered(true)
+			if _navigator_drag_mode == 1:
+				_navigator_position = event.position - _navigator_drag_offset
+				_get_navigator_window_rect()
+				queue_redraw()
+			else:
+				_pan_from_navigator(event.position, _get_navigator_preview_rect(_get_navigator_window_rect()))
+			return true
+		var over_navigator := _is_point_over_navigator(event.position)
+		_set_navigator_hovered(over_navigator)
+		if over_navigator:
+			return true
+	return false
+
+
+func _is_point_over_navigator(local_position: Vector2) -> bool:
+	return is_navigator_visible() and _get_navigator_window_rect().has_point(local_position)
+
+
+func _set_navigator_hovered(hovered: bool) -> void:
+	if _navigator_hovered == hovered:
+		if hovered:
+			_set_canvas_mouse_hidden(false)
+			mouse_default_cursor_shape = Control.CURSOR_ARROW
+		return
+	_navigator_hovered = hovered
+	if hovered:
+		_has_preview = false
+		hover_uv_changed.emit(Vector2.ZERO, false)
+		_set_canvas_mouse_hidden(false)
+		mouse_default_cursor_shape = Control.CURSOR_ARROW
+	else:
+		mouse_default_cursor_shape = _get_base_cursor_shape()
+		_update_canvas_mouse_visibility()
+	queue_redraw()
+
+
+func _pan_from_navigator(local_position: Vector2, preview_rect: Rect2) -> void:
+	if not preview_rect.has_area():
+		return
+	var normalized := ((local_position - preview_rect.position) / preview_rect.size).clamp(Vector2.ZERO, Vector2.ONE)
+	var image_point := normalized * Vector2(_image.get_size())
+	var viewport_size := _get_drawable_viewport_size()
+	var unpanned_rect := _get_image_rect_for_viewport(viewport_size, zoom_multiplier, Vector2.ZERO)
+	var display_scale := unpanned_rect.size.x / float(_image.get_width()) if _image.get_width() > 0 else 0.0
+	if display_scale <= 0.0:
+		return
+	_pan_offset = viewport_size * 0.5 - unpanned_rect.position - image_point * display_scale
+	_clamp_pan_offset()
+	queue_redraw()
+
+
 func _handle_text_pointer_press(local_position: Vector2) -> bool:
+	if not editing_enabled:
+		return false
 	if not _has_text_draft:
 		if not _image_rect.has_point(local_position):
 			return false
@@ -2846,10 +3792,11 @@ func _text_box_border_has_point(local_position: Vector2, local_box: Rect2) -> bo
 
 
 func _emit_hover_uv(local_position: Vector2) -> void:
-	if _image_rect.has_point(local_position):
+	var document_local_rect := _image_pixels_to_local_rect(_document_rect)
+	if document_local_rect.has_point(local_position):
 		var normalized := Vector2(
-			clampf((local_position.x - _image_rect.position.x) / _image_rect.size.x, 0.0, 1.0),
-			clampf((local_position.y - _image_rect.position.y) / _image_rect.size.y, 0.0, 1.0)
+			clampf((local_position.x - document_local_rect.position.x) / document_local_rect.size.x, 0.0, 1.0),
+			clampf((local_position.y - document_local_rect.position.y) / document_local_rect.size.y, 0.0, 1.0)
 		)
 		hover_uv_changed.emit(normalized, true)
 	else:
@@ -2860,8 +3807,17 @@ func _emit_hover_at_mouse() -> void:
 	_emit_hover_uv(get_local_mouse_position())
 
 
-func _begin_stroke(local_position: Vector2) -> void:
+func _begin_live_stroke_state() -> void:
 	_is_drawing = true
+	_stroke_has_changes = false
+	_live_composite_dirty_tiles.clear()
+	_live_composite_refresh_pending = false
+
+
+func _begin_stroke(local_position: Vector2) -> void:
+	if not editing_enabled:
+		return
+	_begin_live_stroke_state()
 	_stroke_start_image = get_image_copy()
 	_begin_stroke_coverage()
 	_last_pixel = _local_to_snapped_brush_pixel(local_position)
@@ -2870,6 +3826,8 @@ func _begin_stroke(local_position: Vector2) -> void:
 
 
 func _continue_stroke(local_position: Vector2) -> void:
+	if not editing_enabled:
+		return
 	if not _image_rect.has_point(local_position):
 		_end_stroke()
 		return
@@ -2884,9 +3842,11 @@ func _end_stroke() -> void:
 		return
 	_is_drawing = false
 	if _stroke_start_image:
-		if not _images_equal(_stroke_start_image, _image):
+		if _stroke_has_changes:
+			_flush_live_composite_refresh()
 			stroke_committed.emit(_stroke_start_image)
 		_stroke_start_image = null
+	_stroke_has_changes = false
 	_stroke_coverage = PackedFloat32Array()
 	queue_redraw()
 
@@ -2897,31 +3857,37 @@ func _cancel_stroke() -> void:
 	_is_drawing = false
 	if _stroke_start_image:
 		_image = _stroke_start_image.duplicate()
-		_texture = ImageTexture.create_from_image(_image)
+		_refresh_display_texture()
 		_stroke_start_image = null
 		_stroke_coverage = PackedFloat32Array()
-		image_changed.emit(get_image_copy())
+		image_changed.emit(_image)
+	_stroke_has_changes = false
+	_live_composite_dirty_tiles.clear()
+	_live_composite_refresh_pending = false
 	queue_redraw()
 
 
 func _begin_shape_preview(local_position: Vector2) -> void:
+	if not editing_enabled:
+		return
 	_is_shape_previewing = true
+	_use_lightweight_shape_preview = true
 	_shape_start_pixel = _local_to_snapped_image_pixel(local_position)
 	_shape_pointer_pixel = _shape_start_pixel
 	_has_preview = false
 	_set_canvas_mouse_hidden(true)
-	_refresh_shape_preview_image()
 	queue_redraw()
 
 
 func _update_shape_preview(local_position: Vector2) -> void:
+	if not editing_enabled:
+		return
 	_shape_pointer_pixel = _local_to_snapped_image_pixel(local_position)
-	_refresh_shape_preview_image()
 	queue_redraw()
 
 
 func _commit_shape_preview(local_position: Vector2) -> void:
-	if not _is_shape_previewing:
+	if not editing_enabled or not _is_shape_previewing:
 		return
 
 	_shape_pointer_pixel = _local_to_snapped_image_pixel(local_position)
@@ -2929,11 +3895,15 @@ func _commit_shape_preview(local_position: Vector2) -> void:
 
 
 func _commit_current_shape() -> bool:
+	if not editing_enabled:
+		cancel_surface_shape_preview()
+		return false
 	_is_shape_previewing = false
+	_use_lightweight_shape_preview = false
 	_clear_shape_preview_image()
 	_set_canvas_mouse_hidden(false)
 	var previous_image: Image = get_image_copy()
-	_is_drawing = true
+	_begin_live_stroke_state()
 	_stroke_start_image = previous_image
 	_begin_stroke_coverage()
 	if not _raster_active_shape():
@@ -2942,25 +3912,32 @@ func _commit_current_shape() -> bool:
 		_stroke_coverage = PackedFloat32Array()
 		_surface_shape_previewing = false
 		_surface_shape_endpoint_valid = false
+		_surface_shape_scaled_preview_only = false
 		_surface_shape_settings.clear()
+		_clear_surface_shape_base_preview()
 		queue_redraw()
 		return false
 
+	var shape_changed := _stroke_has_changes
+	if shape_changed:
+		# Keep the live-stroke state active while refreshing so layered canvases
+		# composite only the dirty tiles instead of rebuilding the complete image.
+		_refresh_texture()
+		_flush_live_composite_refresh()
 	_is_drawing = false
 	_stroke_start_image = null
 	_stroke_coverage = PackedFloat32Array()
-	if not _images_equal(previous_image, _image):
-		_refresh_texture()
-		stroke_committed.emit(previous_image)
-		_surface_shape_previewing = false
-		_surface_shape_endpoint_valid = false
-		_surface_shape_settings.clear()
-		return true
-	else:
-		queue_redraw()
 	_surface_shape_previewing = false
 	_surface_shape_endpoint_valid = false
+	_surface_shape_scaled_preview_only = false
 	_surface_shape_settings.clear()
+	_clear_surface_shape_base_preview()
+	if shape_changed:
+		stroke_committed.emit(previous_image)
+		return true
+	_live_composite_dirty_tiles.clear()
+	_live_composite_refresh_pending = false
+	queue_redraw()
 	return false
 
 
@@ -2981,6 +3958,8 @@ func _raster_active_shape_with_current_settings() -> bool:
 	var endpoints := _get_active_shape_endpoints()
 	var from_pixel: Vector2i = endpoints[0]
 	var to_pixel: Vector2i = endpoints[1]
+	if _can_use_native_shape_raster() and not _is_shape_preview_rasterizing:
+		return _raster_active_shape_native(from_pixel, to_pixel)
 	_shape_outline_pixels.clear()
 	_begin_mirror_raster_scope()
 	if active_tool == ToolMode.LINE:
@@ -3016,6 +3995,158 @@ func _raster_active_shape_with_current_settings() -> bool:
 	return false
 
 
+func _can_use_native_shape_raster() -> bool:
+	var fill_color := _get_shape_fill_color()
+	return (
+		pixel_perfect
+		and brush_head == BrushHead.SQUARE
+		and brush_color.a >= 0.999999
+		and (shape_fill_mode == ShapeFillMode.NONE or fill_color.a >= 0.999999)
+		and not alpha_lock
+		and not _has_selection
+		and mirror_mode == MirrorMode.OFF
+	)
+
+
+func _raster_active_shape_native(from_pixel: Vector2i, to_pixel: Vector2i) -> bool:
+	if active_tool not in [ToolMode.LINE, ToolMode.RECTANGLE, ToolMode.ELLIPSE]:
+		return false
+	var image_bounds := Rect2i(Vector2i.ZERO, _image.get_size())
+	var affected_rect := _get_pixel_rect(from_pixel, to_pixel).grow(maxi(1, ceili(float(brush_size) * 0.5) + 1)).intersection(image_bounds)
+	if not affected_rect.has_area():
+		return true
+	var before: Image = _image.get_region(affected_rect)
+	_native_draw_shape_on_image(
+		_image,
+		active_tool,
+		from_pixel,
+		to_pixel,
+		brush_size,
+		brush_color,
+		shape_fill_mode,
+		_get_shape_fill_color()
+	)
+	var after: Image = _image.get_region(affected_rect)
+	if before.get_data() != after.get_data():
+		_stroke_has_changes = true
+	return true
+
+
+func _native_draw_shape_on_image(
+	target: Image,
+	tool: int,
+	from_pixel: Vector2i,
+	to_pixel: Vector2i,
+	outline_size: int,
+	outline_color: Color,
+	fill_mode_value: int,
+	fill_color: Color
+) -> void:
+	if not target or target.is_empty():
+		return
+	var shape_rect := _get_pixel_rect(from_pixel, to_pixel)
+	if fill_mode_value != ShapeFillMode.NONE:
+		if tool == ToolMode.RECTANGLE:
+			_native_blend_solid_rect(target, shape_rect, fill_color)
+		elif tool == ToolMode.ELLIPSE:
+			_native_blend_filled_ellipse(target, shape_rect, fill_color)
+	match tool:
+		ToolMode.LINE:
+			_native_stamp_square_line(target, from_pixel, to_pixel, outline_size, outline_color)
+		ToolMode.RECTANGLE:
+			var left := shape_rect.position.x
+			var top := shape_rect.position.y
+			var right := shape_rect.end.x - 1
+			var bottom := shape_rect.end.y - 1
+			_native_stamp_square_line(target, Vector2i(left, top), Vector2i(right, top), outline_size, outline_color)
+			_native_stamp_square_line(target, Vector2i(right, top), Vector2i(right, bottom), outline_size, outline_color)
+			_native_stamp_square_line(target, Vector2i(right, bottom), Vector2i(left, bottom), outline_size, outline_color)
+			_native_stamp_square_line(target, Vector2i(left, bottom), Vector2i(left, top), outline_size, outline_color)
+		ToolMode.ELLIPSE:
+			if shape_rect.size.x <= 1 or shape_rect.size.y <= 1:
+				_native_stamp_square_line(target, from_pixel, to_pixel, outline_size, outline_color)
+				return
+			var center := Vector2(shape_rect.position) + (Vector2(shape_rect.size) - Vector2.ONE) * 0.5
+			var radius := (Vector2(shape_rect.size) - Vector2.ONE) * 0.5
+			var steps := max(16, int(ceil(TAU * maxf(radius.x, radius.y) * 1.5)))
+			for index in range(steps):
+				var angle := TAU * float(index) / float(steps)
+				var pixel := center + Vector2(cos(angle) * radius.x, sin(angle) * radius.y)
+				_native_stamp_square(target, Vector2i(roundi(pixel.x), roundi(pixel.y)), outline_size, outline_color)
+
+
+func _native_stamp_square_line(
+	target: Image,
+	from_pixel: Vector2i,
+	to_pixel: Vector2i,
+	stamp_size: int,
+	color: Color
+) -> void:
+	var distance := from_pixel.distance_to(to_pixel)
+	var steps := max(1, int(ceil(distance / max(1.0, float(stamp_size) * 0.16))))
+	for index in range(steps + 1):
+		var weight := float(index) / float(steps)
+		var pixel := Vector2(from_pixel).lerp(Vector2(to_pixel), weight)
+		_native_stamp_square(target, Vector2i(roundi(pixel.x), roundi(pixel.y)), stamp_size, color)
+
+
+func _native_stamp_square(target: Image, center: Vector2i, stamp_size: int, color: Color) -> void:
+	var resolved_size := maxi(1, stamp_size)
+	var offset := floori(float(resolved_size) * 0.5)
+	_native_blend_solid_rect(
+		target,
+		Rect2i(center - Vector2i.ONE * offset, Vector2i.ONE * resolved_size),
+		color
+	)
+
+
+func _native_blend_solid_rect(target: Image, requested_rect: Rect2i, color: Color) -> void:
+	var clipped := requested_rect.intersection(Rect2i(Vector2i.ZERO, target.get_size()))
+	if not clipped.has_area() or color.a <= 0.0:
+		return
+	if target == _image:
+		_mark_live_composite_rect_dirty(clipped)
+	if color.a >= 0.999999:
+		target.fill_rect(clipped, _round_color_for_rgba8_storage(color))
+		return
+	var source := Image.create_empty(clipped.size.x, clipped.size.y, false, Image.FORMAT_RGBA8)
+	source.fill(color)
+	target.blend_rect(source, Rect2i(Vector2i.ZERO, clipped.size), clipped.position)
+
+
+func _native_blend_filled_ellipse(target: Image, requested_rect: Rect2i, color: Color) -> void:
+	var clipped := requested_rect.intersection(Rect2i(Vector2i.ZERO, target.get_size()))
+	if not clipped.has_area() or color.a <= 0.0:
+		return
+	if target == _image:
+		_mark_live_composite_rect_dirty(clipped)
+	var center := Vector2(requested_rect.position) + (Vector2(requested_rect.size) - Vector2.ONE) * 0.5
+	var radius := Vector2(requested_rect.size) * 0.5
+	if radius.x <= 0.0 or radius.y <= 0.0:
+		return
+	var overlay: Image
+	if color.a < 0.999999:
+		overlay = Image.create_empty(clipped.size.x, clipped.size.y, false, Image.FORMAT_RGBA8)
+		overlay.fill(Color.TRANSPARENT)
+	for y in range(clipped.position.y, clipped.end.y):
+		var normalized_y := (float(y) - center.y) / radius.y
+		var horizontal_weight := 1.0 - normalized_y * normalized_y
+		if horizontal_weight < 0.0:
+			continue
+		var horizontal_radius := radius.x * sqrt(horizontal_weight)
+		var span_left := maxi(clipped.position.x, ceili(center.x - horizontal_radius))
+		var span_right := mini(clipped.end.x - 1, floori(center.x + horizontal_radius))
+		if span_right < span_left:
+			continue
+		var span := Rect2i(Vector2i(span_left, y), Vector2i(span_right - span_left + 1, 1))
+		if overlay:
+			overlay.fill_rect(Rect2i(span.position - clipped.position, span.size), color)
+		else:
+			target.fill_rect(span, _round_color_for_rgba8_storage(color))
+	if overlay:
+		target.blend_rect(overlay, Rect2i(Vector2i.ZERO, overlay.get_size()), clipped.position)
+
+
 func _get_shape_fill_color() -> Color:
 	return background_color if shape_fill_mode == ShapeFillMode.BACKGROUND else brush_color
 
@@ -3023,11 +4154,18 @@ func _get_shape_fill_color() -> Color:
 func _refresh_shape_preview_image() -> void:
 	if not _is_shape_previewing or _is_shape_preview_rasterizing or _suspend_shape_preview_refresh:
 		return
+	if _use_lightweight_shape_preview or _surface_shape_scaled_preview_only:
+		_clear_shape_preview_image()
+		queue_redraw()
+		return
 
 	_clear_shape_preview_image()
 	var previous_is_drawing := _is_drawing
 	var previous_stroke_start_image := _stroke_start_image
 	var previous_stroke_coverage := _stroke_coverage
+	var previous_stroke_has_changes := _stroke_has_changes
+	var previous_dirty_tiles := _live_composite_dirty_tiles.duplicate()
+	var previous_refresh_pending := _live_composite_refresh_pending
 	_is_shape_preview_rasterizing = true
 	_shape_preview_original_pixels.clear()
 	_is_drawing = true
@@ -3037,6 +4175,9 @@ func _refresh_shape_preview_image() -> void:
 	_is_drawing = previous_is_drawing
 	_stroke_start_image = previous_stroke_start_image
 	_stroke_coverage = previous_stroke_coverage
+	_stroke_has_changes = previous_stroke_has_changes
+	_live_composite_dirty_tiles = previous_dirty_tiles
+	_live_composite_refresh_pending = previous_refresh_pending
 	_is_shape_preview_rasterizing = false
 
 	if valid_shape and not _shape_preview_original_pixels.is_empty():
@@ -3054,7 +4195,21 @@ func _refresh_shape_preview_image() -> void:
 			right = maxi(right, x)
 			bottom = maxi(bottom, y)
 		_shape_preview_rect = Rect2i(Vector2i(left, top), Vector2i(right - left + 1, bottom - top + 1))
-		_shape_preview_image = _image.get_region(_shape_preview_rect)
+		var preview_composite: Variant
+		if _display_region_compositor.is_valid():
+			preview_composite = _display_region_compositor.call(_shape_preview_rect, _image)
+		if (
+			preview_composite is Image
+			and not preview_composite.is_empty()
+			and preview_composite.get_size() == _shape_preview_rect.size
+		):
+			_shape_preview_image = preview_composite
+		elif _display_compositor.is_valid():
+			# Compatibility fallback for compositor clients that have not supplied
+			# the optional region callback.
+			_shape_preview_image = _make_display_image(_image).get_region(_shape_preview_rect)
+		else:
+			_shape_preview_image = _image.get_region(_shape_preview_rect)
 
 	for key in _shape_preview_original_pixels:
 		var index := int(key)
@@ -3091,7 +4246,7 @@ func _draw_shape_preview_image() -> void:
 
 
 func _fill_at_position(local_position: Vector2) -> void:
-	if not _image_rect.has_point(local_position):
+	if not editing_enabled or not _image_rect.has_point(local_position):
 		return
 
 	var fill_pixel := _local_to_image_pixel(local_position)
@@ -3106,7 +4261,8 @@ func _pick_color_at_position(local_position: Vector2) -> void:
 		return
 
 	var sample_pixel := _local_to_image_pixel(local_position)
-	color_picked.emit(_image.get_pixel(sample_pixel.x, sample_pixel.y), sample_pixel)
+	var display_image := _make_display_image(_image)
+	color_picked.emit(display_image.get_pixel(sample_pixel.x, sample_pixel.y), sample_pixel)
 
 
 # Selection creation, transforms, floating selections, and clipboard image edits.
@@ -3182,6 +4338,8 @@ func _commit_lasso_selection(local_position: Vector2) -> void:
 
 
 func _begin_selection_transform(local_position: Vector2, mode: int, scale_handle := -1) -> void:
+	if not editing_enabled:
+		return
 	if not _has_selection:
 		return
 
@@ -3239,7 +4397,7 @@ func _update_selection_transform(local_position: Vector2) -> void:
 
 
 func _commit_selection_transform() -> void:
-	if not _is_transforming_selection:
+	if not editing_enabled or not _is_transforming_selection:
 		return
 
 	if _selection_preview_image and _selection_preview_rect.size.x > 0 and _selection_preview_rect.size.y > 0:
@@ -3283,7 +4441,7 @@ func _cancel_selection_transform() -> void:
 	else:
 		if _selection_transform_previous_image:
 			_image = _selection_transform_previous_image.duplicate()
-			_texture = ImageTexture.create_from_image(_image)
+			_refresh_display_texture()
 			_selection_rect = _selection_transform_start_rect
 			_has_selection = true
 			image_changed.emit(get_image_copy())
@@ -3952,6 +5110,11 @@ func _draw_shape_preview() -> void:
 	var endpoints := _get_active_shape_endpoints()
 	var from_pixel: Vector2i = endpoints[0]
 	var to_pixel: Vector2i = endpoints[1]
+	for mirrored_endpoints in _get_mirrored_shape_preview_endpoints(from_pixel, to_pixel):
+		_draw_single_shape_preview(mirrored_endpoints[0], mirrored_endpoints[1])
+
+
+func _draw_single_shape_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
 	if active_tool == ToolMode.LINE:
 		_draw_line_preview(from_pixel, to_pixel)
 	elif active_tool == ToolMode.RECTANGLE:
@@ -3962,7 +5125,62 @@ func _draw_shape_preview() -> void:
 		if shape_fill_mode != ShapeFillMode.NONE:
 			_draw_filled_ellipse_preview(from_pixel, to_pixel, _get_shape_fill_color())
 		_draw_ellipse_outline_preview(from_pixel, to_pixel)
-	_draw_shape_start_outline(_shape_start_pixel)
+
+
+func _get_mirrored_shape_preview_endpoints(from_pixel: Vector2i, to_pixel: Vector2i) -> Array[Array]:
+	var result: Array[Array] = []
+	_append_shape_preview_endpoints(result, from_pixel, to_pixel)
+	var mirror_x := mirror_mode == MirrorMode.VERTICAL or mirror_mode == MirrorMode.BOTH
+	var mirror_y := mirror_mode == MirrorMode.HORIZONTAL or mirror_mode == MirrorMode.BOTH
+	if mirror_x:
+		_append_shape_preview_endpoints(
+			result,
+			_mirror_shape_preview_pixel(from_pixel, true, false),
+			_mirror_shape_preview_pixel(to_pixel, true, false)
+		)
+	if mirror_y:
+		_append_shape_preview_endpoints(
+			result,
+			_mirror_shape_preview_pixel(from_pixel, false, true),
+			_mirror_shape_preview_pixel(to_pixel, false, true)
+		)
+	if mirror_x and mirror_y:
+		_append_shape_preview_endpoints(
+			result,
+			_mirror_shape_preview_pixel(from_pixel, true, true),
+			_mirror_shape_preview_pixel(to_pixel, true, true)
+		)
+	return result
+
+
+func _append_shape_preview_endpoints(result: Array[Array], from_pixel: Vector2i, to_pixel: Vector2i) -> void:
+	for existing in result:
+		if _shape_preview_endpoints_match(existing[0], existing[1], from_pixel, to_pixel):
+			return
+	result.push_back([from_pixel, to_pixel])
+
+
+func _shape_preview_endpoints_match(
+	left_from: Vector2i,
+	left_to: Vector2i,
+	right_from: Vector2i,
+	right_to: Vector2i
+) -> bool:
+	if active_tool == ToolMode.RECTANGLE or active_tool == ToolMode.ELLIPSE:
+		return _get_pixel_rect(left_from, left_to) == _get_pixel_rect(right_from, right_to)
+	return (
+		(left_from == right_from and left_to == right_to)
+		or (left_from == right_to and left_to == right_from)
+	)
+
+
+func _mirror_shape_preview_pixel(pixel: Vector2i, mirror_x: bool, mirror_y: bool) -> Vector2i:
+	var result := pixel
+	if mirror_x:
+		result.x = _document_rect.position.x * 2 + _document_rect.size.x - 1 - result.x
+	if mirror_y:
+		result.y = _document_rect.position.y * 2 + _document_rect.size.y - 1 - result.y
+	return result
 
 
 func _draw_line_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
@@ -3972,13 +5190,11 @@ func _draw_line_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
 
 	var distance: float = from_pixel.distance_to(to_pixel)
 	var steps: int = max(1, int(ceil(distance / max(1.0, float(brush_size) * 0.16))))
-	var preview_color: Color = brush_color
-	preview_color.a *= 0.45
 	for index in range(steps + 1):
 		var weight: float = float(index) / float(steps)
 		var pixel: Vector2 = Vector2(from_pixel).lerp(Vector2(to_pixel), weight)
 		var stamp_pixel: Vector2i = Vector2i(roundi(pixel.x), roundi(pixel.y))
-		_draw_brush_preview_stamp(stamp_pixel, preview_color, false)
+		_draw_brush_preview_stamp(stamp_pixel, brush_color, false)
 
 
 func _draw_brush_preview_stamp(stamp_pixel: Vector2i, preview_color: Color, draw_border: bool) -> void:
@@ -4013,12 +5229,6 @@ func _draw_brush_preview_stamp(stamp_pixel: Vector2i, preview_color: Color, draw
 			draw_rect(local_rect, Color.WHITE, false, 1.5)
 
 
-func _draw_shape_start_outline(pixel: Vector2i) -> void:
-	var preview_color: Color = brush_color
-	preview_color.a *= 0.4
-	_draw_brush_preview_stamp(pixel, preview_color, true)
-
-
 func _draw_rectangle_outline_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
 	var rect: Rect2i = _get_pixel_rect(from_pixel, to_pixel)
 	var left: int = rect.position.x
@@ -4033,9 +5243,7 @@ func _draw_rectangle_outline_preview(from_pixel: Vector2i, to_pixel: Vector2i) -
 
 func _draw_filled_rectangle_preview(from_pixel: Vector2i, to_pixel: Vector2i, fill_color: Color) -> void:
 	var rect: Rect2i = _get_pixel_rect(from_pixel, to_pixel)
-	var preview_color := fill_color
-	preview_color.a *= 0.45
-	draw_rect(_image_pixels_to_local_rect(rect), preview_color, true)
+	draw_rect(_image_pixels_to_local_rect(rect), fill_color, true)
 
 
 func _draw_ellipse_outline_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
@@ -4047,13 +5255,11 @@ func _draw_ellipse_outline_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> 
 	var center := Vector2(rect.position) + (Vector2(rect.size) - Vector2.ONE) * 0.5
 	var radius := (Vector2(rect.size) - Vector2.ONE) * 0.5
 	var steps: int = max(16, int(ceil(TAU * maxf(radius.x, radius.y) * 1.5)))
-	var preview_color: Color = brush_color
-	preview_color.a *= 0.45
 	for index in range(steps):
 		var angle := TAU * float(index) / float(steps)
 		var pixel := center + Vector2(cos(angle) * radius.x, sin(angle) * radius.y)
 		var stamp_pixel := Vector2i(roundi(pixel.x), roundi(pixel.y))
-		_draw_brush_preview_stamp(stamp_pixel, preview_color, false)
+		_draw_brush_preview_stamp(stamp_pixel, brush_color, false)
 
 
 func _draw_filled_ellipse_preview(from_pixel: Vector2i, to_pixel: Vector2i, fill_color: Color) -> void:
@@ -4061,14 +5267,12 @@ func _draw_filled_ellipse_preview(from_pixel: Vector2i, to_pixel: Vector2i, fill
 	var local_rect := _image_pixels_to_local_rect(rect)
 	var center := local_rect.position + local_rect.size * 0.5
 	var radius := local_rect.size * 0.5
-	var preview_color := fill_color
-	preview_color.a *= 0.45
 	var points := PackedVector2Array()
 	var steps: int = max(24, int(ceil(TAU * maxf(radius.x, radius.y) / 8.0)))
 	for index in range(steps):
 		var angle := TAU * float(index) / float(steps)
 		points.push_back(center + Vector2(cos(angle) * radius.x, sin(angle) * radius.y))
-	draw_colored_polygon(points, preview_color)
+	draw_colored_polygon(points, fill_color)
 
 
 func _draw_selection() -> void:
@@ -4077,12 +5281,13 @@ func _draw_selection() -> void:
 	elif _is_lasso_selecting:
 		_draw_lasso_path(_lasso_points, true)
 	elif _has_selection:
+		var clip_to_canvas := not _has_floating_selection
 		if _selection_mask:
 			_draw_lasso_mask_selection(_selection_rect, _selection_mask)
 			if _is_selection_tool():
-				_draw_selection_bounds_controls(_selection_rect, false, true)
+				_draw_selection_bounds_controls(_selection_rect, false, true, clip_to_canvas)
 		else:
-			_draw_selection_rect(_selection_rect, false, true)
+			_draw_selection_rect(_selection_rect, false, true, clip_to_canvas)
 
 
 func _draw_crop_preview() -> void:
@@ -4092,7 +5297,7 @@ func _draw_crop_preview() -> void:
 	if clipped_rect.size.x <= 0 or clipped_rect.size.y <= 0:
 		return
 	var local_rect := _image_pixels_to_local_rect(clipped_rect)
-	var work_rect := _image_pixels_to_local_rect(Rect2i(Vector2i.ZERO, get_canvas_size()))
+	var work_rect := _image_pixels_to_local_rect(_document_rect)
 	var shade := Color(0.0, 0.0, 0.0, 0.48)
 	if local_rect.position.y > work_rect.position.y:
 		draw_rect(Rect2(work_rect.position, Vector2(work_rect.size.x, local_rect.position.y - work_rect.position.y)), shade, true)
@@ -4108,24 +5313,25 @@ func _draw_crop_preview() -> void:
 func _draw_floating_selection() -> void:
 	if not _has_floating_selection or _is_transforming_selection or not _floating_texture:
 		return
-	_draw_texture_in_pixel_rect(_floating_texture, _floating_rect, _floating_angle)
+	_draw_texture_in_pixel_rect(_floating_texture, _floating_rect, _floating_angle, false)
 
 
 func _draw_selection_transform_preview() -> void:
 	if not _is_transforming_selection or not _selection_preview_texture:
 		return
 
-	_draw_texture_in_pixel_rect(_selection_preview_texture, _selection_preview_rect, _selection_preview_angle)
+	var clip_to_canvas := not _selection_transform_started_floating
+	_draw_texture_in_pixel_rect(_selection_preview_texture, _selection_preview_rect, _selection_preview_angle, clip_to_canvas)
 	if _selection_mask:
 		_draw_lasso_mask_selection(_selection_preview_rect, _selection_mask)
-		_draw_selection_bounds_controls(_selection_preview_rect, true, true)
+		_draw_selection_bounds_controls(_selection_preview_rect, true, true, clip_to_canvas)
 	else:
-		_draw_selection_rect(_selection_preview_rect, true, true)
+		_draw_selection_rect(_selection_preview_rect, true, true, clip_to_canvas)
 
 
-func _draw_texture_in_pixel_rect(texture: Texture2D, pixel_rect: Rect2i, angle: float) -> void:
+func _draw_texture_in_pixel_rect(texture: Texture2D, pixel_rect: Rect2i, angle: float, clip_to_canvas := true) -> void:
 	var local_rect := _image_pixels_to_local_rect(pixel_rect)
-	if is_zero_approx(angle):
+	if is_zero_approx(angle) and clip_to_canvas:
 		var clipped_pixel_rect := _clip_pixel_rect(pixel_rect)
 		if clipped_pixel_rect.size.x <= 0 or clipped_pixel_rect.size.y <= 0:
 			return
@@ -4144,11 +5350,11 @@ func _draw_texture_in_pixel_rect(texture: Texture2D, pixel_rect: Rect2i, angle: 
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
-func _draw_selection_rect(pixel_rect: Rect2i, preview: bool, controls := false) -> void:
-	var clipped_pixel_rect := _clip_pixel_rect(pixel_rect)
-	if clipped_pixel_rect.size.x <= 0 or clipped_pixel_rect.size.y <= 0:
+func _draw_selection_rect(pixel_rect: Rect2i, preview: bool, controls := false, clip_to_canvas := true) -> void:
+	var display_pixel_rect := _clip_pixel_rect(pixel_rect) if clip_to_canvas else pixel_rect
+	if display_pixel_rect.size.x <= 0 or display_pixel_rect.size.y <= 0:
 		return
-	var local_rect := _image_pixels_to_local_rect(clipped_pixel_rect)
+	var local_rect := _image_pixels_to_local_rect(display_pixel_rect)
 	var fill_color := Color(0.2, 0.55, 1.0, 0.16 if preview else 0.07)
 	var border_color := Color(0.95, 0.98, 1.0, 0.95)
 	draw_rect(local_rect, fill_color, true)
@@ -4157,11 +5363,11 @@ func _draw_selection_rect(pixel_rect: Rect2i, preview: bool, controls := false) 
 		_draw_selection_controls(local_rect)
 
 
-func _draw_selection_bounds_controls(pixel_rect: Rect2i, preview: bool, controls := false) -> void:
-	var clipped_pixel_rect := _clip_pixel_rect(pixel_rect)
-	if clipped_pixel_rect.size.x <= 0 or clipped_pixel_rect.size.y <= 0:
+func _draw_selection_bounds_controls(pixel_rect: Rect2i, preview: bool, controls := false, clip_to_canvas := true) -> void:
+	var display_pixel_rect := _clip_pixel_rect(pixel_rect) if clip_to_canvas else pixel_rect
+	if display_pixel_rect.size.x <= 0 or display_pixel_rect.size.y <= 0:
 		return
-	var local_rect := _image_pixels_to_local_rect(clipped_pixel_rect)
+	var local_rect := _image_pixels_to_local_rect(display_pixel_rect)
 	var border_color := Color(0.95, 0.98, 1.0, 0.95 if not preview else 0.8)
 	_draw_dashed_rect(local_rect, border_color, 2.0, 8.0)
 	if controls:
@@ -4529,9 +5735,12 @@ func _update_preview(local_position: Vector2) -> void:
 
 func _clear_preview() -> void:
 	_has_preview = false
+	_navigator_drag_mode = 0
+	_navigator_hovered = false
 	hover_uv_changed.emit(Vector2.ZERO, false)
 	if _is_shape_previewing and not _surface_shape_previewing:
 		_is_shape_previewing = false
+		_use_lightweight_shape_preview = false
 		_clear_shape_preview_image()
 	_update_canvas_mouse_visibility()
 	queue_redraw()
@@ -4542,13 +5751,16 @@ func _get_mirrored_pixels(pixel: Vector2i) -> Array[Vector2i]:
 	var mirror_horizontal := mirror_mode == MirrorMode.HORIZONTAL or mirror_mode == MirrorMode.BOTH
 	var mirror_vertical := mirror_mode == MirrorMode.VERTICAL or mirror_mode == MirrorMode.BOTH
 	if mirror_vertical:
-		_append_unique_pixel(pixels, Vector2i(_image.get_width() - 1 - pixel.x, pixel.y))
+		_append_unique_pixel(pixels, Vector2i(_document_rect.position.x * 2 + _document_rect.size.x - 1 - pixel.x, pixel.y))
 	if mirror_horizontal:
-		_append_unique_pixel(pixels, Vector2i(pixel.x, _image.get_height() - 1 - pixel.y))
+		_append_unique_pixel(pixels, Vector2i(pixel.x, _document_rect.position.y * 2 + _document_rect.size.y - 1 - pixel.y))
 	if mirror_horizontal and mirror_vertical:
 		_append_unique_pixel(
 			pixels,
-			Vector2i(_image.get_width() - 1 - pixel.x, _image.get_height() - 1 - pixel.y)
+			Vector2i(
+				_document_rect.position.x * 2 + _document_rect.size.x - 1 - pixel.x,
+				_document_rect.position.y * 2 + _document_rect.size.y - 1 - pixel.y
+			)
 		)
 	return pixels
 
@@ -4682,6 +5894,8 @@ func _paint_pixel(x: int, y: int, color: Color, coverage: float, erase := false)
 	if result.to_rgba32() == current.to_rgba32():
 		return false
 	_image.set_pixel(x, y, result)
+	_stroke_has_changes = true
+	_mark_live_composite_pixel_dirty(Vector2i(x, y))
 	return true
 
 
@@ -4823,9 +6037,9 @@ func _get_effective_shape_origin_pixel() -> Vector2i:
 
 func _get_canvas_center_pixel() -> Vector2i:
 	# Even dimensions choose the upper/left pixel of the central four/two pixels.
-	return Vector2i(
-		(_image.get_width() - 1) / 2,
-		(_image.get_height() - 1) / 2
+	return _document_rect.position + Vector2i(
+		(_document_rect.size.x - 1) / 2,
+		(_document_rect.size.y - 1) / 2
 	)
 
 
@@ -4874,7 +6088,36 @@ func _sign_int(value: int) -> int:
 
 
 func _clip_pixel_rect(pixel_rect: Rect2i) -> Rect2i:
-	return pixel_rect.intersection(Rect2i(Vector2i.ZERO, get_canvas_size()))
+	return pixel_rect.intersection(Rect2i(Vector2i.ZERO, _image.get_size()))
+
+
+func _expand_workspace_to_include(pixel_rect: Rect2i) -> void:
+	var current_bounds := Rect2i(Vector2i.ZERO, _image.get_size())
+	var expanded_bounds := current_bounds.merge(pixel_rect)
+	if expanded_bounds == current_bounds:
+		return
+	if expanded_bounds.size.x > MAX_WORKSPACE_SIZE or expanded_bounds.size.y > MAX_WORKSPACE_SIZE:
+		return
+	var expanded := Image.create_empty(expanded_bounds.size.x, expanded_bounds.size.y, false, Image.FORMAT_RGBA8)
+	expanded.fill(Color.TRANSPARENT)
+	var shift := -expanded_bounds.position
+	expanded.blit_rect(_image, current_bounds, shift)
+	if _has_eraser_restore_image():
+		var expanded_eraser := Image.create_empty(expanded_bounds.size.x, expanded_bounds.size.y, false, Image.FORMAT_RGBA8)
+		expanded_eraser.fill(Color.TRANSPARENT)
+		expanded_eraser.blit_rect(_eraser_restore_image, current_bounds, shift)
+		_eraser_restore_image = expanded_eraser
+	_image = expanded
+	_workspace_origin_before_expansion = _workspace_origin
+	_workspace_origin += expanded_bounds.position
+	_document_rect.position += shift
+	_floating_rect.position += shift
+	_selection_rect.position += shift
+	if _has_crop_preview:
+		_crop_preview_rect.position += shift
+	if _has_text_draft:
+		_text_box.position += shift
+	_clamp_pan_offset()
 
 
 func _copy_image_rect(pixel_rect: Rect2i) -> Image:
@@ -4946,19 +6189,18 @@ func _blit_image_alpha(source_image: Image, target_position: Vector2i) -> void:
 
 
 func _blit_image_alpha_to_image(target_image: Image, source_image: Image, target_position: Vector2i) -> void:
-	for y in range(source_image.get_height()):
-		var target_y := target_position.y + y
-		if target_y < 0 or target_y >= target_image.get_height():
-			continue
-		for x in range(source_image.get_width()):
-			var target_x := target_position.x + x
-			if target_x < 0 or target_x >= target_image.get_width():
-				continue
-			var source_color := source_image.get_pixel(x, y)
-			if source_color.a <= 0.0:
-				continue
-			var base_color := target_image.get_pixel(target_x, target_y)
-			target_image.set_pixel(target_x, target_y, _alpha_blend(source_color, base_color))
+	if not target_image or not source_image or target_image.is_empty() or source_image.is_empty():
+		return
+	var target_bounds := Rect2i(Vector2i.ZERO, target_image.get_size())
+	var placed_source_bounds := Rect2i(target_position, source_image.get_size())
+	var visible_bounds := placed_source_bounds.intersection(target_bounds)
+	if not visible_bounds.has_area():
+		return
+	var source_rect := Rect2i(visible_bounds.position - target_position, visible_bounds.size)
+	# Image.blend_rect performs the same source-over alpha blend in native code.
+	# Keeping clipping explicit preserves negative/out-of-bounds floating-layer
+	# placement without walking millions of pixels in GDScript.
+	target_image.blend_rect(source_image, source_rect, visible_bounds.position)
 
 
 func _alpha_blend(source: Color, base: Color) -> Color:
@@ -5161,7 +6403,8 @@ func _get_scale_handle_rects(local_rect: Rect2) -> Array[Rect2]:
 
 
 func _get_scale_handle_at_position(local_position: Vector2) -> int:
-	var local_rect := _image_pixels_to_local_rect(_clip_pixel_rect(_selection_rect))
+	var pixel_rect := _selection_rect if _has_floating_selection else _clip_pixel_rect(_selection_rect)
+	var local_rect := _image_pixels_to_local_rect(pixel_rect)
 	var handle_rects := _get_scale_handle_rects(local_rect)
 	for index in range(handle_rects.size()):
 		if handle_rects[index].has_point(local_position):
@@ -5174,7 +6417,8 @@ func _get_rotate_handle_center(local_rect: Rect2) -> Vector2:
 
 
 func _rotate_handle_has_point(local_position: Vector2) -> bool:
-	var local_rect := _image_pixels_to_local_rect(_clip_pixel_rect(_selection_rect))
+	var pixel_rect := _selection_rect if _has_floating_selection else _clip_pixel_rect(_selection_rect)
+	var local_rect := _image_pixels_to_local_rect(pixel_rect)
 	return local_position.distance_to(_get_rotate_handle_center(local_rect)) <= SELECTION_HANDLE_SIZE
 
 
@@ -5219,7 +6463,8 @@ func _get_cursor_shape_at_position(local_position: Vector2) -> int:
 		var scale_handle := _get_scale_handle_at_position(local_position)
 		if scale_handle != -1:
 			return _get_scale_cursor_shape(scale_handle)
-		if _image_pixels_to_local_rect(_clip_pixel_rect(_selection_rect)).has_point(local_position):
+		var selection_hit_rect := _selection_rect if _has_floating_selection else _clip_pixel_rect(_selection_rect)
+		if _image_pixels_to_local_rect(selection_hit_rect).has_point(local_position):
 			return Control.CURSOR_MOVE
 	return _get_base_cursor_shape()
 
@@ -5338,11 +6583,14 @@ func _clear_floating_selection(redraw := true) -> void:
 
 
 func _commit_floating_selection(keep_selection := true) -> void:
+	if not editing_enabled:
+		return
 	if not _has_floating_selection:
 		return
 	var previous_image := _image.duplicate()
 	var committed_mask := _floating_mask.duplicate() if _floating_mask else null
 	var history_recorded := _floating_history_recorded
+	_expand_workspace_to_include(_floating_rect)
 	_blit_image_alpha(_get_rotated_floating_image(), _floating_rect.position)
 	_selection_rect = _floating_rect
 	_has_selection = keep_selection
@@ -5353,6 +6601,7 @@ func _commit_floating_selection(keep_selection := true) -> void:
 		stroke_committed.emit(previous_image)
 	if keep_selection:
 		selection_committed.emit(_selection_rect)
+	floating_selection_committed.emit()
 
 
 func _get_rotated_floating_image() -> Image:
@@ -5454,21 +6703,21 @@ func _draw_pixel_grid(canvas_rect: Rect2) -> void:
 	var major_line_color := grid_color.lightened(0.35)
 	major_line_color.a = minf(1.0, grid_color.a * 1.2)
 	var width := 1.0
-	var columns := int(ceil(float(_image.get_width()) / float(image_step)))
-	var rows := int(ceil(float(_image.get_height()) / float(image_step)))
+	var columns := int(ceil(float(_document_rect.size.x) / float(image_step)))
+	var rows := int(ceil(float(_document_rect.size.y) / float(image_step)))
 	var visible_rect := canvas_rect.intersection(_get_work_rect())
 	if visible_rect.size.x <= 0.0 or visible_rect.size.y <= 0.0:
 		return
 
 	for x in range(columns + 1):
-		var pixel_x := mini(x * image_step, _image.get_width())
+		var pixel_x := mini(x * image_step, _document_rect.size.x)
 		var local_x := canvas_rect.position.x + float(pixel_x) * display_scale
 		if local_x < visible_rect.position.x or local_x > visible_rect.end.x:
 			continue
 		var color := major_line_color if pixel_x % 8 == 0 else line_color
 		draw_line(Vector2(local_x, visible_rect.position.y), Vector2(local_x, visible_rect.end.y), color, width)
 	for y in range(rows + 1):
-		var pixel_y := mini(y * image_step, _image.get_height())
+		var pixel_y := mini(y * image_step, _document_rect.size.y)
 		var local_y := canvas_rect.position.y + float(pixel_y) * display_scale
 		if local_y < visible_rect.position.y or local_y > visible_rect.end.y:
 			continue
@@ -5521,9 +6770,104 @@ func _clear_selection() -> void:
 
 
 func _refresh_texture() -> void:
-	_texture.update(_image)
-	image_changed.emit(get_image_copy())
+	if (
+		_is_drawing
+		and _display_region_compositor.is_valid()
+		and _display_image_cache
+		and _display_image_cache.get_size() == _image.get_size()
+	):
+		_live_composite_refresh_pending = not _live_composite_dirty_tiles.is_empty()
+	else:
+		_refresh_display_texture()
+	image_changed.emit(_image)
 	queue_redraw()
+
+
+func _mark_live_composite_pixel_dirty(pixel: Vector2i) -> void:
+	if not _is_drawing or not _display_region_compositor.is_valid():
+		return
+	var tile := Vector2i(
+		floori(float(pixel.x) / float(LIVE_COMPOSITE_TILE_SIZE)),
+		floori(float(pixel.y) / float(LIVE_COMPOSITE_TILE_SIZE))
+	)
+	_live_composite_dirty_tiles[tile] = true
+
+
+func _mark_live_composite_rect_dirty(rect: Rect2i) -> void:
+	if not _is_drawing or not _display_region_compositor.is_valid() or not rect.has_area():
+		return
+	var first_tile := Vector2i(
+		floori(float(rect.position.x) / float(LIVE_COMPOSITE_TILE_SIZE)),
+		floori(float(rect.position.y) / float(LIVE_COMPOSITE_TILE_SIZE))
+	)
+	var last_pixel := rect.end - Vector2i.ONE
+	var last_tile := Vector2i(
+		floori(float(last_pixel.x) / float(LIVE_COMPOSITE_TILE_SIZE)),
+		floori(float(last_pixel.y) / float(LIVE_COMPOSITE_TILE_SIZE))
+	)
+	for tile_y in range(first_tile.y, last_tile.y + 1):
+		for tile_x in range(first_tile.x, last_tile.x + 1):
+			_live_composite_dirty_tiles[Vector2i(tile_x, tile_y)] = true
+
+
+func _flush_live_composite_refresh() -> void:
+	if not _live_composite_refresh_pending or _live_composite_dirty_tiles.is_empty():
+		return
+	if not _display_image_cache or _display_image_cache.get_size() != _image.get_size():
+		_live_composite_dirty_tiles.clear()
+		_live_composite_refresh_pending = false
+		_refresh_display_texture()
+		return
+	for tile_value in _live_composite_dirty_tiles.keys():
+		var tile: Vector2i = tile_value
+		var region := Rect2i(
+			tile * LIVE_COMPOSITE_TILE_SIZE,
+			Vector2i(LIVE_COMPOSITE_TILE_SIZE, LIVE_COMPOSITE_TILE_SIZE)
+		).intersection(Rect2i(Vector2i.ZERO, _image.get_size()))
+		if not region.has_area():
+			continue
+		var composed: Variant = _display_region_compositor.call(region, _image)
+		if not composed is Image or composed.is_empty() or composed.get_size() != region.size:
+			continue
+		_display_image_cache.blit_rect(composed, Rect2i(Vector2i.ZERO, region.size), region.position)
+	_live_composite_dirty_tiles.clear()
+	_live_composite_refresh_pending = false
+	if _texture and _texture.get_width() == _display_image_cache.get_width() and _texture.get_height() == _display_image_cache.get_height():
+		_texture.update(_display_image_cache)
+	else:
+		_texture = ImageTexture.create_from_image(_display_image_cache)
+	queue_redraw()
+
+
+func _refresh_display_texture() -> void:
+	_live_composite_dirty_tiles.clear()
+	_live_composite_refresh_pending = false
+	var display_image := _make_display_image(_image)
+	_display_image_cache = display_image
+	if (
+		_texture
+		and _texture.get_width() == display_image.get_width()
+		and _texture.get_height() == display_image.get_height()
+	):
+		_texture.update(display_image)
+	else:
+		_texture = ImageTexture.create_from_image(display_image)
+
+
+func _make_display_image(editable_image: Image) -> Image:
+	if not _display_compositor.is_valid():
+		return editable_image
+	var composed: Variant = _display_compositor.call(editable_image)
+	if not composed is Image or composed.is_empty() or composed.get_size() != editable_image.get_size():
+		return editable_image
+	if not composed.has_mipmaps() and composed.get_format() == Image.FORMAT_RGBA8:
+		return composed
+	var display_image: Image = composed.duplicate()
+	if display_image.has_mipmaps():
+		display_image.clear_mipmaps()
+	if display_image.get_format() != Image.FORMAT_RGBA8:
+		display_image.convert(Image.FORMAT_RGBA8)
+	return display_image
 
 
 func _set_canvas_mouse_hidden(hidden: bool) -> void:
@@ -5547,30 +6891,23 @@ func _update_canvas_mouse_visibility() -> void:
 
 func _zoom_at_position(new_zoom: float, local_position: Vector2) -> void:
 	var old_rect := _get_image_rect()
+	var old_scale := old_rect.size.x / float(_image.get_width()) if _image.get_width() > 0 else 0.0
+	var workspace_anchor := (
+		(local_position - old_rect.position) / old_scale
+		if old_scale > 0.0
+		else Vector2(_document_rect.get_center())
+	)
 	var previous_zoom := zoom_multiplier
 	zoom_multiplier = new_zoom
 	if is_equal_approx(previous_zoom, zoom_multiplier):
 		return
-
-	var image_anchor := Vector2(0.5, 0.5)
-	if old_rect.size.x > 0.0 and old_rect.size.y > 0.0:
-		image_anchor = Vector2(
-			(local_position.x - old_rect.position.x) / old_rect.size.x,
-			(local_position.y - old_rect.position.y) / old_rect.size.y
-		)
-		image_anchor = image_anchor.clamp(Vector2.ZERO, Vector2.ONE)
-
-	var image_size := Vector2(_image.get_width(), _image.get_height())
 	var viewport_size := _get_drawable_viewport_size()
-	var available := viewport_size - Vector2(16, 16)
-	if image_size.x <= 0.0 or image_size.y <= 0.0 or available.x <= 0.0 or available.y <= 0.0:
+	if viewport_size.x <= 0.0 or viewport_size.y <= 0.0:
 		queue_redraw()
 		return
-
-	var fit_scale := minf(available.x / image_size.x, available.y / image_size.y)
-	var display_size := (image_size * fit_scale * zoom_multiplier).floor()
-	var centered_position := ((viewport_size - display_size) * 0.5).floor()
-	_pan_offset = local_position - centered_position - image_anchor * display_size
+	var unpanned_rect := _get_image_rect_for_viewport(viewport_size, zoom_multiplier, Vector2.ZERO)
+	var new_scale := unpanned_rect.size.x / float(_image.get_width()) if _image.get_width() > 0 else 0.0
+	_pan_offset = local_position - unpanned_rect.position - workspace_anchor * new_scale
 	_clamp_pan_offset()
 	queue_redraw()
 
@@ -5590,14 +6927,13 @@ func _clamp_zoom_after_viewport_resize(
 ) -> void:
 	var previous_zoom := zoom_multiplier
 	var target_zoom := previous_zoom
-	var image_anchor := Vector2(0.5, 0.5)
+	var workspace_anchor := Vector2(_document_rect.get_center())
 	if previous_viewport_size.x > 0.0 and previous_viewport_size.y > 0.0:
 		var old_rect := _get_image_rect_for_viewport(previous_viewport_size, previous_zoom)
 		if old_rect.size.x > 0.0 and old_rect.size.y > 0.0:
-			image_anchor = Vector2(
-				(previous_viewport_size.x * 0.5 - old_rect.position.x) / old_rect.size.x,
-				(previous_viewport_size.y * 0.5 - old_rect.position.y) / old_rect.size.y
-			).clamp(Vector2.ZERO, Vector2.ONE)
+			var old_scale := old_rect.size.x / float(_image.get_width()) if _image.get_width() > 0 else 0.0
+			if old_scale > 0.0:
+				workspace_anchor = (previous_viewport_size * 0.5 - old_rect.position) / old_scale
 		var previous_fit_scale := _get_fit_scale_for_viewport(previous_viewport_size)
 		var new_fit_scale := _get_fit_scale_for_viewport(viewport_size)
 		if previous_fit_scale > 0.0 and new_fit_scale > 0.0:
@@ -5607,7 +6943,8 @@ func _clamp_zoom_after_viewport_resize(
 	var zoom_changed := not is_equal_approx(previous_zoom, zoom_multiplier)
 	if zoom_changed:
 		var new_rect := _get_image_rect_for_viewport(viewport_size, zoom_multiplier, Vector2.ZERO)
-		_pan_offset = viewport_size * 0.5 - new_rect.position - image_anchor * new_rect.size
+		var new_scale := new_rect.size.x / float(_image.get_width()) if _image.get_width() > 0 else 0.0
+		_pan_offset = viewport_size * 0.5 - new_rect.position - workspace_anchor * new_scale
 	_clamp_pan_offset()
 	queue_redraw()
 	# The maximum changes even when the current zoom does not, so refresh
@@ -5622,21 +6959,33 @@ func _get_image_rect_for_viewport(
 	pan := _pan_offset
 ) -> Rect2:
 	var image_size := Vector2(_image.get_width(), _image.get_height())
+	var document_size := Vector2(_document_rect.size)
 	var available := viewport_size - Vector2(16, 16)
-	if image_size.x <= 0.0 or image_size.y <= 0.0 or available.x <= 0.0 or available.y <= 0.0:
+	if (
+		image_size.x <= 0.0
+		or image_size.y <= 0.0
+		or document_size.x <= 0.0
+		or document_size.y <= 0.0
+		or available.x <= 0.0
+		or available.y <= 0.0
+	):
 		return Rect2()
-	var scale := minf(available.x / image_size.x, available.y / image_size.y) * zoom
-	var display_size := (image_size * scale).floor()
-	var position := ((viewport_size - display_size) * 0.5 + pan).floor()
-	return Rect2(position, display_size)
+	# Fit and center the fixed document/export frame, not the selected layer's
+	# potentially larger workspace. This keeps the canvas stationary when layer
+	# selection changes while still drawing out-of-frame layer pixels around it.
+	var scale := minf(available.x / document_size.x, available.y / document_size.y) * zoom
+	var document_display_size := document_size * scale
+	var document_position := (viewport_size - document_display_size) * 0.5 + pan
+	var image_position := document_position - Vector2(_document_rect.position) * scale
+	return Rect2(image_position, image_size * scale)
 
 
 func _get_fit_scale_for_viewport(viewport_size: Vector2) -> float:
-	var image_size := Vector2(_image.get_width(), _image.get_height())
+	var document_size := Vector2(_document_rect.size)
 	var available := viewport_size - Vector2(16, 16)
-	if image_size.x <= 0.0 or image_size.y <= 0.0 or available.x <= 0.0 or available.y <= 0.0:
+	if document_size.x <= 0.0 or document_size.y <= 0.0 or available.x <= 0.0 or available.y <= 0.0:
 		return 0.0
-	return minf(available.x / image_size.x, available.y / image_size.y)
+	return minf(available.x / document_size.x, available.y / document_size.y)
 
 
 func _get_max_pixel_scale(viewport_size: Vector2) -> float:
@@ -5652,17 +7001,39 @@ func _get_drawable_viewport_size() -> Vector2:
 
 
 func _clamp_pan_offset() -> void:
-	var image_size := Vector2(_image.get_width(), _image.get_height())
-	var viewport_size := _get_drawable_viewport_size()
-	var available := viewport_size - Vector2(16, 16)
-	if image_size.x <= 0.0 or image_size.y <= 0.0 or available.x <= 0.0 or available.y <= 0.0:
+	var limits := _get_canvas_pan_limits()
+	if limits.is_empty():
 		_pan_offset = Vector2.ZERO
 		_update_text_editor_rect()
+		_update_canvas_scrollbars()
 		return
-
-	var fit_scale := minf(available.x / image_size.x, available.y / image_size.y)
-	var display_size := (image_size * fit_scale * zoom_multiplier).floor()
-	var overflow := ((display_size - viewport_size) * 0.5).max(Vector2.ZERO)
-	_pan_offset.x = clampf(_pan_offset.x, -overflow.x, overflow.x)
-	_pan_offset.y = clampf(_pan_offset.y, -overflow.y, overflow.y)
+	var minimum_pan: Vector2 = limits["minimum"]
+	var maximum_pan: Vector2 = limits["maximum"]
+	_pan_offset = _pan_offset.clamp(minimum_pan, maximum_pan)
 	_update_text_editor_rect()
+	_update_canvas_scrollbars()
+
+
+func _get_canvas_pan_limits() -> Dictionary:
+	var document_size := Vector2(_document_rect.size)
+	var viewport_size := _get_drawable_viewport_size()
+	var available := viewport_size - Vector2(16, 16)
+	if document_size.x <= 0.0 or document_size.y <= 0.0 or available.x <= 0.0 or available.y <= 0.0:
+		return {}
+	var fit_scale := minf(available.x / document_size.x, available.y / document_size.y)
+	var display_size := document_size * fit_scale * zoom_multiplier
+	var centered_position := (viewport_size - display_size) * 0.5
+	var margin := Vector2(8.0, 8.0)
+	var minimum_pan := Vector2.ZERO
+	var maximum_pan := Vector2.ZERO
+	for axis in range(2):
+		var near_bound: float = margin[axis] - centered_position[axis]
+		var far_bound: float = viewport_size[axis] - margin[axis] - display_size[axis] - centered_position[axis]
+		minimum_pan[axis] = minf(near_bound, far_bound)
+		maximum_pan[axis] = maxf(near_bound, far_bound)
+	return {
+		"minimum": minimum_pan,
+		"maximum": maximum_pan,
+		"available": available,
+		"display_size": display_size,
+	}

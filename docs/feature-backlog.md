@@ -238,7 +238,9 @@ These items remain useful but are not committed to the `0.2.0` scope.
 - [ ] Add an explicitly confirmed resize workflow for active 3D textures.
 - [x] Add installed-font discovery, custom font-directory selection, and
   selection-style text transforms.
-- [ ] Consider layer support while preserving a simple single-canvas workflow.
+- [x] Implement the 0.3.0 layer system described in
+  [`0.3.0-layer-architecture.md`](0.3.0-layer-architecture.md), preserving a
+  simple one-target 2D workflow while supporting grouped multi-target 3D work.
 - [ ] Add tablet pressure if the plugin grows beyond mouse-first input.
 
 ### 3D Painting

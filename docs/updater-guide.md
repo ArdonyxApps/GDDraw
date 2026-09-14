@@ -106,6 +106,8 @@ On startup:
 
 At least the immediately previous known-good backup is retained after successful activation.
 
+After startup validates a completed update, the documentation popup opens `addons/GDDraw/docs/whats-new.md` at the top. The dock records `whats_new_shown_version` in project-scoped editor metadata after showing the page. The same version is not announced again when the editor or dock reopens. Fresh installs, manual package replacements, failed updates, and rollbacks do not trigger the popup. **Help > What's New** always allows users to reopen the release history. Add each release's highlights above older versions in the Markdown file before packaging it.
+
 ## Storage Boundaries
 
 ```text

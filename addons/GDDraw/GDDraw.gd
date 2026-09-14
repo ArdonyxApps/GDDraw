@@ -2,7 +2,7 @@
 extends EditorPlugin
 
 const DOCK_SCENE_PATH := "res://addons/GDDraw/gddraw_dock.tscn"
-const PLUGIN_VERSION := "0.2.0"
+const PLUGIN_VERSION := "0.3.0"
 const DOCK_META_KEY := "gddraw_bottom_panel_dock"
 const ADDON_PATH_PREFIX := "res://addons/GDDraw/"
 const MINIMUM_BOTTOM_PANEL_HEIGHT := 360.0
@@ -41,6 +41,11 @@ func _make_dock_load_error(message: String) -> Control:
 	var label := _make_error_label(message)
 	container.add_child(label)
 	return container
+
+
+func request_resource_filesystem_scan() -> void:
+	if is_instance_valid(_dock) and _dock.has_method("_request_resource_filesystem_scan"):
+		_dock.call("_request_resource_filesystem_scan")
 
 
 func _make_dock() -> Control:

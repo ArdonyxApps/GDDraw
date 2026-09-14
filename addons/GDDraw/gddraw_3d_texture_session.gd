@@ -67,7 +67,7 @@ func begin_from_mesh(mesh: MeshInstance3D, editor_plugin: EditorPlugin, create_i
 	return begin_from_target(mesh, editor_plugin, create_if_missing, create_dir, texture_size, material_slot_index)
 
 
-func begin_from_target(node: Node, editor_plugin: EditorPlugin, create_if_missing := false, create_dir := StoragePaths.DEFAULT_IMAGE_DIR, texture_size := DEFAULT_TEXTURE_SIZE, material_slot_index := 0) -> Dictionary:
+func begin_from_target(node: Node, editor_plugin: EditorPlugin, create_if_missing := false, create_dir := StoragePaths.DEFAULT_IMAGE_DIR, texture_size := DEFAULT_TEXTURE_SIZE, material_slot_index := 0, image_cache: Dictionary = {}) -> Dictionary:
 	_ensure_uv_overlay()
 	clear()
 	target = _make_target()
@@ -114,12 +114,24 @@ func begin_from_target(node: Node, editor_plugin: EditorPlugin, create_if_missin
 			clear()
 			return create_result
 
-	var image := _load_active_texture_image()
+	# The coordinator owns this cache only for the duration of import/reattachment.
+	# Each binding retains its own geometry and material, but loads shared pixels
+	# once. Never keep a global cache that could outlive a texture's disk contents.
+	var image_key := get_shared_image_key()
+	var cached: Dictionary = image_cache.get(image_key, {})
+	var image: Image = cached.get(IMAGE)
+	if not image:
+		image = _load_active_texture_image()
 	if not image or image.is_empty():
 		clear()
 		return _result(STATUS_ERROR, "Could not load a readable albedo texture image.")
-	base_image = image.duplicate()
-	baseline_image = image.duplicate()
+	if cached.is_empty():
+		cached = {IMAGE: image, "base": image.duplicate(), "baseline": image.duplicate()}
+		if not image_key.is_empty():
+			image_cache[image_key] = cached
+	# These snapshots are read-only; saving replaces the baseline reference.
+	base_image = cached["base"]
+	baseline_image = cached["baseline"]
 	return {
 		STATUS: STATUS_OK,
 		MESSAGE: "Editing %s albedo texture." % source_node.name,
@@ -128,6 +140,14 @@ func begin_from_target(node: Node, editor_plugin: EditorPlugin, create_if_missin
 		UV_EDGES: uv_edges,
 		UV_VERTICES: uv_vertices,
 	}
+
+
+func get_shared_image_key() -> String:
+	var path := texture_path.strip_edges().replace("\\", "/").to_lower()
+	if not path.is_empty():
+		return "path:" + path
+	# Embedded/pathless textures share only when they are the same resource.
+	return "texture:%d" % texture.get_instance_id() if texture else ""
 
 
 func save_image(image: Image, editor_plugin: EditorPlugin) -> Dictionary:
@@ -562,8 +582,10 @@ func _write_image(image: Image, path: String) -> Dictionary:
 
 
 func _scan_filesystem(editor_plugin: EditorPlugin) -> void:
-	if editor_plugin:
-		editor_plugin.get_editor_interface().get_resource_filesystem().scan()
+	# Queue through the plugin so multi-object creation cannot start an import
+	# per binding or reenter the importer from a dialog/resource callback.
+	if is_instance_valid(editor_plugin) and editor_plugin.has_method("request_resource_filesystem_scan"):
+		editor_plugin.call("request_resource_filesystem_scan")
 
 
 func _ensure_resource_dir(path: String) -> int:

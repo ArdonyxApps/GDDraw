@@ -18,9 +18,23 @@ var target_descriptors: Dictionary = {}
 var target_members: Dictionary = {}
 var binding_targets: Dictionary = {}
 var _target_dirty_cache: Dictionary = {}
+var _import_job: Dictionary = {}
 
 
 func begin(
+	discovery: Dictionary,
+	editor_plugin: EditorPlugin,
+	create_missing := false,
+	create_dir := StoragePaths.DEFAULT_IMAGE_DIR,
+	texture_size := TextureSession.DEFAULT_TEXTURE_SIZE
+) -> Dictionary:
+	var result := start_import(discovery, editor_plugin, create_missing, create_dir, texture_size)
+	while str(result.get(STATUS, "")) == "working":
+		result = advance_import()
+	return result
+
+
+func start_import(
 	discovery: Dictionary,
 	editor_plugin: EditorPlugin,
 	create_missing := false,
@@ -34,36 +48,55 @@ func begin(
 	if descriptors.is_empty():
 		return _result(STATUS_ERROR, "The discovery result contains no paint targets.")
 
-	var prepared: Array[Dictionary] = []
-	var pending: Array[Dictionary] = []
-	for descriptor_value in descriptors:
+	_import_job = {
+		"descriptors": descriptors, "groups": discovery.get("groups", []),
+		"plugin": editor_plugin, "create_missing": create_missing,
+		"create_dir": create_dir, "texture_size": texture_size,
+		"prepared": [], "pending": [], "image_cache": {}, "index": 0,
+		"phase": "prepare", "prime_index": 0,
+	}
+	return _result("working", "Preparing 3D textures...")
+
+
+func advance_import() -> Dictionary:
+	if _import_job.is_empty():
+		return _result(STATUS_ERROR, "The 3D import was cancelled.")
+	var descriptors: Array = _import_job["descriptors"]
+	var prepared: Array = _import_job["prepared"]
+	var pending: Array = _import_job["pending"]
+	var index: int = _import_job["index"]
+	if _import_job["phase"] == "prepare" and index < descriptors.size():
+		var descriptor_value = descriptors[index]
 		if not descriptor_value is Dictionary:
 			clear()
 			return _result(STATUS_ERROR, "The discovery result contains an invalid target descriptor.")
 		var descriptor: Dictionary = descriptor_value
-		var source: Node = descriptor.get("source_node", null)
-		if not is_instance_valid(source):
+		if not is_instance_valid(descriptor.get("source_node", null)):
 			clear()
 			return _result(STATUS_ERROR, "%s is no longer available in the edited scene." % descriptor.get("label", "A discovered target"))
+		var source: Node = descriptor.get("source_node", null)
 		var candidate := TextureSession.new()
 		var result: Dictionary = candidate.begin_from_target(
 			source,
-			editor_plugin,
+			_import_job["plugin"],
 			false,
-			create_dir,
-			texture_size,
-			int(descriptor.get("material_slot", 0))
+			_import_job["create_dir"],
+			_import_job["texture_size"],
+			int(descriptor.get("material_slot", 0)),
+			_import_job["image_cache"]
 		)
 		var status := str(result.get(STATUS, STATUS_ERROR))
 		if status == STATUS_NEEDS_CREATE:
 			pending.push_back({"descriptor": descriptor, "session": candidate, "result": result})
-			continue
-		if status != STATUS_OK:
+		elif status != STATUS_OK:
 			clear()
 			return _result(STATUS_ERROR, str(result.get(MESSAGE, "Could not prepare a discovered paint target.")))
-		prepared.push_back({"descriptor": descriptor, "session": candidate, "result": result})
+		else:
+			prepared.push_back({"descriptor": descriptor, "session": candidate, "result": result})
+		_import_job["index"] = index + 1
+		return _result("working", "Preparing 3D objects: %d / %d" % [index + 1, descriptors.size()])
 
-	if not pending.is_empty() and not create_missing:
+	if not pending.is_empty() and not bool(_import_job["create_missing"]):
 		var response := _result(
 			STATUS_NEEDS_CREATE,
 			"%d discovered target(s) need a material or texture. Confirm once to create all listed targets." % pending.size()
@@ -72,26 +105,47 @@ func begin(
 		clear()
 		return response
 
-	for pending_entry in pending:
+	if not pending.is_empty():
+		var pending_entry: Dictionary = pending.pop_front()
 		var descriptor: Dictionary = pending_entry.get("descriptor", {})
+		if not is_instance_valid(descriptor.get("source_node", null)):
+			clear()
+			return _result(STATUS_ERROR, "A source object was removed during texture creation.")
 		var candidate = pending_entry.get("session")
 		var result: Dictionary = candidate.begin_from_target(
 			descriptor.get("source_node", null),
-			editor_plugin,
+			_import_job["plugin"],
 			true,
-			create_dir,
-			texture_size,
-			int(descriptor.get("material_slot", 0))
+			_import_job["create_dir"],
+			_import_job["texture_size"],
+			int(descriptor.get("material_slot", 0)),
+			_import_job["image_cache"]
 		)
 		if str(result.get(STATUS, STATUS_ERROR)) != STATUS_OK:
 			clear()
 			return _result(STATUS_ERROR, str(result.get(MESSAGE, "Could not create a missing 3D paint target.")))
 		prepared.push_back({"descriptor": descriptor, "session": candidate, "result": result})
+		return _result("working", "Creating missing 3D textures...")
 
-	if not _build_layer_session(discovery.get("groups", []), prepared):
-		_clear_prepared_sessions(prepared)
-		clear()
-		return _result(STATUS_ERROR, "Could not build a coherent layer session from the discovered targets.")
+	if _import_job["phase"] == "prepare":
+		var typed_prepared: Array[Dictionary] = []
+		typed_prepared.assign(prepared)
+		if not _build_layer_session(_import_job["groups"], typed_prepared, false):
+			clear()
+			return _result(STATUS_ERROR, "Could not build a coherent layer session from the discovered targets.")
+		_import_job["phase"] = "prime"
+		return _result("working", "Preparing texture previews...")
+	var prime_index: int = _import_job["prime_index"]
+	if prime_index < layer_session.paint_targets.size():
+		var target = layer_session.paint_targets[prime_index]
+		var fingerprint_parts := PackedStringArray()
+		layer_session._append_layer_fingerprint(fingerprint_parts, target.nodes)
+		target.mark_saved()
+		_cache_target_dirty(target, texture_sessions[target.target_id], target._saved_composite)
+		_import_job["prime_index"] = prime_index + 1
+		return _result("working", "Preparing textures: %d / %d" % [prime_index + 1, layer_session.paint_targets.size()])
+	layer_session.mark_layered_saved()
+	_import_job.clear()
 	return _result(
 		STATUS_OK,
 		"Opened %d 3D paint target(s) from %d scene binding(s)." % [texture_sessions.size(), prepared.size()]
@@ -107,6 +161,7 @@ func restore_session(saved_session, editor_plugin: EditorPlugin, scene_root: Nod
 	var restored_bindings: Dictionary = {}
 	var restored_prepared: Array[Dictionary] = []
 	var all_candidates := {}
+	var image_cache := {}
 	for paint_target in saved_session.paint_targets:
 		var binding: Dictionary = paint_target.binding
 		var target_id: String = paint_target.target_id
@@ -136,7 +191,8 @@ func restore_session(saved_session, editor_plugin: EditorPlugin, scene_root: Nod
 				false,
 				StoragePaths.DEFAULT_IMAGE_DIR,
 				paint_target.size,
-				int(saved_member.get("material_slot", 0))
+				int(saved_member.get("material_slot", 0)),
+				image_cache
 			)
 			if str(result.get(STATUS, STATUS_ERROR)) != STATUS_OK:
 				_clear_candidate_sessions(all_candidates)
@@ -192,6 +248,7 @@ func restore_session(saved_session, editor_plugin: EditorPlugin, scene_root: Nod
 
 
 func clear() -> void:
+	_import_job.clear()
 	var candidates := {}
 	for member_entries_value in target_members.values():
 		for member_entry_value in member_entries_value:
@@ -312,9 +369,9 @@ func get_binding_for_source_node(source_node: Node) -> Dictionary:
 				continue
 			var member: Dictionary = member_value
 			var descriptor: Dictionary = member.get("descriptor", {})
-			var member_source: Node = descriptor.get("source_node", null)
-			if not is_instance_valid(member_source):
+			if not is_instance_valid(descriptor.get("source_node", null)):
 				continue
+			var member_source: Node = descriptor.get("source_node", null)
 			var match := {
 				"target_id": target_id,
 				"binding_key": str(descriptor.get("key", "")),
@@ -348,7 +405,7 @@ func get_binding(binding_key: String) -> Dictionary:
 				"target_id": target_id,
 				"binding_key": binding_key,
 				"group_key": str(descriptor.get("group_key", descriptor.get("source_key", ""))),
-				"source_node": descriptor.get("source_node", null),
+				"source_node": descriptor.get("source_node", null) if is_instance_valid(descriptor.get("source_node", null)) else null,
 			}
 	return {}
 
@@ -385,14 +442,34 @@ func get_dirty_target_ids(active_target_image: Image = null) -> PackedStringArra
 				if active_target_image and str(target_id) == layer_session.active_target_id
 				else target.composite()
 			)
-			target_is_dirty = texture_session.is_dirty(composite_image)
-			_target_dirty_cache[str(target_id)] = {
-				"key": cache_key,
-				"dirty": target_is_dirty,
-			}
+			target_is_dirty = _cache_target_dirty(target, texture_session, composite_image)
 		if target_is_dirty:
 			dirty.push_back(str(target_id))
 	return dirty
+
+
+func _cache_target_dirty(target, texture_session, composite_image: Image = null) -> bool:
+	var resolved_composite: Image = composite_image if composite_image else target.composite()
+	var dirty: bool = texture_session.is_dirty(resolved_composite)
+	_target_dirty_cache[str(target.target_id)] = {
+		"key": _make_target_dirty_cache_key(target, texture_session), "dirty": dirty,
+		# Reuse a composite already retained by a saved baseline or the canvas,
+		# without keeping another full-resolution image alive just for this cache.
+		"composite": weakref(resolved_composite),
+	}
+	return dirty
+
+
+func get_cached_target_composite(target_id: String) -> Image:
+	if not layer_session:
+		return null
+	var target = layer_session.get_target(target_id)
+	var texture_session = texture_sessions.get(target_id)
+	var cached: Dictionary = _target_dirty_cache.get(target_id, {})
+	if not target or not texture_session or str(cached.get("key", "")) != _make_target_dirty_cache_key(target, texture_session):
+		return null
+	var composite_ref: WeakRef = cached.get("composite")
+	return composite_ref.get_ref() as Image if composite_ref else null
 
 
 func _make_target_dirty_cache_key(target, texture_session) -> String:
@@ -420,7 +497,7 @@ func _append_target_dirty_cache_key(parts: PackedStringArray, node) -> void:
 	parts.push_back("group_end")
 
 
-func _build_layer_session(group_descriptors: Array, prepared: Array[Dictionary]) -> bool:
+func _build_layer_session(group_descriptors: Array, prepared: Array[Dictionary], mark_saved := true) -> bool:
 	var session := LayerSession.new()
 	session.clear()
 	session.session_kind = "3d"
@@ -485,7 +562,8 @@ func _build_layer_session(group_descriptors: Array, prepared: Array[Dictionary])
 			image,
 			str(primary_descriptor.get("label", "Albedo")),
 			str(primary_descriptor.get("channel", "albedo")),
-			binding
+			binding,
+			mark_saved
 		)
 		if not target:
 			return false
@@ -511,7 +589,7 @@ func _build_layer_session(group_descriptors: Array, prepared: Array[Dictionary])
 		target_members[target.target_id] = runtime_members
 
 	layer_session = session
-	if layer_session.has_method("mark_layered_saved"):
+	if mark_saved and layer_session.has_method("mark_layered_saved"):
 		layer_session.mark_layered_saved()
 	return layer_session.get_active_target() != null
 
@@ -525,9 +603,9 @@ func _get_texture_layer_name(texture_session, descriptor: Dictionary) -> String:
 
 func _get_shared_destination_key(texture_session, descriptor: Dictionary, fallback_index: int) -> String:
 	if texture_session:
-		var path := str(texture_session.texture_path).strip_edges().replace("\\", "/").to_lower()
-		if not path.is_empty():
-			return "path:" + path
+		var image_key: String = texture_session.get_shared_image_key()
+		if not image_key.is_empty():
+			return image_key
 	return "binding:%s:%d" % [str(descriptor.get("key", "")), fallback_index]
 
 
@@ -562,7 +640,7 @@ func _resolve_saved_source(scene_root: Node, relative_path: String, source_key: 
 	return tree.root.get_node_or_null(NodePath(source_key)) if tree else null
 
 
-func _pending_descriptors(pending: Array[Dictionary]) -> Array[Dictionary]:
+func _pending_descriptors(pending: Array) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	for entry in pending:
 		var descriptor: Dictionary = entry.get("descriptor", {})

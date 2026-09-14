@@ -31,6 +31,10 @@ func push_redo_state(state: Dictionary) -> void:
 	_redo_stack.push_back(_make_state_entry(state))
 
 
+func push_redo_state_owned(state: Dictionary) -> void:
+	_redo_stack.push_back(_make_owned_state_entry(state))
+
+
 func pop_undo() -> Variant:
 	return _undo_stack.pop_back()
 
@@ -51,6 +55,16 @@ func get_entry_state(entry: Variant) -> Dictionary:
 	if not is_state_entry(entry):
 		return {}
 	return _duplicate_variant(entry.get(ENTRY_STATE_KEY, {}))
+
+
+func take_entry_state(entry: Variant) -> Dictionary:
+	# Only consume entries already popped from history. restore_state() makes
+	# its own isolated images, so an intermediate deep copy is unnecessary.
+	if not is_state_entry(entry):
+		return {}
+	var state: Dictionary = entry[ENTRY_STATE_KEY]
+	entry.erase(ENTRY_STATE_KEY)
+	return state
 
 
 func clear_redo() -> void:

@@ -98,10 +98,11 @@ func create_target(
 	image: Image = null,
 	target_label := "Paint Target",
 	channel := "rgba",
-	target_binding: Dictionary = {}
+	target_binding: Dictionary = {},
+	mark_initial_saved := true
 ):
 	var target := PaintTarget.new()
-	if not target.initialize(target_size, image, target_label, channel):
+	if not target.initialize(target_size, image, target_label, channel, mark_initial_saved):
 		return null
 	target.binding = target_binding.duplicate(true)
 	return target if add_target(group_id, target) else null
@@ -276,13 +277,28 @@ func restore_state(state: Dictionary) -> bool:
 	for target_state in state.get("paint_targets", []):
 		if not target_state is Dictionary:
 			return false
+		var previous_target = get_target(str(target_state.get("target_id", "")))
+		if previous_target and _snapshot_values_equal(previous_target.capture_state(), target_state):
+			# Keep unchanged live targets, including their image identities. The
+			# history images remain separate copies; dirty/preview caches need not
+			# recomposite every other texture after an edit to a single target.
+			restored_targets.push_back(previous_target)
+			continue
 		var target := PaintTarget.new()
 		if not target.restore_state(target_state):
 			return false
 		restored_targets.push_back(target)
 	if restored_groups.is_empty() or restored_targets.is_empty():
 		return false
-	_image_fingerprint_cache.clear()
+	# History recreates Image objects even for unchanged layers. Preserve known
+	# fingerprints only after comparing the actual pixels; rehashing every 4K
+	# layer and eraser source makes a one-pixel undo scale with the whole model.
+	var restored_fingerprints := {}
+	for restored_target in restored_targets:
+		var previous_target = get_target(restored_target.target_id)
+		if previous_target:
+			_reuse_restored_image_fingerprints(restored_target.nodes, previous_target, restored_fingerprints)
+	_image_fingerprint_cache = restored_fingerprints
 	var restored_active_id := str(state.get("active_target_id", ""))
 	var active_exists := false
 	for target in restored_targets:
@@ -359,12 +375,69 @@ func _append_layer_fingerprint(parts: PackedStringArray, nodes: Array) -> void:
 func _image_fingerprint(image: Image) -> String:
 	if not image:
 		return "null"
-	var cache_key := "%d:%s:%s" % [image.get_instance_id(), image.get_size(), image.get_format()]
+	var cache_key := _image_fingerprint_key(image)
 	if _image_fingerprint_cache.has(cache_key):
 		return str(_image_fingerprint_cache[cache_key])
 	var fingerprint := "%s:%s:%s" % [image.get_size(), image.get_format(), _sha256_bytes(image.get_data())]
 	_image_fingerprint_cache[cache_key] = fingerprint
 	return fingerprint
+
+
+func _image_fingerprint_key(image: Image) -> String:
+	return "%d:%s:%s" % [image.get_instance_id(), image.get_size(), image.get_format()]
+
+
+func _snapshot_values_equal(left: Variant, right: Variant) -> bool:
+	if typeof(left) != typeof(right):
+		return false
+	if left is Image:
+		return right is Image and (
+			left == right or (
+				left.get_size() == right.get_size()
+				and left.get_format() == right.get_format()
+				and left.has_mipmaps() == right.has_mipmaps()
+				and left.get_data() == right.get_data()
+			)
+		)
+	if left is Dictionary:
+		if left.size() != right.size():
+			return false
+		for key in left:
+			if not right.has(key) or not _snapshot_values_equal(left[key], right[key]):
+				return false
+		return true
+	if left is Array:
+		if left.size() != right.size():
+			return false
+		for index in range(left.size()):
+			if not _snapshot_values_equal(left[index], right[index]):
+				return false
+		return true
+	return left == right
+
+
+func _reuse_restored_image_fingerprints(nodes: Array, previous_target, restored_cache: Dictionary) -> void:
+	for node in nodes:
+		if not node.is_paint_layer():
+			_reuse_restored_image_fingerprints(node.children, previous_target, restored_cache)
+			continue
+		var previous_node = previous_target.find_node(node.id)
+		if not previous_node or not previous_node.is_paint_layer():
+			continue
+		for property in ["image", "eraser_source"]:
+			var previous_image: Image = previous_node.get(property)
+			var restored_image: Image = node.get(property)
+			if not previous_image or not restored_image:
+				continue
+			var known: String = str(_image_fingerprint_cache.get(_image_fingerprint_key(previous_image), ""))
+			if known.is_empty():
+				continue
+			if previous_image == restored_image or (
+				previous_image.get_size() == restored_image.get_size()
+				and previous_image.get_format() == restored_image.get_format()
+				and previous_image.get_data() == restored_image.get_data()
+			):
+				restored_cache[_image_fingerprint_key(restored_image)] = known
 
 
 func _sha256_bytes(bytes: PackedByteArray) -> String:

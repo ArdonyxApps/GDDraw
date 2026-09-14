@@ -23,7 +23,8 @@ func initialize(
 	initial_size: Vector2i,
 	initial_image: Image = null,
 	initial_label := "Paint Target",
-	initial_channel := "rgba"
+	initial_channel := "rgba",
+	mark_initial_saved := true
 ) -> bool:
 	if initial_size.x <= 0 or initial_size.y <= 0:
 		return false
@@ -45,7 +46,7 @@ func initialize(
 	base_layer.eraser_source = source.duplicate()
 	nodes.push_back(base_layer)
 	selected_layer_id = base_layer.id
-	_saved_composite = composite()
+	_saved_composite = composite() if mark_initial_saved else null
 	return true
 
 
@@ -631,7 +632,11 @@ func render_node_thumbnail(node_id: String, preview_size: int) -> Image:
 	if not node:
 		return null
 	var output := _make_transparent_layer_image(Vector2i(preview_size, preview_size))
-	var content_bounds := _get_node_visible_pixel_bounds(node, true)
+	# A row preview describes the node's contents, not whether that node currently
+	# contributes to the canvas. Ignore only the requested node's visibility so a
+	# hidden layer/group stays identifiable while hidden descendants of a group
+	# remain excluded from its flattened preview.
+	var content_bounds := _get_node_visible_pixel_bounds(node, true, true)
 	if not content_bounds.has_area():
 		return output
 	var scale := minf(
@@ -659,7 +664,7 @@ func render_node_thumbnail(node_id: String, preview_size: int) -> Image:
 			output.set_pixel(
 				destination_origin.x + x,
 				destination_origin.y + y,
-				_sample_composite_color([node], Vector2i(source_x, source_y))
+				_sample_composite_color([node], Vector2i(source_x, source_y), true)
 			)
 	return output
 
@@ -1134,8 +1139,17 @@ func _get_visible_nodes_bounds(layer_nodes: Array, ancestors_visible: bool) -> R
 	return bounds if has_bounds else Rect2i()
 
 
-func _get_node_visible_pixel_bounds(node, ancestors_visible: bool) -> Rect2i:
-	if not node or not ancestors_visible or not node.visible or node.opacity <= 0.0:
+func _get_node_visible_pixel_bounds(
+	node,
+	ancestors_visible: bool,
+	ignore_node_visibility := false
+) -> Rect2i:
+	if (
+		not node
+		or not ancestors_visible
+		or (not ignore_node_visibility and not node.visible)
+		or node.opacity <= 0.0
+	):
 		return Rect2i()
 	if node.is_paint_layer():
 		if not node.image:
@@ -1153,15 +1167,19 @@ func _get_node_visible_pixel_bounds(node, ancestors_visible: bool) -> Rect2i:
 	return bounds if has_bounds else Rect2i()
 
 
-func _sample_composite_color(layer_nodes: Array, document_pixel: Vector2i) -> Color:
+func _sample_composite_color(
+	layer_nodes: Array,
+	document_pixel: Vector2i,
+	ignore_top_level_visibility := false
+) -> Color:
 	var destination := Color.TRANSPARENT
 	for index in range(layer_nodes.size() - 1, -1, -1):
 		var node = layer_nodes[index]
-		if not node.visible or node.opacity <= 0.0:
+		if (not ignore_top_level_visibility and not node.visible) or node.opacity <= 0.0:
 			continue
 		var source := Color.TRANSPARENT
 		if node.is_group():
-			source = _sample_composite_color(node.children, document_pixel)
+			source = _sample_composite_color(node.children, document_pixel, false)
 		else:
 			var local_pixel: Vector2i = document_pixel - node.origin
 			if (

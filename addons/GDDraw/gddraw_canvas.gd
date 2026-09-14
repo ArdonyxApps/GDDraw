@@ -53,6 +53,8 @@ const NAVIGATOR_MIN_PREVIEW_SIZE := Vector2(72.0, 48.0)
 const NAVIGATOR_HEADER_HEIGHT := 18.0
 const NAVIGATOR_PADDING := 4.0
 const NAVIGATOR_MARGIN := 12.0
+const NAVIGATOR_VIEWPORT_FILL_COLOR := Color(0.77, 0.77, 0.77, 0.20)
+const NAVIGATOR_VIEWPORT_OUTLINE_COLOR := Color(0.125, 0.125, 0.125, 1.0)
 const CANVAS_SCROLLBAR_THICKNESS := 12.0
 const CANVAS_SCROLLBAR_MARGIN := 4.0
 const CANVAS_SCROLLBAR_HOVER_ZONE := 22.0
@@ -340,6 +342,7 @@ var active_tool := ToolMode.BRUSH:
 			_stroke_coverage = PackedFloat32Array()
 		if not _is_shape_tool():
 			_is_shape_previewing = false
+			_use_lightweight_shape_preview = false
 			_clear_shape_preview_image()
 			_set_canvas_mouse_hidden(false)
 		if active_tool == ToolMode.TEXT:
@@ -465,9 +468,13 @@ var _shape_preview_texture: ImageTexture
 var _shape_preview_rect := Rect2i()
 var _is_shape_preview_rasterizing := false
 var _shape_preview_original_pixels := {}
+var _use_lightweight_shape_preview := false
 var _surface_shape_previewing := false
 var _surface_shape_endpoint_valid := false
+var _surface_shape_scaled_preview_only := false
 var _surface_shape_settings: Dictionary = {}
+var _surface_shape_base_preview_image: Image
+var _surface_shape_base_preview_max_dimension := 0
 var _suspend_shape_preview_refresh := false
 var _is_shape_outline_rasterizing := false
 var _is_shape_fill_rasterizing := false
@@ -630,6 +637,21 @@ func get_display_image_reference() -> Image:
 		return null
 	_flush_live_composite_refresh()
 	return _display_image_cache
+
+
+func get_eyedropper_sample_at_uv(uv: Vector2) -> Dictionary:
+	_flush_live_composite_refresh()
+	var sample_image: Image = (
+		_display_image_cache
+		if _display_image_cache and not _display_image_cache.is_empty()
+		else _image
+	)
+	if not sample_image or sample_image.is_empty():
+		return {}
+	return {
+		"image": sample_image,
+		"pixel": _uv_to_image_pixel(uv),
+	}
 
 
 func get_display_texture_reference() -> ImageTexture:
@@ -1055,19 +1077,29 @@ func image_pixel_from_uv(uv: Vector2) -> Vector2i:
 	return _uv_to_image_pixel(uv)
 
 
-func begin_surface_shape_preview(from_pixel: Vector2i, to_pixel := Vector2i(-1, -1)) -> bool:
+func begin_surface_shape_preview(
+	from_pixel: Vector2i,
+	to_pixel := Vector2i(-1, -1),
+	scaled_preview_only := false
+) -> bool:
 	if not editing_enabled or not _is_shape_tool() or _image.is_empty():
 		return false
 	if _is_shape_previewing:
 		cancel_surface_shape_preview()
 	_surface_shape_previewing = true
 	_surface_shape_endpoint_valid = true
+	_surface_shape_scaled_preview_only = scaled_preview_only
+	_use_lightweight_shape_preview = false
 	_surface_shape_settings = _capture_shape_raster_settings()
+	_clear_surface_shape_base_preview()
 	_is_shape_previewing = true
 	_shape_start_pixel = _clip_image_pixel(from_pixel)
 	_shape_pointer_pixel = _shape_start_pixel if to_pixel.x < 0 or to_pixel.y < 0 else _clip_image_pixel(to_pixel)
 	_has_preview = false
-	_refresh_shape_preview_image()
+	if not _surface_shape_scaled_preview_only:
+		_refresh_shape_preview_image()
+	else:
+		_clear_shape_preview_image()
 	queue_redraw()
 	return true
 
@@ -1081,12 +1113,31 @@ func update_surface_shape_preview(to_pixel: Vector2i, endpoint_valid := true) ->
 		queue_redraw()
 		return true
 	_shape_pointer_pixel = _clip_image_pixel(to_pixel)
-	_refresh_shape_preview_image()
+	if not _surface_shape_scaled_preview_only:
+		_refresh_shape_preview_image()
+	else:
+		_clear_shape_preview_image()
 	queue_redraw()
 	return true
 
 
-func get_surface_shape_preview_image() -> Image:
+func get_surface_shape_preview_image(maximum_dimension := 0) -> Image:
+	if maximum_dimension > 0:
+		if _surface_shape_scaled_preview_only:
+			return _get_lightweight_surface_shape_preview_image(maximum_dimension)
+		return _get_scaled_surface_shape_preview_image(maximum_dimension)
+	# Preserve the exact full-resolution API for tests, exports, and callers that
+	# explicitly request it. Interactive 3D hover uses the capped path above and
+	# therefore never pays for this lazy rasterization during pointer motion.
+	if (
+		_surface_shape_scaled_preview_only
+		and _surface_shape_previewing
+		and _surface_shape_endpoint_valid
+		and not _shape_preview_image
+	):
+		_surface_shape_scaled_preview_only = false
+		_refresh_shape_preview_image()
+		_surface_shape_scaled_preview_only = true
 	var composed := get_display_image_copy()
 	if (
 		_surface_shape_previewing
@@ -1102,6 +1153,114 @@ func get_surface_shape_preview_image() -> Image:
 	return _get_document_region(composed)
 
 
+func _get_scaled_surface_shape_preview_image(maximum_dimension: int) -> Image:
+	var base_preview: Image = _get_surface_shape_base_preview(maximum_dimension)
+	if not base_preview or base_preview.is_empty():
+		return null
+	var composed: Image = base_preview.duplicate()
+	if (
+		not _surface_shape_previewing
+		or not _surface_shape_endpoint_valid
+		or not _shape_preview_image
+		or _shape_preview_image.is_empty()
+		or not _shape_preview_rect.has_area()
+	):
+		return composed
+	var preview_bounds := _shape_preview_rect.intersection(_document_rect)
+	if not preview_bounds.has_area() or not _document_rect.has_area():
+		return composed
+	var source_rect := Rect2i(preview_bounds.position - _shape_preview_rect.position, preview_bounds.size)
+	var preview_region: Image = _shape_preview_image.get_region(source_rect)
+	var output_size: Vector2i = composed.get_size()
+	var document_size: Vector2i = _document_rect.size
+	var relative_start := Vector2(preview_bounds.position - _document_rect.position) / Vector2(document_size)
+	var relative_end := Vector2(preview_bounds.end - _document_rect.position) / Vector2(document_size)
+	var destination_start := Vector2i(floori(relative_start.x * output_size.x), floori(relative_start.y * output_size.y))
+	var destination_end := Vector2i(ceili(relative_end.x * output_size.x), ceili(relative_end.y * output_size.y))
+	var destination_rect := Rect2i(
+		destination_start,
+		(destination_end - destination_start).max(Vector2i.ONE)
+	).intersection(Rect2i(Vector2i.ZERO, output_size))
+	if not destination_rect.has_area():
+		return composed
+	preview_region.resize(destination_rect.size.x, destination_rect.size.y, Image.INTERPOLATE_BILINEAR)
+	composed.blit_rect(
+		preview_region,
+		Rect2i(Vector2i.ZERO, preview_region.get_size()),
+		destination_rect.position
+	)
+	return composed
+
+
+func _get_surface_shape_base_preview(maximum_dimension: int) -> Image:
+	var resolved_maximum := maxi(1, maximum_dimension)
+	if (
+		_surface_shape_base_preview_image
+		and not _surface_shape_base_preview_image.is_empty()
+		and _surface_shape_base_preview_max_dimension == resolved_maximum
+	):
+		return _surface_shape_base_preview_image
+	var base_preview: Image = get_document_display_image_copy()
+	if not base_preview or base_preview.is_empty():
+		return null
+	var largest_dimension := maxi(base_preview.get_width(), base_preview.get_height())
+	if largest_dimension > resolved_maximum:
+		var scale := float(resolved_maximum) / float(largest_dimension)
+		base_preview.resize(
+			maxi(1, roundi(float(base_preview.get_width()) * scale)),
+			maxi(1, roundi(float(base_preview.get_height()) * scale)),
+			Image.INTERPOLATE_BILINEAR
+		)
+	_surface_shape_base_preview_image = base_preview
+	_surface_shape_base_preview_max_dimension = resolved_maximum
+	return _surface_shape_base_preview_image
+
+
+func _clear_surface_shape_base_preview() -> void:
+	_surface_shape_base_preview_image = null
+	_surface_shape_base_preview_max_dimension = 0
+
+
+func _get_lightweight_surface_shape_preview_image(maximum_dimension: int) -> Image:
+	var base_preview: Image = _get_surface_shape_base_preview(maximum_dimension)
+	if not base_preview or base_preview.is_empty():
+		return null
+	var composed: Image = base_preview.duplicate()
+	if not _surface_shape_endpoint_valid or not _document_rect.has_area():
+		return composed
+	var endpoints := _get_active_shape_endpoints()
+	var output_size: Vector2i = composed.get_size()
+	var scale := Vector2(output_size) / Vector2(_document_rect.size)
+	var from_pixel := Vector2i(
+		roundi(float(endpoints[0].x - _document_rect.position.x) * scale.x),
+		roundi(float(endpoints[0].y - _document_rect.position.y) * scale.y)
+	)
+	var to_pixel := Vector2i(
+		roundi(float(endpoints[1].x - _document_rect.position.x) * scale.x),
+		roundi(float(endpoints[1].y - _document_rect.position.y) * scale.y)
+	)
+	var settings: Dictionary = _surface_shape_settings
+	var preview_brush_size := maxi(1, roundi(float(settings.get("brush_size", brush_size)) * minf(scale.x, scale.y)))
+	var preview_fill_mode := int(settings.get("shape_fill_mode", shape_fill_mode))
+	var preview_outline: Color = settings.get("brush_color", brush_color)
+	var preview_fill: Color = (
+		settings.get("background_color", background_color)
+		if preview_fill_mode == ShapeFillMode.BACKGROUND
+		else preview_outline
+	)
+	_native_draw_shape_on_image(
+		composed,
+		active_tool,
+		from_pixel,
+		to_pixel,
+		preview_brush_size,
+		preview_outline,
+		preview_fill_mode,
+		preview_fill
+	)
+	return composed
+
+
 func commit_surface_shape_preview() -> bool:
 	if not editing_enabled or not _surface_shape_previewing or not _surface_shape_endpoint_valid:
 		cancel_surface_shape_preview()
@@ -1114,7 +1273,10 @@ func cancel_surface_shape_preview() -> bool:
 		return false
 	_surface_shape_previewing = false
 	_surface_shape_endpoint_valid = false
+	_surface_shape_scaled_preview_only = false
+	_use_lightweight_shape_preview = false
 	_surface_shape_settings.clear()
+	_clear_surface_shape_base_preview()
 	_is_shape_previewing = false
 	_clear_shape_preview_image()
 	_set_canvas_mouse_hidden(false)
@@ -1798,6 +1960,7 @@ func cancel_active_selection_or_preview() -> bool:
 			cancel_surface_shape_preview()
 		else:
 			_is_shape_previewing = false
+			_use_lightweight_shape_preview = false
 			_clear_shape_preview_image()
 			_set_canvas_mouse_hidden(false)
 			queue_redraw()
@@ -2455,7 +2618,10 @@ func _draw() -> void:
 	_draw_tile_preview()
 	_draw_checkerboard(document_local_rect)
 	_draw_image_texture(_image_rect)
-	_draw_shape_preview_image()
+	if _use_lightweight_shape_preview and _is_shape_previewing and not _surface_shape_previewing:
+		_draw_shape_preview()
+	else:
+		_draw_shape_preview_image()
 	if show_grid:
 		_draw_pixel_grid(document_local_rect)
 	if uv_overlay_visible:
@@ -2497,8 +2663,8 @@ func _draw_navigator() -> void:
 		draw_rect(document_preview, Color(0.86, 0.86, 0.86, 0.8), false, 1.0)
 	var viewport_preview := _get_navigator_viewport_rect(preview_rect)
 	if viewport_preview.has_area():
-		draw_rect(viewport_preview, Color(0.12, 0.62, 1.0, 0.10), true)
-		draw_rect(viewport_preview, Color(0.25, 0.72, 1.0, 1.0), false, 2.0)
+		draw_rect(viewport_preview, NAVIGATOR_VIEWPORT_FILL_COLOR, true)
+		draw_rect(viewport_preview, NAVIGATOR_VIEWPORT_OUTLINE_COLOR, false, 2.0)
 
 
 func is_navigator_visible() -> bool:
@@ -3705,11 +3871,11 @@ func _begin_shape_preview(local_position: Vector2) -> void:
 	if not editing_enabled:
 		return
 	_is_shape_previewing = true
+	_use_lightweight_shape_preview = true
 	_shape_start_pixel = _local_to_snapped_image_pixel(local_position)
 	_shape_pointer_pixel = _shape_start_pixel
 	_has_preview = false
 	_set_canvas_mouse_hidden(true)
-	_refresh_shape_preview_image()
 	queue_redraw()
 
 
@@ -3717,7 +3883,6 @@ func _update_shape_preview(local_position: Vector2) -> void:
 	if not editing_enabled:
 		return
 	_shape_pointer_pixel = _local_to_snapped_image_pixel(local_position)
-	_refresh_shape_preview_image()
 	queue_redraw()
 
 
@@ -3734,6 +3899,7 @@ func _commit_current_shape() -> bool:
 		cancel_surface_shape_preview()
 		return false
 	_is_shape_previewing = false
+	_use_lightweight_shape_preview = false
 	_clear_shape_preview_image()
 	_set_canvas_mouse_hidden(false)
 	var previous_image: Image = get_image_copy()
@@ -3746,25 +3912,32 @@ func _commit_current_shape() -> bool:
 		_stroke_coverage = PackedFloat32Array()
 		_surface_shape_previewing = false
 		_surface_shape_endpoint_valid = false
+		_surface_shape_scaled_preview_only = false
 		_surface_shape_settings.clear()
+		_clear_surface_shape_base_preview()
 		queue_redraw()
 		return false
 
+	var shape_changed := _stroke_has_changes
+	if shape_changed:
+		# Keep the live-stroke state active while refreshing so layered canvases
+		# composite only the dirty tiles instead of rebuilding the complete image.
+		_refresh_texture()
+		_flush_live_composite_refresh()
 	_is_drawing = false
 	_stroke_start_image = null
 	_stroke_coverage = PackedFloat32Array()
-	if not _images_equal(previous_image, _image):
-		_refresh_texture()
-		stroke_committed.emit(previous_image)
-		_surface_shape_previewing = false
-		_surface_shape_endpoint_valid = false
-		_surface_shape_settings.clear()
-		return true
-	else:
-		queue_redraw()
 	_surface_shape_previewing = false
 	_surface_shape_endpoint_valid = false
+	_surface_shape_scaled_preview_only = false
 	_surface_shape_settings.clear()
+	_clear_surface_shape_base_preview()
+	if shape_changed:
+		stroke_committed.emit(previous_image)
+		return true
+	_live_composite_dirty_tiles.clear()
+	_live_composite_refresh_pending = false
+	queue_redraw()
 	return false
 
 
@@ -3785,6 +3958,8 @@ func _raster_active_shape_with_current_settings() -> bool:
 	var endpoints := _get_active_shape_endpoints()
 	var from_pixel: Vector2i = endpoints[0]
 	var to_pixel: Vector2i = endpoints[1]
+	if _can_use_native_shape_raster() and not _is_shape_preview_rasterizing:
+		return _raster_active_shape_native(from_pixel, to_pixel)
 	_shape_outline_pixels.clear()
 	_begin_mirror_raster_scope()
 	if active_tool == ToolMode.LINE:
@@ -3820,12 +3995,168 @@ func _raster_active_shape_with_current_settings() -> bool:
 	return false
 
 
+func _can_use_native_shape_raster() -> bool:
+	var fill_color := _get_shape_fill_color()
+	return (
+		pixel_perfect
+		and brush_head == BrushHead.SQUARE
+		and brush_color.a >= 0.999999
+		and (shape_fill_mode == ShapeFillMode.NONE or fill_color.a >= 0.999999)
+		and not alpha_lock
+		and not _has_selection
+		and mirror_mode == MirrorMode.OFF
+	)
+
+
+func _raster_active_shape_native(from_pixel: Vector2i, to_pixel: Vector2i) -> bool:
+	if active_tool not in [ToolMode.LINE, ToolMode.RECTANGLE, ToolMode.ELLIPSE]:
+		return false
+	var image_bounds := Rect2i(Vector2i.ZERO, _image.get_size())
+	var affected_rect := _get_pixel_rect(from_pixel, to_pixel).grow(maxi(1, ceili(float(brush_size) * 0.5) + 1)).intersection(image_bounds)
+	if not affected_rect.has_area():
+		return true
+	var before: Image = _image.get_region(affected_rect)
+	_native_draw_shape_on_image(
+		_image,
+		active_tool,
+		from_pixel,
+		to_pixel,
+		brush_size,
+		brush_color,
+		shape_fill_mode,
+		_get_shape_fill_color()
+	)
+	var after: Image = _image.get_region(affected_rect)
+	if before.get_data() != after.get_data():
+		_stroke_has_changes = true
+	return true
+
+
+func _native_draw_shape_on_image(
+	target: Image,
+	tool: int,
+	from_pixel: Vector2i,
+	to_pixel: Vector2i,
+	outline_size: int,
+	outline_color: Color,
+	fill_mode_value: int,
+	fill_color: Color
+) -> void:
+	if not target or target.is_empty():
+		return
+	var shape_rect := _get_pixel_rect(from_pixel, to_pixel)
+	if fill_mode_value != ShapeFillMode.NONE:
+		if tool == ToolMode.RECTANGLE:
+			_native_blend_solid_rect(target, shape_rect, fill_color)
+		elif tool == ToolMode.ELLIPSE:
+			_native_blend_filled_ellipse(target, shape_rect, fill_color)
+	match tool:
+		ToolMode.LINE:
+			_native_stamp_square_line(target, from_pixel, to_pixel, outline_size, outline_color)
+		ToolMode.RECTANGLE:
+			var left := shape_rect.position.x
+			var top := shape_rect.position.y
+			var right := shape_rect.end.x - 1
+			var bottom := shape_rect.end.y - 1
+			_native_stamp_square_line(target, Vector2i(left, top), Vector2i(right, top), outline_size, outline_color)
+			_native_stamp_square_line(target, Vector2i(right, top), Vector2i(right, bottom), outline_size, outline_color)
+			_native_stamp_square_line(target, Vector2i(right, bottom), Vector2i(left, bottom), outline_size, outline_color)
+			_native_stamp_square_line(target, Vector2i(left, bottom), Vector2i(left, top), outline_size, outline_color)
+		ToolMode.ELLIPSE:
+			if shape_rect.size.x <= 1 or shape_rect.size.y <= 1:
+				_native_stamp_square_line(target, from_pixel, to_pixel, outline_size, outline_color)
+				return
+			var center := Vector2(shape_rect.position) + (Vector2(shape_rect.size) - Vector2.ONE) * 0.5
+			var radius := (Vector2(shape_rect.size) - Vector2.ONE) * 0.5
+			var steps := max(16, int(ceil(TAU * maxf(radius.x, radius.y) * 1.5)))
+			for index in range(steps):
+				var angle := TAU * float(index) / float(steps)
+				var pixel := center + Vector2(cos(angle) * radius.x, sin(angle) * radius.y)
+				_native_stamp_square(target, Vector2i(roundi(pixel.x), roundi(pixel.y)), outline_size, outline_color)
+
+
+func _native_stamp_square_line(
+	target: Image,
+	from_pixel: Vector2i,
+	to_pixel: Vector2i,
+	stamp_size: int,
+	color: Color
+) -> void:
+	var distance := from_pixel.distance_to(to_pixel)
+	var steps := max(1, int(ceil(distance / max(1.0, float(stamp_size) * 0.16))))
+	for index in range(steps + 1):
+		var weight := float(index) / float(steps)
+		var pixel := Vector2(from_pixel).lerp(Vector2(to_pixel), weight)
+		_native_stamp_square(target, Vector2i(roundi(pixel.x), roundi(pixel.y)), stamp_size, color)
+
+
+func _native_stamp_square(target: Image, center: Vector2i, stamp_size: int, color: Color) -> void:
+	var resolved_size := maxi(1, stamp_size)
+	var offset := floori(float(resolved_size) * 0.5)
+	_native_blend_solid_rect(
+		target,
+		Rect2i(center - Vector2i.ONE * offset, Vector2i.ONE * resolved_size),
+		color
+	)
+
+
+func _native_blend_solid_rect(target: Image, requested_rect: Rect2i, color: Color) -> void:
+	var clipped := requested_rect.intersection(Rect2i(Vector2i.ZERO, target.get_size()))
+	if not clipped.has_area() or color.a <= 0.0:
+		return
+	if target == _image:
+		_mark_live_composite_rect_dirty(clipped)
+	if color.a >= 0.999999:
+		target.fill_rect(clipped, _round_color_for_rgba8_storage(color))
+		return
+	var source := Image.create_empty(clipped.size.x, clipped.size.y, false, Image.FORMAT_RGBA8)
+	source.fill(color)
+	target.blend_rect(source, Rect2i(Vector2i.ZERO, clipped.size), clipped.position)
+
+
+func _native_blend_filled_ellipse(target: Image, requested_rect: Rect2i, color: Color) -> void:
+	var clipped := requested_rect.intersection(Rect2i(Vector2i.ZERO, target.get_size()))
+	if not clipped.has_area() or color.a <= 0.0:
+		return
+	if target == _image:
+		_mark_live_composite_rect_dirty(clipped)
+	var center := Vector2(requested_rect.position) + (Vector2(requested_rect.size) - Vector2.ONE) * 0.5
+	var radius := Vector2(requested_rect.size) * 0.5
+	if radius.x <= 0.0 or radius.y <= 0.0:
+		return
+	var overlay: Image
+	if color.a < 0.999999:
+		overlay = Image.create_empty(clipped.size.x, clipped.size.y, false, Image.FORMAT_RGBA8)
+		overlay.fill(Color.TRANSPARENT)
+	for y in range(clipped.position.y, clipped.end.y):
+		var normalized_y := (float(y) - center.y) / radius.y
+		var horizontal_weight := 1.0 - normalized_y * normalized_y
+		if horizontal_weight < 0.0:
+			continue
+		var horizontal_radius := radius.x * sqrt(horizontal_weight)
+		var span_left := maxi(clipped.position.x, ceili(center.x - horizontal_radius))
+		var span_right := mini(clipped.end.x - 1, floori(center.x + horizontal_radius))
+		if span_right < span_left:
+			continue
+		var span := Rect2i(Vector2i(span_left, y), Vector2i(span_right - span_left + 1, 1))
+		if overlay:
+			overlay.fill_rect(Rect2i(span.position - clipped.position, span.size), color)
+		else:
+			target.fill_rect(span, _round_color_for_rgba8_storage(color))
+	if overlay:
+		target.blend_rect(overlay, Rect2i(Vector2i.ZERO, overlay.get_size()), clipped.position)
+
+
 func _get_shape_fill_color() -> Color:
 	return background_color if shape_fill_mode == ShapeFillMode.BACKGROUND else brush_color
 
 
 func _refresh_shape_preview_image() -> void:
 	if not _is_shape_previewing or _is_shape_preview_rasterizing or _suspend_shape_preview_refresh:
+		return
+	if _use_lightweight_shape_preview or _surface_shape_scaled_preview_only:
+		_clear_shape_preview_image()
+		queue_redraw()
 		return
 
 	_clear_shape_preview_image()
@@ -3864,7 +4195,21 @@ func _refresh_shape_preview_image() -> void:
 			right = maxi(right, x)
 			bottom = maxi(bottom, y)
 		_shape_preview_rect = Rect2i(Vector2i(left, top), Vector2i(right - left + 1, bottom - top + 1))
-		_shape_preview_image = _make_display_image(_image).get_region(_shape_preview_rect)
+		var preview_composite: Variant
+		if _display_region_compositor.is_valid():
+			preview_composite = _display_region_compositor.call(_shape_preview_rect, _image)
+		if (
+			preview_composite is Image
+			and not preview_composite.is_empty()
+			and preview_composite.get_size() == _shape_preview_rect.size
+		):
+			_shape_preview_image = preview_composite
+		elif _display_compositor.is_valid():
+			# Compatibility fallback for compositor clients that have not supplied
+			# the optional region callback.
+			_shape_preview_image = _make_display_image(_image).get_region(_shape_preview_rect)
+		else:
+			_shape_preview_image = _image.get_region(_shape_preview_rect)
 
 	for key in _shape_preview_original_pixels:
 		var index := int(key)
@@ -4765,6 +5110,11 @@ func _draw_shape_preview() -> void:
 	var endpoints := _get_active_shape_endpoints()
 	var from_pixel: Vector2i = endpoints[0]
 	var to_pixel: Vector2i = endpoints[1]
+	for mirrored_endpoints in _get_mirrored_shape_preview_endpoints(from_pixel, to_pixel):
+		_draw_single_shape_preview(mirrored_endpoints[0], mirrored_endpoints[1])
+
+
+func _draw_single_shape_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
 	if active_tool == ToolMode.LINE:
 		_draw_line_preview(from_pixel, to_pixel)
 	elif active_tool == ToolMode.RECTANGLE:
@@ -4775,7 +5125,62 @@ func _draw_shape_preview() -> void:
 		if shape_fill_mode != ShapeFillMode.NONE:
 			_draw_filled_ellipse_preview(from_pixel, to_pixel, _get_shape_fill_color())
 		_draw_ellipse_outline_preview(from_pixel, to_pixel)
-	_draw_shape_start_outline(_shape_start_pixel)
+
+
+func _get_mirrored_shape_preview_endpoints(from_pixel: Vector2i, to_pixel: Vector2i) -> Array[Array]:
+	var result: Array[Array] = []
+	_append_shape_preview_endpoints(result, from_pixel, to_pixel)
+	var mirror_x := mirror_mode == MirrorMode.VERTICAL or mirror_mode == MirrorMode.BOTH
+	var mirror_y := mirror_mode == MirrorMode.HORIZONTAL or mirror_mode == MirrorMode.BOTH
+	if mirror_x:
+		_append_shape_preview_endpoints(
+			result,
+			_mirror_shape_preview_pixel(from_pixel, true, false),
+			_mirror_shape_preview_pixel(to_pixel, true, false)
+		)
+	if mirror_y:
+		_append_shape_preview_endpoints(
+			result,
+			_mirror_shape_preview_pixel(from_pixel, false, true),
+			_mirror_shape_preview_pixel(to_pixel, false, true)
+		)
+	if mirror_x and mirror_y:
+		_append_shape_preview_endpoints(
+			result,
+			_mirror_shape_preview_pixel(from_pixel, true, true),
+			_mirror_shape_preview_pixel(to_pixel, true, true)
+		)
+	return result
+
+
+func _append_shape_preview_endpoints(result: Array[Array], from_pixel: Vector2i, to_pixel: Vector2i) -> void:
+	for existing in result:
+		if _shape_preview_endpoints_match(existing[0], existing[1], from_pixel, to_pixel):
+			return
+	result.push_back([from_pixel, to_pixel])
+
+
+func _shape_preview_endpoints_match(
+	left_from: Vector2i,
+	left_to: Vector2i,
+	right_from: Vector2i,
+	right_to: Vector2i
+) -> bool:
+	if active_tool == ToolMode.RECTANGLE or active_tool == ToolMode.ELLIPSE:
+		return _get_pixel_rect(left_from, left_to) == _get_pixel_rect(right_from, right_to)
+	return (
+		(left_from == right_from and left_to == right_to)
+		or (left_from == right_to and left_to == right_from)
+	)
+
+
+func _mirror_shape_preview_pixel(pixel: Vector2i, mirror_x: bool, mirror_y: bool) -> Vector2i:
+	var result := pixel
+	if mirror_x:
+		result.x = _document_rect.position.x * 2 + _document_rect.size.x - 1 - result.x
+	if mirror_y:
+		result.y = _document_rect.position.y * 2 + _document_rect.size.y - 1 - result.y
+	return result
 
 
 func _draw_line_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
@@ -4785,13 +5190,11 @@ func _draw_line_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
 
 	var distance: float = from_pixel.distance_to(to_pixel)
 	var steps: int = max(1, int(ceil(distance / max(1.0, float(brush_size) * 0.16))))
-	var preview_color: Color = brush_color
-	preview_color.a *= 0.45
 	for index in range(steps + 1):
 		var weight: float = float(index) / float(steps)
 		var pixel: Vector2 = Vector2(from_pixel).lerp(Vector2(to_pixel), weight)
 		var stamp_pixel: Vector2i = Vector2i(roundi(pixel.x), roundi(pixel.y))
-		_draw_brush_preview_stamp(stamp_pixel, preview_color, false)
+		_draw_brush_preview_stamp(stamp_pixel, brush_color, false)
 
 
 func _draw_brush_preview_stamp(stamp_pixel: Vector2i, preview_color: Color, draw_border: bool) -> void:
@@ -4826,12 +5229,6 @@ func _draw_brush_preview_stamp(stamp_pixel: Vector2i, preview_color: Color, draw
 			draw_rect(local_rect, Color.WHITE, false, 1.5)
 
 
-func _draw_shape_start_outline(pixel: Vector2i) -> void:
-	var preview_color: Color = brush_color
-	preview_color.a *= 0.4
-	_draw_brush_preview_stamp(pixel, preview_color, true)
-
-
 func _draw_rectangle_outline_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
 	var rect: Rect2i = _get_pixel_rect(from_pixel, to_pixel)
 	var left: int = rect.position.x
@@ -4846,9 +5243,7 @@ func _draw_rectangle_outline_preview(from_pixel: Vector2i, to_pixel: Vector2i) -
 
 func _draw_filled_rectangle_preview(from_pixel: Vector2i, to_pixel: Vector2i, fill_color: Color) -> void:
 	var rect: Rect2i = _get_pixel_rect(from_pixel, to_pixel)
-	var preview_color := fill_color
-	preview_color.a *= 0.45
-	draw_rect(_image_pixels_to_local_rect(rect), preview_color, true)
+	draw_rect(_image_pixels_to_local_rect(rect), fill_color, true)
 
 
 func _draw_ellipse_outline_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> void:
@@ -4860,13 +5255,11 @@ func _draw_ellipse_outline_preview(from_pixel: Vector2i, to_pixel: Vector2i) -> 
 	var center := Vector2(rect.position) + (Vector2(rect.size) - Vector2.ONE) * 0.5
 	var radius := (Vector2(rect.size) - Vector2.ONE) * 0.5
 	var steps: int = max(16, int(ceil(TAU * maxf(radius.x, radius.y) * 1.5)))
-	var preview_color: Color = brush_color
-	preview_color.a *= 0.45
 	for index in range(steps):
 		var angle := TAU * float(index) / float(steps)
 		var pixel := center + Vector2(cos(angle) * radius.x, sin(angle) * radius.y)
 		var stamp_pixel := Vector2i(roundi(pixel.x), roundi(pixel.y))
-		_draw_brush_preview_stamp(stamp_pixel, preview_color, false)
+		_draw_brush_preview_stamp(stamp_pixel, brush_color, false)
 
 
 func _draw_filled_ellipse_preview(from_pixel: Vector2i, to_pixel: Vector2i, fill_color: Color) -> void:
@@ -4874,14 +5267,12 @@ func _draw_filled_ellipse_preview(from_pixel: Vector2i, to_pixel: Vector2i, fill
 	var local_rect := _image_pixels_to_local_rect(rect)
 	var center := local_rect.position + local_rect.size * 0.5
 	var radius := local_rect.size * 0.5
-	var preview_color := fill_color
-	preview_color.a *= 0.45
 	var points := PackedVector2Array()
 	var steps: int = max(24, int(ceil(TAU * maxf(radius.x, radius.y) / 8.0)))
 	for index in range(steps):
 		var angle := TAU * float(index) / float(steps)
 		points.push_back(center + Vector2(cos(angle) * radius.x, sin(angle) * radius.y))
-	draw_colored_polygon(points, preview_color)
+	draw_colored_polygon(points, fill_color)
 
 
 func _draw_selection() -> void:
@@ -5349,6 +5740,7 @@ func _clear_preview() -> void:
 	hover_uv_changed.emit(Vector2.ZERO, false)
 	if _is_shape_previewing and not _surface_shape_previewing:
 		_is_shape_previewing = false
+		_use_lightweight_shape_preview = false
 		_clear_shape_preview_image()
 	_update_canvas_mouse_visibility()
 	queue_redraw()
@@ -6399,6 +6791,23 @@ func _mark_live_composite_pixel_dirty(pixel: Vector2i) -> void:
 		floori(float(pixel.y) / float(LIVE_COMPOSITE_TILE_SIZE))
 	)
 	_live_composite_dirty_tiles[tile] = true
+
+
+func _mark_live_composite_rect_dirty(rect: Rect2i) -> void:
+	if not _is_drawing or not _display_region_compositor.is_valid() or not rect.has_area():
+		return
+	var first_tile := Vector2i(
+		floori(float(rect.position.x) / float(LIVE_COMPOSITE_TILE_SIZE)),
+		floori(float(rect.position.y) / float(LIVE_COMPOSITE_TILE_SIZE))
+	)
+	var last_pixel := rect.end - Vector2i.ONE
+	var last_tile := Vector2i(
+		floori(float(last_pixel.x) / float(LIVE_COMPOSITE_TILE_SIZE)),
+		floori(float(last_pixel.y) / float(LIVE_COMPOSITE_TILE_SIZE))
+	)
+	for tile_y in range(first_tile.y, last_tile.y + 1):
+		for tile_x in range(first_tile.x, last_tile.x + 1):
+			_live_composite_dirty_tiles[Vector2i(tile_x, tile_y)] = true
 
 
 func _flush_live_composite_refresh() -> void:

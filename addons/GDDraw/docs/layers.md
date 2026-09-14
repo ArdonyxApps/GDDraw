@@ -76,6 +76,8 @@ Right-click a paint layer or group for actions appropriate to that row, includin
 - Reorder or reparent the hierarchy.
 - Delete.
 
+The context menu shows each available keyboard shortcut in a muted, right-aligned column. With the Layers tree focused, use `Ctrl+X`, `Ctrl+C`, and `Ctrl+V` for layer-node clipboard actions; `Ctrl+J` to duplicate; `Delete` to remove; `Ctrl+Shift+N` to add a paint layer; and `Ctrl+G` to create a group containing the selected item. These follow Affinity's familiar layer shortcuts and do not replace `Ctrl+D` for duplicating a canvas pixel selection.
+
 Document, Scene-object, and texture-target rows receive context menus appropriate to their higher-level responsibilities, such as document sizing, framing a 3D object, selecting it in the Scene, resizing a texture target, or saving textures.
 
 ## Thumbnails

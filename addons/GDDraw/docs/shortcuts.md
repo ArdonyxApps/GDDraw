@@ -13,18 +13,32 @@ Shortcuts use `Ctrl` terminology. On platforms where Godot maps command shortcut
 - `Ctrl+Z` — Undo.
 - `Ctrl+Y` — Redo.
 
-## Clipboard and selection
+## Canvas clipboard and selection
 
 - `Ctrl+A` — Select all.
-- `Ctrl+X` — Cut selection or selected layer node, according to focus.
-- `Ctrl+C` — Copy selection or selected layer node.
-- `Ctrl+V` — Paste.
+- `Ctrl+X` — Cut the current pixel selection.
+- `Ctrl+C` — Copy the current pixel selection.
+- `Ctrl+V` — Paste pixels or an image as a floating selection.
 - `Ctrl+D` — Duplicate the current selection.
-- `Delete` — Delete selected pixels or the selected deletable item, according to focus.
+- `Delete` — Delete selected pixels.
 - `Enter` — Commit a floating selection or layer rename.
 - `Escape` — Cancel a transform, rename, text draft, or active selection state.
 - Arrow keys — Nudge the selection by one pixel.
 - `Shift+Arrow` — Nudge the selection by ten pixels.
+
+## Layers tree
+
+When a paint layer or group has keyboard focus in the Layers tree, these Affinity-style shortcuts operate on the complete layer node instead of canvas pixels:
+
+- `Ctrl+X` — Cut the selected layer or group.
+- `Ctrl+C` — Copy the selected layer or group.
+- `Ctrl+V` — Paste a copied layer or group beside the selected item.
+- `Ctrl+J` — Duplicate the selected layer or group.
+- `Delete` — Delete the selected layer or group after confirmation.
+- `Ctrl+Shift+N` — Create a new paint layer at the selected location.
+- `Ctrl+G` — Create a new group containing the selected layer or group.
+
+The same shortcuts appear at the right side of the layer context menu. Commands that cannot modify a protected or locked item are disabled.
 
 ## Text
 

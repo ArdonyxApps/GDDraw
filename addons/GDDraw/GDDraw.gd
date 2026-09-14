@@ -43,6 +43,11 @@ func _make_dock_load_error(message: String) -> Control:
 	return container
 
 
+func request_resource_filesystem_scan() -> void:
+	if is_instance_valid(_dock) and _dock.has_method("_request_resource_filesystem_scan"):
+		_dock.call("_request_resource_filesystem_scan")
+
+
 func _make_dock() -> Control:
 	var dock_scene := ResourceLoader.load(DOCK_SCENE_PATH, "PackedScene", ResourceLoader.CACHE_MODE_REPLACE)
 	if not dock_scene or not dock_scene is PackedScene:

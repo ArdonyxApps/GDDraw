@@ -732,6 +732,11 @@ var _paint_3d_surface_cursor_hidden := false
 var _paint_3d_surface_cursor_previous_mouse_mode := Input.MOUSE_MODE_VISIBLE
 var _paint_3d_drawing := false
 var _paint_3d_last_stroke_hit: Dictionary = {}
+# The pointer gesture owns history; texture segments only own raster state.
+var _paint_3d_gesture_before: Dictionary = {}
+var _paint_3d_gesture_segments: Dictionary = {}
+var _paint_3d_gesture_binding := ""
+var _paint_3d_gesture_sources: Array[WeakRef] = []
 var _paint_3d_pending_accessory_refresh := false
 var _paint_3d_surface_shape_state: Dictionary = {}
 var _paint_3d_triangle_cache: Dictionary = {}
@@ -1211,15 +1216,19 @@ func _notification(what: int) -> void:
 		_resize_3d_paint_viewport()
 		if _canvas_mode == CANVAS_MODE_SPLIT:
 			call_deferred("_apply_split_ratio")
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		_resolve_3d_brush_gesture(true)
 	elif what == NOTIFICATION_EXIT_TREE:
 		_set_3d_surface_cursor_hidden(false)
 		_cancel_3d_rotation_gizmo_drag(false)
 		_stop_3d_freelook()
 	elif what == NOTIFICATION_VISIBILITY_CHANGED and not is_visible_in_tree():
+		_resolve_3d_brush_gesture(true)
 		_hide_3d_brush_preview()
 
 
 func _process(delta: float) -> void:
+	_validate_3d_gesture_sources()
 	_advance_3d_layer_import()
 	_advance_3d_context_indexing()
 	_refresh_icon_button_states()
@@ -1477,6 +1486,9 @@ func _replace_canvas_layer_session(
 func _restore_layer_session(state: Dictionary) -> bool:
 	if state.is_empty() or not _layer_session or not _layer_session.has_method("restore_state"):
 		return false
+	var previous_targets := {}
+	for target in _layer_session.paint_targets:
+		previous_targets[target.target_id] = target
 	_layer_thumbnail_cache.clear()
 	_syncing_layer_session = true
 	var restored: bool = _layer_session.restore_state(state)
@@ -1487,9 +1499,34 @@ func _restore_layer_session(state: Dictionary) -> bool:
 		)
 	_syncing_layer_session = false
 	if restored:
+		_refresh_restored_3d_target_previews(previous_targets)
 		_refresh_layers_tree()
 		_apply_3d_object_group_visibility()
 	return restored
+
+
+func _refresh_restored_3d_target_previews(previous_targets: Dictionary) -> void:
+	# restore_state retains unchanged target instances. Refresh changed inactive
+	# targets too: a multi-target undo may leave the active target ID unchanged.
+	if not _texture_3d_layer_coordinator:
+		return
+	for target in _layer_session.paint_targets:
+		if previous_targets.get(target.target_id) == target:
+			continue
+		_paint_3d_target_display_cache.erase(target.target_id)
+		if target.target_id == _layer_session.active_target_id:
+			continue
+		var output: Image = target.composite()
+		_paint_3d_target_display_cache[target.target_id] = output
+		var updated := {}
+		for preview in _paint_3d_context_meshes:
+			if str(preview.get_meta("gddraw_target_id", "")) != target.target_id:
+				continue
+			var preview_id := str(preview.get_meta("gddraw_preview_id", ""))
+			var material: StandardMaterial3D = _paint_3d_context_material_by_target.get(preview_id)
+			if material and material.albedo_texture is ImageTexture and not updated.has(material.albedo_texture):
+				material.albedo_texture.set_image(output)
+				updated[material.albedo_texture] = true
 
 
 func _compose_active_layer_for_canvas(editable_image: Image) -> Image:
@@ -1531,6 +1568,7 @@ func _select_paint_layer(
 	preserve_same_target_display := false,
 	fast_3d_binding_key := ""
 ) -> bool:
+	_resolve_3d_brush_gesture(false)
 	if not _layer_session or not _canvas:
 		return false
 	var previous_target_id := str(_layer_session.active_target_id)
@@ -2336,6 +2374,7 @@ func _set_menu_item_tooltip(menu: PopupMenu, command_id: int, tooltip: String) -
 
 
 func _exit_tree() -> void:
+	_resolve_3d_brush_gesture(true, false)
 	_cancel_3d_layer_import()
 	_teardown_icon_import_recovery()
 	_disconnect_window_file_drop()
@@ -3370,6 +3409,8 @@ func _on_layers_panel_dragged(_offset: int) -> void:
 
 
 func _refresh_layers_tree(preferred_selection: Dictionary = {}) -> void:
+	if not _paint_3d_gesture_before.is_empty():
+		return
 	if not _layers_tree or not _layer_session:
 		return
 	var selection := preferred_selection
@@ -3893,6 +3934,8 @@ func _find_layers_tree_item(
 
 
 func _sync_layers_tree_selection(context: Dictionary) -> void:
+	if not _paint_3d_gesture_before.is_empty():
+		return
 	if not _layers_tree or context.is_empty():
 		return
 	var current_item := _layers_tree.get_selected()
@@ -5139,6 +5182,7 @@ func _on_layers_lock_toggled(_enabled: bool) -> void:
 
 
 func _prepare_layer_operation() -> void:
+	_resolve_3d_brush_gesture(false)
 	if not _canvas:
 		return
 	if _canvas.has_text_draft():
@@ -8615,6 +8659,7 @@ func _close_preferences() -> void:
 
 
 func _select_canvas_mode(mode_id: int) -> void:
+	_resolve_3d_brush_gesture(false)
 	if mode_id < CANVAS_MODE_2D or mode_id > CANVAS_MODE_SPLIT:
 		return
 	if mode_id != _canvas_mode:
@@ -11210,6 +11255,24 @@ func _process_canvas_hover_uv(uv: Vector2, has_hover: bool) -> void:
 
 
 func _on_3d_paint_uv_started(hit: Dictionary) -> bool:
+	_resolve_3d_brush_gesture(false)
+	var continuous: bool = _canvas and _canvas.active_tool in [GDDrawCanvasControl.ToolMode.BRUSH, GDDrawCanvasControl.ToolMode.ERASER]
+	if continuous and _layer_session and _texture_3d_layer_coordinator:
+		if not _is_3d_brush_hit_allowed(hit):
+			return false
+		# Preserve native layer bounds in history, even when the canvas expands
+		# a smaller/offset layer into the document workspace for raster editing.
+		_paint_3d_gesture_before = _layer_session.capture_history_state_with_active_layer_image(_layer_session.get_active_target().get_selected_layer_image())
+		_paint_3d_gesture_binding = _active_3d_binding_key
+	var accepted := _begin_3d_paint_hit(hit)
+	if not accepted:
+		_resolve_3d_brush_gesture(true)
+	elif not _paint_3d_gesture_before.is_empty():
+		_remember_3d_gesture_source()
+	return accepted
+
+
+func _begin_3d_paint_hit(hit: Dictionary) -> bool:
 	if not _canvas:
 		return false
 	if not _route_3d_hit_to_paint_target(hit):
@@ -11226,16 +11289,21 @@ func _on_3d_paint_uv_started(hit: Dictionary) -> bool:
 		_warn_if_3d_hit_has_uv_overlap(hit)
 		return false
 	_warn_if_3d_hit_has_uv_overlap(hit)
-	_begin_3d_soft_brush_stroke()
+	if _canvas.active_tool in [GDDrawCanvasControl.ToolMode.BRUSH, GDDrawCanvasControl.ToolMode.ERASER]:
+		_begin_3d_soft_brush_stroke()
 	_canvas.begin_uv_triangle_stroke(
 		hit.get("texture_uv", hit.get("uv", Vector2.ZERO)),
-		hit.get("texture_triangle_uvs", hit.get("triangle_uvs", PackedVector2Array()))
+		hit.get("texture_triangle_uvs", hit.get("triangle_uvs", PackedVector2Array())),
+		_get_3d_gesture_original_image(str(hit.get("target_id", "")))
 	)
 	_paint_3d_last_stroke_hit = hit.duplicate(true)
-	return true
+	return _canvas.active_tool in [GDDrawCanvasControl.ToolMode.BRUSH, GDDrawCanvasControl.ToolMode.ERASER]
 
 
 func _on_3d_paint_uv_dragged(hit: Dictionary) -> void:
+	if not _paint_3d_gesture_before.is_empty():
+		_drag_3d_brush_gesture(hit)
+		return
 	if not _hit_belongs_to_active_3d_target(hit):
 		_paint_3d_last_stroke_hit.clear()
 		return
@@ -11262,7 +11330,13 @@ func _route_3d_hit_to_paint_target(hit: Dictionary) -> bool:
 	var binding_key := str(hit.get("binding_key", ""))
 	if target_id.is_empty():
 		return true
+	var destination = _layer_session.get_target(target_id)
+	if not destination or destination.is_node_effectively_locked(destination.selected_layer_id):
+		return false
 	if target_id != _layer_session.active_target_id:
+		if not _paint_3d_gesture_before.is_empty():
+			if _layer_session.target_lock_enabled or not _promote_cached_3d_preview(target_id, binding_key):
+				return false
 		if not _layer_session.route_hit_to_target(target_id):
 			_set_status("Target Lock rejected a stroke on another imported object; the active paint target is unchanged.")
 			return false
@@ -11270,7 +11344,8 @@ func _route_3d_hit_to_paint_target(hit: Dictionary) -> bool:
 		if not _sync_canvas_to_active_layer(false, promoted):
 			return false
 	elif not binding_key.is_empty():
-		_promote_cached_3d_preview(target_id, binding_key)
+		if not _promote_cached_3d_preview(target_id, binding_key) and not _paint_3d_gesture_before.is_empty():
+			return false
 	_set_active_3d_binding(binding_key, true)
 	_set_status("Painting %s." % _layer_session.get_active_target().label)
 	return true
@@ -11385,6 +11460,8 @@ func _set_active_3d_binding(binding_key: String, synchronize_scene_selection: bo
 	if binding.is_empty():
 		return
 	_active_3d_binding_key = binding_key
+	if not _paint_3d_gesture_before.is_empty():
+		return
 	var group_id := ""
 	var group_key := str(binding.get("group_key", ""))
 	for group in _layer_session.object_groups:
@@ -11426,6 +11503,8 @@ func _hit_belongs_to_active_3d_target(hit: Dictionary) -> bool:
 
 
 func _on_3d_paint_uv_finished() -> void:
+	if _resolve_3d_brush_gesture(false):
+		return
 	if not _paint_3d_surface_shape_state.is_empty():
 		_finish_3d_surface_shape()
 		return
@@ -11434,6 +11513,145 @@ func _on_3d_paint_uv_finished() -> void:
 	_paint_3d_last_stroke_hit.clear()
 	_end_3d_soft_brush_stroke()
 	_refresh_promoted_3d_preview_accessories()
+
+
+func _get_3d_gesture_original_image(target_id: String) -> Image:
+	for target_state in _paint_3d_gesture_before.get("paint_targets", []):
+		if str(target_state.get("target_id", "")) == target_id:
+			return _find_3d_gesture_layer_image(target_state.get("nodes", []), str(target_state.get("selected_layer_id", "")))
+	return null
+
+
+func _find_3d_gesture_layer_image(nodes: Array, layer_id: String) -> Image:
+	for node in nodes:
+		if str(node.get("id", "")) == layer_id:
+			return node.get("image")
+		var child_image := _find_3d_gesture_layer_image(node.get("children", []), layer_id)
+		if child_image:
+			return child_image
+	return null
+
+
+func _remember_3d_gesture_source() -> void:
+	var binding: Dictionary = _texture_3d_layer_coordinator.get_binding(_active_3d_binding_key)
+	var source = binding.get("source_node")
+	if is_instance_valid(source) and source.is_inside_tree():
+		for reference in _paint_3d_gesture_sources:
+			if reference.get_ref() == source:
+				return
+		_paint_3d_gesture_sources.push_back(weakref(source))
+
+
+func _validate_3d_gesture_sources() -> void:
+	for reference in _paint_3d_gesture_sources:
+		var source = reference.get_ref()
+		if not is_instance_valid(source) or not source.is_inside_tree():
+			_resolve_3d_brush_gesture(true)
+			return
+
+
+func _suspend_3d_brush_segment() -> void:
+	var state: Dictionary = _canvas.suspend_uv_triangle_stroke()
+	if not state.is_empty():
+		_paint_3d_gesture_segments[_layer_session.active_target_id] = state
+		_paint_3d_target_display_cache[_layer_session.active_target_id] = _canvas.get_display_image_reference()
+	_sync_3d_paint_texture()
+	_paint_3d_live_texture_refresh_pending = false
+
+
+func _is_3d_brush_hit_allowed(hit: Dictionary) -> bool:
+	var target_id := str(hit.get("target_id", ""))
+	var target = _layer_session.get_target(target_id)
+	var binding: Dictionary = _texture_3d_layer_coordinator.get_binding(str(hit.get("binding_key", "")))
+	if (hit.is_empty() or not target or str(binding.get("target_id", "")) != target_id
+		or target.is_node_effectively_locked(target.selected_layer_id)
+		or (_layer_session.target_lock_enabled and target_id != _layer_session.active_target_id)):
+		return false
+	if PAINT_3D_BLOCK_SHARED_UV_PAINT and not hit.has("uv_overlap_count"):
+		hit["uv_overlap_count"] = _count_3d_uv_overlaps(hit)
+	return not _shared_uv_paint_is_blocked(hit)
+
+
+func _drag_3d_brush_gesture(hit: Dictionary) -> void:
+	if not _is_3d_brush_hit_allowed(hit):
+		_paint_3d_last_stroke_hit.clear()
+		return
+	var target_id := str(hit.get("target_id", ""))
+	var changed_binding: bool = target_id != _layer_session.active_target_id or str(hit.get("binding_key", "")) != _active_3d_binding_key
+	if changed_binding:
+		_suspend_3d_brush_segment()
+		if not _route_3d_hit_to_paint_target(hit):
+			_paint_3d_last_stroke_hit.clear()
+			return
+		_remember_3d_gesture_source()
+		_paint_3d_last_stroke_hit.clear()
+	var uv: Vector2 = hit.get("texture_uv", hit.get("uv", Vector2.ZERO))
+	var triangle_uvs: PackedVector2Array = hit.get("texture_triangle_uvs", hit.get("triangle_uvs", PackedVector2Array()))
+	if not _canvas.is_uv_stroke_active():
+		var state: Dictionary = _paint_3d_gesture_segments.get(target_id, {})
+		_paint_3d_gesture_segments.erase(target_id)
+		_canvas.resume_uv_triangle_stroke(state, uv, triangle_uvs, _get_3d_gesture_original_image(target_id))
+	else:
+		_canvas.continue_uv_triangle_stroke(uv, triangle_uvs, _should_connect_3d_stroke_hits(_paint_3d_last_stroke_hit, hit))
+	_paint_3d_last_stroke_hit = hit.duplicate(true)
+
+
+# Release, cancellation and interruptions resolve one session transaction.
+# Segment handoff never emits stroke_committed or creates an undo entry.
+func _resolve_3d_brush_gesture(cancel: bool, refresh_views := true) -> bool:
+	if _paint_3d_gesture_before.is_empty():
+		return false
+	_suspend_3d_brush_segment()
+	var before := _paint_3d_gesture_before
+	var binding := _paint_3d_gesture_binding if cancel else _active_3d_binding_key
+	var final_target_id: String = _layer_session.active_target_id
+	var changed := false
+	var expanded := false
+	for target_id in _paint_3d_gesture_segments:
+		var segment: Dictionary = _paint_3d_gesture_segments[target_id]
+		var target = _layer_session.get_target(target_id)
+		var original: Image = segment.get("start_image")
+		var native_original := _get_3d_gesture_original_image(target_id)
+		if target and native_original and native_original.get_size() != target.get_selected_layer_image_reference().get_size():
+			expanded = true
+		if target and original and bool(segment.get("changed", false)) and original.get_data() != target.get_selected_layer_image_reference().get_data():
+			changed = true
+		if target:
+			_invalidate_layer_thumbnail(target_id, target.selected_layer_id)
+	_paint_3d_gesture_before = {}
+	_paint_3d_gesture_segments.clear()
+	_paint_3d_gesture_sources.clear()
+	_paint_3d_gesture_binding = ""
+	_paint_3d_last_stroke_hit.clear()
+	_paint_3d_pending_motion = false
+	_paint_3d_drawing = false
+	_end_3d_soft_brush_stroke()
+	if cancel and not refresh_views:
+		# Children have already exited the tree during dock teardown. Restore the
+		# model without rebuilding previews or querying detached transforms.
+		_layer_session.restore_state(before)
+		_active_3d_binding_key = binding
+		_texture_3d_session = _texture_3d_layer_coordinator.get_active_texture_session()
+		return true
+	if cancel or (not changed and expanded):
+		_restore_layer_session(before)
+		if not cancel:
+			_layer_session.activate_target(final_target_id)
+		_active_3d_binding_key = binding
+		_sync_canvas_to_active_layer()
+		_sync_3d_paint_view(true)
+		_promote_cached_3d_preview(_layer_session.active_target_id, binding)
+	elif changed:
+		_history.push_undo_state_owned(before)
+		_history.clear_redo()
+	_refresh_canvas_visible_pixels_state()
+	_update_history_buttons()
+	_update_selection_action_buttons()
+	_update_3d_session_status()
+	_refresh_layers_tree()
+	_set_active_3d_binding(binding, true)
+	_refresh_promoted_3d_preview_accessories()
+	return true
 
 
 func _begin_3d_surface_shape(hit: Dictionary) -> bool:
@@ -11661,6 +11879,9 @@ func _finish_3d_surface_line_at(view_position: Vector2) -> bool:
 func _should_connect_3d_stroke_hits(previous_hit: Dictionary, current_hit: Dictionary) -> bool:
 	if previous_hit.is_empty() or current_hit.is_empty():
 		return false
+	for identity in ["target_id", "binding_key", "preview_id"]:
+		if previous_hit.get(identity, "") != current_hit.get(identity, ""):
+			return false
 	if int(previous_hit.get("surface_index", -1)) != int(current_hit.get("surface_index", -1)):
 		return false
 	if int(previous_hit.get("triangle_index", -1)) == int(current_hit.get("triangle_index", -2)):
@@ -11668,6 +11889,19 @@ func _should_connect_3d_stroke_hits(previous_hit: Dictionary, current_hit: Dicti
 	var previous_positions: PackedVector3Array = previous_hit.get("triangle_positions", PackedVector3Array())
 	var current_positions: PackedVector3Array = current_hit.get("triangle_positions", PackedVector3Array())
 	if not _3d_triangles_share_edge(previous_positions, current_positions):
+		return false
+	var previous_uvs: PackedVector2Array = previous_hit.get("texture_triangle_uvs", previous_hit.get("triangle_uvs", PackedVector2Array()))
+	var current_uvs: PackedVector2Array = current_hit.get("texture_triangle_uvs", current_hit.get("triangle_uvs", PackedVector2Array()))
+	if previous_uvs.size() != 3 or current_uvs.size() != 3:
+		return false
+	var continuous_vertices := 0
+	for left in range(3):
+		for right in range(3):
+			if previous_positions[left].distance_squared_to(current_positions[right]) <= 0.00000001:
+				if previous_uvs[left].distance_squared_to(current_uvs[right]) <= 0.0000000001:
+					continuous_vertices += 1
+				break
+	if continuous_vertices < 2:
 		return false
 	if not _canvas:
 		return true
@@ -11949,6 +12183,8 @@ func _delete_selection() -> void:
 
 
 func _cancel_selection_or_preview() -> void:
+	if _resolve_3d_brush_gesture(true):
+		return
 	if not _canvas:
 		return
 	if _cancel_3d_surface_shape("Canceled 3D shape preview.", true):
@@ -12335,6 +12571,7 @@ func _resize_canvas() -> void:
 
 
 func _undo() -> void:
+	_resolve_3d_brush_gesture(false)
 	_prepare_layer_operation()
 	if not _history.can_undo():
 		return
@@ -12361,6 +12598,7 @@ func _undo() -> void:
 
 
 func _redo() -> void:
+	_resolve_3d_brush_gesture(false)
 	if not _history.can_redo():
 		return
 	var entry: Variant = _history.pop_redo()
@@ -13760,6 +13998,7 @@ func _request_session_transition(
 	label := "",
 	mesh: Node3D = null
 ) -> bool:
+	_resolve_3d_brush_gesture(false)
 	if (
 		not _texture_3d_session
 		or not _texture_3d_session.has_active_session()
@@ -13864,6 +14103,7 @@ func _reset_3d_scene_sync_state() -> void:
 
 
 func _clear_3d_texture_session_state(restore_workspace := true) -> void:
+	_resolve_3d_brush_gesture(true)
 	_cancel_3d_layer_import()
 	if _save_3d_batch_dialog:
 		_save_3d_batch_dialog.hide()
@@ -14178,6 +14418,7 @@ func _cancel_missing_3d_texture() -> void:
 
 
 func _stop_3d_texture_session() -> void:
+	_resolve_3d_brush_gesture(false)
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
 		return
 	if _texture_save_stage != TextureSaveStage.IDLE:
@@ -15192,6 +15433,7 @@ func _sync_3d_paint_texture(texture_image: Image = null) -> void:
 
 
 func _clear_3d_paint_mesh() -> void:
+	_resolve_3d_brush_gesture(true)
 	_cancel_3d_surface_shape("", false, false)
 	_cancel_3d_rotation_gizmo_drag(false)
 	_set_3d_rotation_gizmo_hover_axis(-1)
@@ -16680,6 +16922,9 @@ func _make_3d_stage_grid_mesh(stage_size: float) -> ImmediateMesh:
 
 func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		if _resolve_3d_brush_gesture(true):
+			_paint_3d_view.accept_event()
+			return
 		if _cancel_3d_surface_shape("Canceled 3D shape preview.", true):
 			_paint_3d_view.accept_event()
 			return
@@ -16717,13 +16962,15 @@ func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
 					_paint_3d_drawing = _on_3d_paint_uv_started(hit)
 					_paint_3d_view.accept_event()
 			elif _paint_3d_drawing:
-				_paint_3d_drawing = false
 				if not _paint_3d_surface_shape_state.is_empty():
 					_paint_3d_pending_motion = false
 					_finish_3d_surface_shape_at(event.position)
 				else:
+					_paint_3d_pending_motion_position = event.position
+					_paint_3d_pending_motion = true
 					_process_pending_3d_pointer_motion()
 					_on_3d_paint_uv_finished()
+				_paint_3d_drawing = false
 				_paint_3d_view.accept_event()
 		elif event.pressed and gizmo_axis >= 0 and event.button_index in [MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE]:
 			_paint_3d_view.accept_event()
@@ -16772,6 +17019,10 @@ func _on_3d_paint_view_gui_input(event: InputEvent) -> void:
 		elif _paint_3d_drawing:
 			_paint_3d_pending_motion_position = event.position
 			_paint_3d_pending_motion = true
+			# Do not discard intervening blocked/missed samples when motion events
+			# arrive faster than frames. Raster display uploads remain coalesced.
+			if not _paint_3d_gesture_before.is_empty():
+				_process_pending_3d_pointer_motion()
 			_paint_3d_view.accept_event()
 		elif _paint_3d_orbiting:
 			_hide_3d_brush_preview()
@@ -16824,12 +17075,12 @@ func _process_pending_3d_pointer_motion() -> void:
 			else:
 				_paint_3d_last_stroke_hit.clear()
 		return
+	if _paint_3d_drawing:
+		_on_3d_paint_uv_dragged(hit)
 	_update_3d_brush_preview(hit)
 	_update_3d_eyedropper_loupe(_paint_3d_pending_motion_position, hit)
 	_update_2d_hover_from_3d_hit(hit)
 	_update_3d_paint_cursor(true)
-	if _paint_3d_drawing:
-		_on_3d_paint_uv_dragged(hit)
 
 
 func _get_3d_mouse_navigation_mode(event: InputEventMouseButton) -> int:
@@ -17754,6 +18005,8 @@ func _disconnect_editor_selection_changed() -> void:
 
 
 func _on_editor_selection_changed() -> void:
+	if not _paint_3d_gesture_before.is_empty():
+		return
 	if not _canvas_mode_3d or _syncing_editor_selection_from_target:
 		return
 	if not _texture_3d_session or not _texture_3d_session.has_active_session():
@@ -18884,6 +19137,7 @@ func _shortcut_is_scoped_to_gddraw() -> bool:
 
 func _select_tool(tool: int) -> void:
 	if _canvas and tool != _canvas.active_tool:
+		_resolve_3d_brush_gesture(false)
 		_cancel_3d_surface_shape("Canceled 3D shape preview because the tool changed.", true)
 	if tool == GDDrawCanvasControl.ToolMode.LINE or tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE:
 		_active_shape_tool = tool

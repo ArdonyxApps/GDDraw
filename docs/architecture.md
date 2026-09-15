@@ -1,5 +1,12 @@
 # GDDraw Architecture
 
+The next release is planned in
+[`0.4.0-release-plan.md`](0.4.0-release-plan.md). It defines the upcoming
+cross-object painting, right-side panel host, palettes, gradients, and selection
+sizing work. The cross-object gesture milestone is implemented on the 0.4.0
+branch, with native editor acceptance checks still pending; the other milestones
+remain planned.
+
 This document is a compact handoff for future work on the GDDraw Godot editor plugin.
 
 The active 0.3.0 layer-system design and phased migration plan live in
@@ -189,7 +196,8 @@ Current view behavior:
 - The dock writes simple canvas properties directly for active tool, brush/preset settings, fill mode, mirror mode, view preferences, grid visibility, and grid settings.
 - Canvas image mutation methods return or emit the previous image so dock-level undo remains centralized.
 - While a 3D texture session is active, canvas image changes refresh the live preview and recompute dirty state from exact dimensions and RGBA8 bytes. Tool/view/hover/selection-only changes do not affect it.
-- A 3D drag remains one canvas/history stroke, but interpolation between samples is continuity-gated in the dock. Same-triangle hits connect; edge-adjacent triangles connect only across a locally continuous UV boundary. Ray misses, surface changes, nonadjacent triangles, and large UV seams restart with a single stamp so unrelated texture regions are never bridged.
+- A coordinated 3D brush/eraser gesture owns one immutable complete-session history snapshot. The canvas suspends/resumes raster segments without emitting history; the dock retains each target's original image and one-pass coverage across revisits. Binding changes, misses, blocked destinations, and incompatible geometric/UV edges restart interpolation at the accepted hit. Every received held-motion sample is routed, while display uploads remain coalesced. Target promotion reuses prepared preview meshes, materials, indexes, and display caches. Layers-tree and scene-selection synchronization are deferred until release; fill/eyedropper retain single-click behavior and shapes retain their surface restrictions.
+- Release commits one changed gesture; no-ops preserve history and native layer bounds. Escape, application focus loss, source loss, hidden/cleared previews, and session teardown cancel the entire gesture. Tool/layer/layout changes, undo/redo, Stop Editing, and document-transition guards resolve it before replacing state. Cancellation restores pixels, native bounds, selected layers, dirty state, and routing together. History restoration refreshes changed inactive previews even when the active target ID stays the same. See the release-plan checkpoint for automated evidence, performance limits, and remaining native checks.
 - The 3D Line, Rectangle, and Ellipse tools capture their starting mesh/material surface, triangle, mesh/texture UV, deterministic image pixel, foreground/background colors, and shape settings. Their endpoint stays valid only on the same surface and geometry-plus-UV-connected island; seams and disconnected geometry cancel with a status reason. A ray-selected, spatially distinct mirrored piece remains usable with the existing shared-UV warning, while coincident interior mappings that the ray cannot disambiguate are rejected. The canvas owns the temporary raster preview and delegates commit to each ordinary 2D shape path, so preview pixels never enter the editable image and a changed result emits exactly one history event.
 - Switching 2D, 3D, Split Horizontal, and Split Vertical changes layout only. It never detects, starts, ends, or replaces a texture session.
 - Editor scene-tab changes also do not own the texture-session lifecycle. The session retains its mesh snapshot, material, texture identity, UV/cache data, source label, and private preview transform when the original source node leaves the active SceneTree or is freed. Painting and normal texture saving continue without a live source scene; Save As updates the retained private material when no scene property remains to assign.

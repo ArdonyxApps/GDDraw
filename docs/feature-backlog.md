@@ -1,5 +1,12 @@
 # GDDraw Feature Backlog
 
+## Current release target: 0.4.0
+
+The accepted scope and implementation gates are recorded in
+[`0.4.0-release-plan.md`](0.4.0-release-plan.md): continuous cross-object
+painting, reusable right-side docking with Palettes, a gradient tool, and exact
+selection sizing. The older release sections below are historical references.
+
 This document records shipped milestones, the planned `0.2.0` development
 scope, known limitations, and work being considered for later releases.
 

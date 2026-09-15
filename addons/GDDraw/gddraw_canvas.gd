@@ -1029,7 +1029,7 @@ func end_uv_stroke() -> void:
 	_end_stroke()
 
 
-func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array) -> void:
+func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array, original_image: Image = null) -> void:
 	if not editing_enabled and active_tool != ToolMode.EYEDROPPER:
 		return
 	var pixel := _uv_to_image_pixel(uv)
@@ -1045,7 +1045,9 @@ func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array) -> 
 	if not _is_stroke_tool():
 		return
 	_begin_live_stroke_state()
-	_stroke_start_image = get_image_copy()
+	# Native layer bounds can be smaller than the editable document workspace.
+	# In that case raster coverage needs a workspace-sized baseline of its own.
+	_stroke_start_image = original_image if original_image and original_image.get_size() == _image.get_size() else get_image_copy()
 	_begin_stroke_coverage()
 	_last_pixel = pixel
 	_stamp_uv_3d(_last_pixel, triangle_uvs)
@@ -1068,6 +1070,42 @@ func continue_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array, 
 
 func end_uv_triangle_stroke() -> void:
 	_end_stroke()
+
+
+func is_uv_stroke_active() -> bool:
+	return _is_drawing
+
+
+# Transfer segment raster state without emitting a history event. The caller
+# owns the encompassing gesture and must eventually commit or restore it.
+func suspend_uv_triangle_stroke() -> Dictionary:
+	if not _is_drawing:
+		return {}
+	_flush_live_composite_refresh()
+	var state := {
+		"start_image": _stroke_start_image,
+		"coverage": _stroke_coverage,
+		"changed": _stroke_has_changes,
+	}
+	_is_drawing = false
+	_stroke_start_image = null
+	_stroke_coverage = PackedFloat32Array()
+	_stroke_has_changes = false
+	return state
+
+
+func resume_uv_triangle_stroke(state: Dictionary, uv: Vector2, triangle_uvs: PackedVector2Array, previous_image: Image = null) -> void:
+	if state.is_empty():
+		begin_uv_triangle_stroke(uv, triangle_uvs, previous_image)
+		return
+	_begin_live_stroke_state()
+	_stroke_start_image = state["start_image"]
+	_stroke_coverage = state["coverage"]
+	_stroke_has_changes = bool(state["changed"])
+	# Release the transferred packed array before stamping to avoid a full-size
+	# copy-on-write allocation on every return to an earlier target.
+	state.clear()
+	continue_uv_triangle_stroke(uv, triangle_uvs, false)
 
 
 # Pixel-endpoint shape entry points shared by private 3D surface tools. They use

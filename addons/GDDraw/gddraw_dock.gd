@@ -1,6 +1,8 @@
 @tool
 extends VBoxContainer
 
+const PanelHost := preload("res://addons/GDDraw/gddraw_panel_host.gd")
+
 class MeshDropHost:
 	extends Control
 
@@ -547,6 +549,7 @@ enum MenuCommand {
 	VIEW_MODE_SPLIT_HORIZONTAL,
 	VIEW_MODE_SPLIT_VERTICAL,
 	VIEW_LAYERS_PANEL,
+	VIEW_RESET_PANEL_LAYOUT,
 	VIEW_GRID_2D,
 	VIEW_GRID_3D,
 	VIEW_SNAP_TO_GRID,
@@ -636,6 +639,7 @@ var _canvas_split: SplitContainer
 var _canvas_2d_host: Control
 var _canvas_3d_host: Control
 var _canvas: Control
+var _panel_host: PanelContainer
 var _layers_panel_root: PanelContainer
 var _layers_panel_content: VBoxContainer
 var _layers_panel_toggle: Button
@@ -1158,12 +1162,6 @@ func _load_split_view_preferences() -> void:
 	_split_vertical_ratio = clampf(float(editor_settings.get_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_RATIO_KEY, 0.5)), 0.2, 0.8)
 	_split_vertical = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_KEY, false))
 	_linked_view_enabled = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, LINKED_VIEW_KEY, true))
-	_layers_panel_expanded = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, LAYERS_PANEL_EXPANDED_KEY, false))
-	_layers_panel_width = clampf(float(editor_settings.get_project_metadata(
-		SETTINGS_SECTION,
-		LAYERS_PANEL_WIDTH_KEY,
-		LAYERS_PANEL_DEFAULT_WIDTH
-	)), LAYERS_PANEL_MIN_WIDTH, LAYERS_PANEL_MAX_WIDTH)
 	_preview_light_enabled = bool(editor_settings.get_project_metadata(SETTINGS_SECTION, PREVIEW_LIGHT_ENABLED_KEY, true))
 	_preview_light_intensity_value = _clamp_preview_light_intensity(float(editor_settings.get_project_metadata(
 		SETTINGS_SECTION,
@@ -1183,8 +1181,6 @@ func _save_split_view_preferences() -> void:
 	editor_settings.set_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_RATIO_KEY, _split_vertical_ratio)
 	editor_settings.set_project_metadata(SETTINGS_SECTION, SPLIT_VERTICAL_KEY, _split_vertical)
 	editor_settings.set_project_metadata(SETTINGS_SECTION, LINKED_VIEW_KEY, _linked_view_enabled)
-	editor_settings.set_project_metadata(SETTINGS_SECTION, LAYERS_PANEL_EXPANDED_KEY, _layers_panel_expanded)
-	editor_settings.set_project_metadata(SETTINGS_SECTION, LAYERS_PANEL_WIDTH_KEY, _layers_panel_width)
 
 
 func _save_preview_light_preferences() -> void:
@@ -1266,6 +1262,8 @@ func _draw() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if _panel_host and _panel_host.owns_chrome_focus():
+		return
 	_ensure_helpers()
 	if not _layers_rename_context.is_empty() and event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
@@ -1858,6 +1856,8 @@ func _build_menu_bar() -> void:
 	_view_menu.add_separator()
 	_view_menu.add_check_item("Layers Panel", MenuCommand.VIEW_LAYERS_PANEL)
 	_view_menu.add_separator()
+	_view_menu.add_item("Reset Panel Layout", MenuCommand.VIEW_RESET_PANEL_LAYOUT)
+	_view_menu.add_separator()
 	_view_menu.add_check_item("Show 2D Grid", MenuCommand.VIEW_GRID_2D)
 	_view_menu.add_check_item("Show 3D Grid", MenuCommand.VIEW_GRID_3D)
 	_view_menu.add_check_item("Snap to Grid", MenuCommand.VIEW_SNAP_TO_GRID)
@@ -2083,8 +2083,9 @@ func _on_menu_command(command_id: int) -> void:
 		MenuCommand.VIEW_MODE_SPLIT_VERTICAL:
 			_set_split_layout(true)
 		MenuCommand.VIEW_LAYERS_PANEL:
-			if _layers_panel_toggle:
-				_layers_panel_toggle.button_pressed = not _layers_panel_expanded
+			if _panel_host: _panel_host.toggle_panel("layers")
+		MenuCommand.VIEW_RESET_PANEL_LAYOUT:
+			if _panel_host: _panel_host.reset_layout()
 		MenuCommand.VIEW_GRID_2D:
 			_on_grid_button_toggled(not _canvas.show_grid)
 		MenuCommand.VIEW_GRID_3D:
@@ -3069,6 +3070,7 @@ func _build_layer_workspace(parent: Container) -> void:
 		if _layers_panel_expanded
 		else SplitContainer.DRAGGER_HIDDEN_COLLAPSED
 	)
+	_workspace_layers_split.add_theme_constant_override("autohide", 0)
 	_workspace_layers_split.dragged.connect(_on_layers_panel_dragged)
 	parent.add_child(_workspace_layers_split)
 	_build_canvas_region(_workspace_layers_split)
@@ -3077,85 +3079,16 @@ func _build_layer_workspace(parent: Container) -> void:
 
 
 func _build_layers_panel(parent: Container) -> void:
-	_layers_panel_root = PanelContainer.new()
-	_layers_panel_root.name = "Layers Panel"
-	_layers_panel_root.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	# The root also owns the narrow toggle rail, so it must not draw the Layers
-	# surface outline around both regions.
-	_layers_panel_root.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
-	_layers_panel_root.custom_minimum_size.x = (
-		LAYERS_PANEL_MIN_WIDTH if _layers_panel_expanded else LAYERS_PANEL_COLLAPSED_WIDTH
-	)
-	parent.add_child(_layers_panel_root)
-
-	var panel_row := HBoxContainer.new()
-	panel_row.add_theme_constant_override("separation", 4)
-	_layers_panel_root.add_child(panel_row)
-	var toggle_rail := VBoxContainer.new()
-	toggle_rail.custom_minimum_size.x = LAYERS_PANEL_COLLAPSED_WIDTH - 4.0
-	toggle_rail.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	panel_row.add_child(toggle_rail)
-	var rail_divider := HSeparator.new()
-	rail_divider.name = "Layers Rail Divider"
-	rail_divider.custom_minimum_size.y = 6
-	toggle_rail.add_child(rail_divider)
-	_layers_panel_toggle = _make_icon_button(
-		"layers_0.svg",
-		"Show or hide the shared Layers panel",
-		true,
-		"layers_1.svg"
-	)
-	_layers_panel_toggle.set_pressed_no_signal(_layers_panel_expanded)
-	_update_toggle_button_icon(_layers_panel_toggle)
-	_layers_panel_toggle.toggled.connect(_on_layers_panel_toggled)
-	toggle_rail.add_child(_layers_panel_toggle)
-
+	_panel_host = PanelHost.new()
+	_layers_panel_root = _panel_host
 	_layers_content_background_color = _get_layers_tab_background_color()
-	_layers_panel_surface = PanelContainer.new()
-	_layers_panel_surface.name = "Layers Expanded Surface"
-	_layers_panel_surface.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_layers_panel_surface.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	var panel_surface_style := _make_layers_panel_outline_style()
-	panel_surface_style.bg_color = _layers_content_background_color
-	# Keep every child inside the perimeter so controls never paint over it.
-	panel_surface_style.set_content_margin(SIDE_LEFT, LAYERS_PANEL_BORDER_WIDTH)
-	panel_surface_style.set_content_margin(SIDE_TOP, LAYERS_PANEL_BORDER_WIDTH)
-	panel_surface_style.set_content_margin(SIDE_RIGHT, LAYERS_PANEL_BORDER_WIDTH)
-	panel_surface_style.set_content_margin(SIDE_BOTTOM, LAYERS_PANEL_BORDER_WIDTH)
-	_layers_panel_surface.add_theme_stylebox_override("panel", panel_surface_style)
-	_layers_panel_surface.visible = _layers_panel_expanded
-	panel_row.add_child(_layers_panel_surface)
-
+	_panel_host.surface_color = _layers_content_background_color
+	_panel_host.outline_color = _get_layers_outline_color()
+	parent.add_child(_panel_host)
+	_layers_panel_toggle = _make_icon_button("layers_0.svg", "Layers", true, "layers_1.svg")
 	_layers_panel_content = VBoxContainer.new()
 	_layers_panel_content.name = "Layers Panel Content"
-	_layers_panel_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_layers_panel_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_layers_panel_content.add_theme_constant_override("separation", 3)
-	_layers_panel_content.visible = _layers_panel_expanded
-	_layers_panel_surface.add_child(_layers_panel_content)
-
-	_layers_tab_strip = PanelContainer.new()
-	_layers_tab_strip.name = "Layers Tab Strip"
-	_layers_tab_strip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var tab_strip_style := StyleBoxFlat.new()
-	tab_strip_style.bg_color = _get_layers_outline_color()
-	_layers_tab_strip.add_theme_stylebox_override("panel", tab_strip_style)
-	_layers_panel_content.add_child(_layers_tab_strip)
-	var tab_strip_row := HBoxContainer.new()
-	tab_strip_row.add_theme_constant_override("separation", 0)
-	_layers_tab_strip.add_child(tab_strip_row)
-	_layers_panel_tabs = TabBar.new()
-	_layers_panel_tabs.name = "Layers Dock Tabs"
-	_layers_panel_tabs.add_tab("Layers")
-	_layers_panel_tabs.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_layers_panel_tabs.custom_minimum_size.y = 26
-	_layers_panel_tabs.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
-	tab_strip_row.add_child(_layers_panel_tabs)
-	var tab_strip_fill := Control.new()
-	tab_strip_fill.name = "Layers Tab Strip Fill"
-	tab_strip_fill.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	tab_strip_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	tab_strip_row.add_child(tab_strip_fill)
 
 	var selected_toolbar := PanelContainer.new()
 	selected_toolbar.name = "Selected Layer Toolbar"
@@ -3280,6 +3213,16 @@ func _build_layers_panel(parent: Container) -> void:
 	_layers_delete_button.offset_bottom = TOOL_BUTTON_SIZE.y * 0.5
 
 	_build_layers_context_menu()
+	_panel_host.register_panel("layers", "Layers", _layers_panel_toggle.icon,
+		_layers_panel_content, Vector2(240, 150), _layers_panel_toggle)
+	_panel_host.restore_layout(_get_editor_settings(), _layers_panel_width, _layers_panel_expanded)
+	_panel_host.layout_changed.connect(_on_panel_layout_changed)
+	var group: Dictionary = _panel_host.group_for_panel("layers")
+	var view: Control = _panel_host.group_views[group.id]
+	_layers_panel_surface = view
+	_layers_tab_strip = view.strip
+	_layers_panel_tabs = view.tabs
+	_on_panel_layout_changed()
 
 
 func _make_layers_panel_outline_style() -> StyleBoxFlat:
@@ -3313,21 +3256,23 @@ func _make_layers_tree_panel_style() -> StyleBoxFlat:
 
 
 func _on_layers_panel_toggled(expanded: bool) -> void:
-	_layers_panel_expanded = expanded
-	if _layers_panel_content:
-		_layers_panel_content.visible = expanded
-		_layers_panel_content.get_parent().visible = expanded
-	if _layers_panel_root:
-		_layers_panel_root.custom_minimum_size.x = (
-			LAYERS_PANEL_MIN_WIDTH if expanded else LAYERS_PANEL_COLLAPSED_WIDTH
-		)
-	if _workspace_layers_split:
-		_workspace_layers_split.dragger_visibility = (
-			SplitContainer.DRAGGER_VISIBLE
-			if expanded
-			else SplitContainer.DRAGGER_HIDDEN_COLLAPSED
-		)
-	_save_split_view_preferences()
+	if not _panel_host: return
+	if expanded: _panel_host.activate_panel("layers")
+	else: _panel_host.collapse_group(_panel_host.group_for_panel("layers").id)
+
+
+func _on_panel_layout_changed() -> void:
+	_layers_panel_expanded = _panel_host.is_panel_active("layers")
+	_layers_panel_width = _panel_host.dock_width
+	var group: Dictionary = _panel_host.group_for_panel("layers")
+	var view: Control = _panel_host.group_views[group.id]
+	_layers_panel_surface = view
+	_layers_tab_strip = view.strip
+	_layers_panel_tabs = view.tabs
+	_update_toggle_button_icon(_layers_panel_toggle)
+	_workspace_layers_split.dragger_visibility = (
+		SplitContainer.DRAGGER_VISIBLE if _panel_host.has_visible_groups()
+		else SplitContainer.DRAGGER_HIDDEN_COLLAPSED)
 	_sync_menu_state()
 	call_deferred("_apply_layers_panel_width")
 
@@ -3393,19 +3338,21 @@ func _apply_layers_panel_width() -> void:
 	if total_width <= 0.0:
 		return
 	var separation := float(_workspace_layers_split.get_theme_constant("separation"))
+	if _workspace_layers_split.dragger_visibility == SplitContainer.DRAGGER_HIDDEN_COLLAPSED:
+		separation = 0.0
 	var usable_width := maxf(0.0, total_width - separation)
 	var desired_width := LAYERS_PANEL_COLLAPSED_WIDTH
-	if _layers_panel_expanded:
-		var maximum := minf(LAYERS_PANEL_MAX_WIDTH, maxf(LAYERS_PANEL_MIN_WIDTH, usable_width - 360.0))
+	if _panel_host and _panel_host.has_visible_groups():
+		var maximum := maxf(LAYERS_PANEL_MIN_WIDTH, usable_width - 360.0)
 		desired_width = clampf(_layers_panel_width, LAYERS_PANEL_MIN_WIDTH, maximum)
 	_workspace_layers_split.split_offset = roundi(usable_width * 0.5 - desired_width)
 
 
 func _on_layers_panel_dragged(_offset: int) -> void:
-	if not _layers_panel_expanded or not _layers_panel_root:
+	if not _panel_host or not _panel_host.has_visible_groups():
 		return
-	_layers_panel_width = clampf(_layers_panel_root.size.x, LAYERS_PANEL_MIN_WIDTH, LAYERS_PANEL_MAX_WIDTH)
-	_save_split_view_preferences()
+	_layers_panel_width = _layers_panel_root.size.x
+	_panel_host.set_dock_width(_layers_panel_width)
 
 
 func _refresh_layers_tree(preferred_selection: Dictionary = {}) -> void:

@@ -3,9 +3,11 @@
 The next release is planned in
 [`0.4.0-release-plan.md`](0.4.0-release-plan.md). It defines the upcoming
 cross-object painting, right-side panel host, palettes, gradients, and selection
-sizing work. The cross-object gesture milestone is implemented on the 0.4.0
-branch, with native editor acceptance checks still pending; the other milestones
-remain planned.
+sizing work. The cross-object gesture milestone has passed the user's native
+testing, including the larger Ship model. The reusable right-side dock is
+implemented with Layers as its first production client; its native-editor
+interaction checklist remains open. Palettes, gradients, and exact selection
+sizing remain planned.
 
 This document is a compact handoff for future work on the GDDraw Godot editor plugin.
 
@@ -22,6 +24,10 @@ Unless otherwise noted, source paths in this document are relative to `addons/GD
 
 - `GDDraw.gd` is the `EditorPlugin` entry point.
 - `gddraw_dock.gd` builds and owns the editor dock UI.
+- `gddraw_panel_host.gd` owns registered right-side panels, rail activation,
+  placement, project layout metadata, validation, migration, and reset.
+- `gddraw_panel_group.gd` owns tab chrome, overflow navigation, placement menus,
+  and panel drag feedback; it has no artwork or history responsibilities.
 - `gddraw_canvas.gd` owns the image data, canvas view state, drawing behavior, and rendering.
 - `gddraw_history.gd` owns the dock undo/redo image stacks.
 - `gddraw_layer_node.gd` owns recursive paint-layer/group state and deep snapshots.
@@ -238,6 +244,71 @@ Current 3D preview navigation follows Godot's default primary mouse conventions:
 - The UV toggle exclusively controls full topology display and applies to both panes: 2D UV edges/vertices and the 3D mesh wire overlay appear and disappear together. Linked-hover boundaries remain a distinct lightweight location cue.
 - Linked hover is view-only: it changes overlay drawing and preview meshes without touching RGBA8 pixels, selection masks, or history. Disabling the link or leaving Split View clears both directions immediately.
 - 2D-to-3D island selection still inherits the documented ambiguity for overlapping UV shells because the current UV lookup uses camera distance as a visibility proxy.
+
+## Reusable right-side panels (0.4.0 milestone 2)
+
+`gddraw_dock.gd` builds the Layers controls and connects their model actions once,
+then registers stable ID `layers`, title, icon, content control, and minimum
+content size with `gddraw_panel_host.gd`. The existing Layers icon still uses the
+dock's bounded icon-import recovery. No palette client or palette icon is
+registered yet. Additional built-in clients use the same registration method;
+duplicate IDs and duplicate content ownership are rejected.
+
+The host remains the right child of the workspace split, outside the four
+2D/3D canvas arrangements. Both outer split children expand, so a stored panel
+width actually controls divider geometry. Host-owned groups use native
+horizontal/vertical split containers with always-visible, 10-pixel handles.
+The rail stays outside the scrollable group area. When minimum-size groups
+cannot fit, horizontal/vertical scrolling preserves access to their controls;
+the rail itself can scroll vertically in a short dock.
+
+The version-1 `GDDraw/right_panel_layout` project metadata contains `width` and
+a `root` tree. A group stores `id`, ordered panel `tabs`, `active`, and `visible`.
+A split stores `axis`, normalized `ratio`, `first`, and `second`. Collapse keeps
+the group and ratios in that tree. Clicking an inactive rail icon selects and
+opens its group; clicking an active icon collapses it. View > Reset Panel Layout
+restores one open tab group and the default 280-pixel width. Each group's ⋮ menu
+also exposes reset, collapse, split directions, and moving to other groups.
+
+Registration precedes restoration. Validation bounds recursion and group/tab
+counts, rejects duplicate IDs and invalid types/nonfinite numbers, and normalizes
+finite ratios to 0.1–0.9. Unknown panel IDs are dropped from otherwise usable
+groups; an unknown active tab selects the first known tab. Missing registered
+clients are appended to the first group. Invalid or empty branches fall back
+to one safe group containing every registered client. Missing/invalid layouts
+migrate the legacy `layers_panel_width` (280–520) and `layers_panel_expanded`
+preferences. Loading is read-only; the next layout operation writes the new
+metadata key. The old keys are retained but no longer written. Layout data is
+outside the replaceable addon and outside document/history serialization.
+
+Panel lifetime is separate from group/split lifetime. The host parks and
+reparents the same content subtrees while rebuilding placement containers;
+it never reconstructs Layers, TreeItems, client models, or their signal wiring.
+It captures visible clients' scrollbar values (including native Tree bars)
+before placement changes and restores them after container layout. Hidden
+clients keep their saved scroll state. Generation checks and weak split
+references make superseded deferred work harmless. Existing client selection,
+text/caret, layer-session state, and history owners remain intact.
+
+Group tabs use a native TabBar inside a clipped ScrollContainer, with explicit
+28×28 previous/next buttons. Those buttons select adjacent tabs and reveal the
+complete active tab; long titles are bounded to the available width and retain
+full-title tooltips. Arrows disable at the first/last tab and disappear when all
+tabs fit. Left/Right and Home/End work through keyboard focus. Layout chrome
+does not route drawing shortcuts; Layers content retains its existing shortcuts.
+
+Panel drags carry both a host instance token and stable panel ID. A temporary
+overlay receives these drags over client controls such as Tree, without changing
+their ordinary layer/asset drag handlers. The tab strip/center merges tabs;
+left/right/top/bottom drop zones create splits and show a highlighted target.
+Drop/menu mutations defer until native input dispatch completes. The overlay
+disappears after drag completion or cancellation.
+
+`tests/test_panel_host.gd` supplies temporary clients and regression coverage.
+Its `--demo` mode opens a standalone full-dock review fixture; `--screenshot`
+renders that fixture to `res://panel_review.png` and exits. Run those modes in
+a disposable project. Automated GUI event dispatch and renderer screenshots do
+not replace the native-editor interaction checklist in the release plan.
 
 ## UI Guidelines
 

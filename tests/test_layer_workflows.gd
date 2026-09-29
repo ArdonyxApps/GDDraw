@@ -34,6 +34,12 @@ func click_tree(dock: Control, id: String, shift := false, ctrl := false, right 
 	root.push_input(event)
 	await settle()
 func _run():
+	if "--rename-only" in OS.get_cmdline_user_args():
+		root.size = Vector2i(1200, 800)
+		await rename_reclick_checks()
+		print("Layer rename: %d assertions, %d failures" % [assertions, failures])
+		quit(1 if failures else 0)
+		return
 	var dock := Dock.new()
 	root.add_child(dock)
 	dock.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -132,8 +138,76 @@ func _run():
 	await gradient_context_checks(dock)
 	dock.queue_free()
 	await settle()
+	await rename_reclick_checks()
 	print("Layer workflows: %d assertions, %d failures" % [assertions, failures])
 	quit(1 if failures else 0)
+
+func rename_reclick_checks():
+	var dock := Dock.new()
+	root.add_child(dock)
+	dock.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	await settle()
+	dock._layer_session.initialize_2d(Vector2i(32, 32))
+	var target = dock._layer_session.get_active_target()
+	var first: String = target.selected_layer_id
+	target.add_paint_layer("Other")
+	dock._sync_canvas_to_active_layer()
+	dock._refresh_layers_tree()
+	dock._panel_host.activate_panel("layers")
+	await settle()
+	var tree = dock._layers_tree
+	var item: TreeItem = dock._find_layers_tree_item(tree.get_root(), "paint", target.target_id, first)
+	tree.deselect_all()
+	item.select(0)
+	dock._on_layers_tree_multi_selected(item, 0, true)
+	await settle()
+	check(tree.stable_selected_context.get("node_id") == first, "multi-selection updates second-click identity when selecting another layer")
+	item = dock._find_layers_tree_item(tree.get_root(), "paint", target.target_id, first)
+	check(not item.is_editable(0), "first selection does not start rename")
+	var event := InputEventMouseButton.new()
+	event.button_index = MOUSE_BUTTON_LEFT
+	event.position = tree.get_item_area_rect(item, 0).get_center()
+	event.pressed = true
+	tree._gui_input(event)
+	event.pressed = false
+	tree._gui_input(event)
+	await settle()
+	item = dock._find_layers_tree_item(tree.get_root(), "paint", target.target_id, first)
+	check(item.is_editable(0) and dock._layers_rename_context.get("node_id") == first, "second click starts native inline rename after selecting another layer")
+	dock._cancel_layer_inline_rename()
+	await settle()
+	item = dock._find_layers_tree_item(tree.get_root(), "paint", target.target_id, first)
+	event.position = tree.get_item_area_rect(item, 0).get_center()
+	event.ctrl_pressed = true
+	event.pressed = true
+	tree._gui_input(event)
+	event.pressed = false
+	tree._gui_input(event)
+	await settle()
+	check(dock._layers_rename_context.is_empty(), "Ctrl-click does not start rename")
+	event.ctrl_pressed = false
+	event.pressed = true
+	tree._gui_input(event)
+	var motion := InputEventMouseMotion.new()
+	motion.position = event.position + Vector2(12, 0)
+	tree._gui_input(motion)
+	event.pressed = false
+	tree._gui_input(event)
+	await settle()
+	check(dock._layers_rename_context.is_empty(), "drag movement cancels second-click rename")
+	dock._select_tool(Canvas.ToolMode.TEXT)
+	dock._canvas.create_text_draft(Rect2i(0, 0, 32, 32), "Name")
+	dock._canvas.commit_text_draft()
+	await settle()
+	target = dock._layer_session.get_active_target()
+	var text_id: String = target.selected_layer_id
+	dock._panel_host.activate_panel("layers")
+	dock._layers_multi_contexts.clear()
+	dock._on_layers_tree_row_reclicked({"kind": "paint", "target_id": target.target_id, "node_id": text_id})
+	await settle()
+	check(dock._layers_rename_context.get("node_id") == text_id, "Text layer second click also starts rename")
+	dock._cancel_layer_inline_rename()
+	dock.free()
 
 func selection_checks(dock: Control):
 	dock._prepare_layer_operation()

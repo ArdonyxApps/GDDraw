@@ -3,9 +3,10 @@ class_name GDDrawLayerDocument
 extends RefCounted
 
 const LayerSession := preload("res://addons/GDDraw/gddraw_layer_session.gd")
+const GradientRaster := preload("res://addons/GDDraw/gddraw_gradient.gd")
 
 const FORMAT_NAME := "gddraw-layered-document"
-const FORMAT_VERSION := 2
+const FORMAT_VERSION := 4
 const MANIFEST_PATH := "manifest.json"
 const MAX_MANIFEST_BYTES := 4 * 1024 * 1024
 const MAX_IMAGE_BYTES := 256 * 1024 * 1024
@@ -85,7 +86,7 @@ static func load_state(path: String) -> Dictionary:
 	if str(manifest.get("format", "")) != FORMAT_NAME:
 		reader.close()
 		return _result(false, "This archive is not a GDDraw layered document.")
-	if int(manifest.get("format_version", 0)) not in [1, FORMAT_VERSION]:
+	if int(manifest.get("format_version", 0)) not in [1, 2, 3, FORMAT_VERSION]:
 		reader.close()
 		return _result(false, "This layered document version is not supported.")
 	var session_manifest: Variant = manifest.get("session", null)
@@ -163,6 +164,8 @@ static func _build_archive(session) -> Dictionary:
 		"session": session_manifest,
 	}
 	files[MANIFEST_PATH] = JSON.stringify(manifest, "\t").to_utf8_buffer()
+	if files[MANIFEST_PATH].size() > MAX_MANIFEST_BYTES:
+		return _result(false, "The layered document contains too much metadata or text to save.")
 	var response := _result(true, "Layered document archive prepared.")
 	response["files"] = files
 	return response
@@ -230,7 +233,7 @@ static func _encode_nodes(
 			"locked": bool(state.get("locked", false)),
 			"children": [],
 		}
-		if kind == 0:
+		if kind in [0, 2, 3]:
 			var serial := int(node_counter[0])
 			var layer_image: Image = state.get("image", null)
 			var eraser_image: Image = state.get("eraser_source", null)
@@ -249,6 +252,30 @@ static func _encode_nodes(
 			encoded["image_size"] = [layer_image.get_width(), layer_image.get_height()]
 			var layer_origin: Vector2i = state.get("origin", Vector2i.ZERO)
 			encoded["origin"] = [layer_origin.x, layer_origin.y]
+			if kind == 3:
+				if not preload("res://addons/GDDraw/gddraw_text_recipe.gd").valid_recipe(state.get("text_recipe")): return _result(false, "Invalid text recipe.")
+				var recipe: Dictionary = state.text_recipe.duplicate(true)
+				var font_bytes := Marshalls.base64_to_raw(recipe.get("font_data", ""))
+				if font_bytes.size() > 32 * 1024 * 1024: return _result(false, "The embedded text font exceeds the size limit.")
+				recipe.erase("font_data")
+				if not font_bytes.is_empty():
+					var font_path := "fonts/target_%04d/text_%04d.bin" % [target_index, serial]
+					files[font_path] = font_bytes
+					encoded["font_path"] = font_path
+				encoded["text_recipe"] = recipe
+				var text_mask: Image = state.get("text_mask")
+				if text_mask:
+					var text_mask_path := "images/target_%04d/text_mask_%04d.png" % [target_index, serial]
+					var mask_result := _store_png(files, text_mask_path, text_mask, layer_image.get_size())
+					if not mask_result.ok: return mask_result
+					encoded["text_mask_path"] = text_mask_path
+			if kind == 2:
+				if not GradientRaster.valid_recipe(state.get("gradient_recipe")): return _result(false, "Invalid gradient recipe.")
+				encoded["gradient_recipe"] = state.gradient_recipe.duplicate(true)
+				var mask_path := "images/target_%04d/gradient_mask_%04d.png" % [target_index, serial]
+				var mask_result := _store_png(files, mask_path, state.get("gradient_mask"), layer_image.get_size())
+				if not mask_result.ok: return mask_result
+				encoded["gradient_mask_path"] = mask_path
 		else:
 			var child_result := _encode_nodes(
 				state.get("children", []),
@@ -371,7 +398,7 @@ static func _decode_nodes(
 			return _result(false, "A layered paint target exceeds the node safety limit.")
 		var manifest: Dictionary = node_value
 		var kind := int(manifest.get("kind", -1))
-		if kind not in [0, 1]:
+		if kind not in [0, 1, 2, 3]:
 			return _result(false, "A layered node has an unknown type.")
 		var state := {
 			"id": str(manifest.get("id", "")),
@@ -385,7 +412,7 @@ static func _decode_nodes(
 			"eraser_source": null,
 			"children": [],
 		}
-		if kind == 0:
+		if kind in [0, 2, 3]:
 			var layer_size := target_size
 			var layer_size_value: Variant = manifest.get("image_size", null)
 			if layer_size_value is Array and layer_size_value.size() == 2:
@@ -403,6 +430,27 @@ static func _decode_nodes(
 				return eraser_result
 			state["image"] = image_result.get("image", null)
 			state["eraser_source"] = eraser_result.get("image", null)
+			if kind == 3:
+				if not preload("res://addons/GDDraw/gddraw_text_recipe.gd").valid_recipe(manifest.get("text_recipe")): return _result(false, "Invalid text recipe.")
+				var recipe: Dictionary = manifest.text_recipe.duplicate(true)
+				recipe["font_data"] = ""
+				var font_path := str(manifest.get("font_path", ""))
+				if not font_path.is_empty():
+					if not _is_safe_archive_path(font_path) or not entries.has(font_path): return _result(false, "Missing embedded text font.")
+					var font_bytes := reader.read_file(font_path)
+					if font_bytes.is_empty() or font_bytes.size() > 32 * 1024 * 1024: return _result(false, "Invalid embedded text font.")
+					recipe["font_data"] = Marshalls.raw_to_base64(font_bytes)
+				state["text_recipe"] = recipe
+				if manifest.has("text_mask_path"):
+					var mask_result := _read_png(reader, entries, str(manifest.text_mask_path), layer_size)
+					if not mask_result.ok: return mask_result
+					state["text_mask"] = mask_result.image
+			if kind == 2:
+				if not GradientRaster.valid_recipe(manifest.get("gradient_recipe")): return _result(false, "Invalid gradient recipe.")
+				var mask_result := _read_png(reader, entries, str(manifest.get("gradient_mask_path", "")), layer_size)
+				if not mask_result.ok: return mask_result
+				state["gradient_recipe"] = manifest.gradient_recipe.duplicate(true)
+				state["gradient_mask"] = mask_result.image
 		else:
 			var child_result := _decode_nodes(manifest.get("children", []), target_size, reader, entries, node_counter)
 			if not bool(child_result.get("ok", false)):

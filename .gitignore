@@ -23,6 +23,11 @@ mono_crash.*.json
 /tests/*
 !/tests/test_cross_object_gesture.gd
 !/tests/test_panel_host.gd
+!/tests/test_palettes.gd
+!/tests/test_gradients.gd
+!/tests/test_text_layers.gd
+!/tests/test_layer_workflows.gd
+!/tests/test_palette_startup.gd
 /resources/
 
 # Local Godot AI/MCP editor integration

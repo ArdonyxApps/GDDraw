@@ -3,6 +3,7 @@ class_name GDDrawShortcutMap
 extends RefCounted
 
 const ACTION_NONE := ""
+const ACTION_GRADIENT := "gradient"
 const ACTION_COPY := "copy"
 const ACTION_CUT := "cut"
 const ACTION_PASTE := "paste"
@@ -23,6 +24,7 @@ const LAYER_TREE_NEW_PAINT_ACCELERATOR := KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_N
 const LAYER_TREE_NEW_GROUP_ACCELERATOR := KEY_MASK_CTRL | KEY_G
 
 const SHORTCUTS := [
+	{"action": ACTION_GRADIENT, "keycode": KEY_G},
 	{"action": ACTION_COPY, "keycode": KEY_C, "ctrl": true},
 	{"action": ACTION_CUT, "keycode": KEY_X, "ctrl": true},
 	{"action": ACTION_PASTE, "keycode": KEY_V, "ctrl": true},

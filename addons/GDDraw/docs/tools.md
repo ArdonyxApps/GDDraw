@@ -30,7 +30,10 @@ The Brush paints the foreground color while the primary mouse button or pen is d
 - **Lock Alpha** preserves destination alpha, preventing paint from appearing on fully transparent pixels.
 - Brush presets store frequently used size and behavior combinations.
 
-In 3D, the brush is projected through the model's UV mapping. A stroke stays on its initial paint target and does not silently cross into another object's texture.
+In 3D, the brush is projected through the model's UV mapping. A held gesture can
+cross imported objects and texture targets, using each target's selected layer.
+Undo restores the complete gesture. Target Lock restricts it to the active target.
+See [Painting in 3D](3d-painting.md).
 
 > **Tip:** For crisp pixel art, use Pixel mode with a square head and integer brush sizes.
 
@@ -41,6 +44,9 @@ The Eraser uses the Brush footprint and most Brush options, but removes or resto
 - In a normal 2D document, erasing makes affected pixels transparent.
 - In a 3D texture session, erasing restores pixels from the texture baseline captured when the session began.
 - Layer locking and inherited group locking prevent erasing just as they prevent painting.
+
+Eraser requires an ordinary paint layer. Rasterize a Text or Gradient layer explicitly
+before erasing its pixels; Undo restores its editable form.
 
 ## Paint Bucket
 
@@ -63,6 +69,16 @@ The Paint Bucket replaces an area based on the clicked pixel and the configured 
 Open Fill Settings to preview and configure fill colors, target behavior, matrix or pattern scale, offset, rotation, filtering, and custom-image color interpretation.
 
 > **Screenshot placeholder:** Show Fill Settings with the Dither tab selected and its live preview visible. The image should make the distinction between foreground, background, target mode, and preview clear.
+
+## Gradient
+
+The Gradient tool sits below Paint Bucket and above Shapes. Press **G** to select
+it. Drag a linear or radial gradient and release to apply. Drag existing handles to
+edit that layer; drag elsewhere to create another. **Escape** cancels an unfinished
+gesture. **Shift** constrains the angle. Linear/Radial and Reverse stay in the
+toolbar; output defaults live in **Preferences > Tools > Gradients**. Edit stop
+colors and opacity in the right panel and overall layer opacity in Layers. Selections and layer locks
+are respected. See [Gradients](gradients.md) for the full workflow.
 
 ## Shapes
 
@@ -93,18 +109,41 @@ On supported 3D surfaces, Line, Rectangle, and Ellipse preview and commit across
 
 ## Text
 
-The Text tool creates editable raster text before committing it to the selected paint layer.
+By default, the Text tool creates a dedicated, editable Text layer. Its controls stay in the
+top toolbar; it does not open a separate right-side panel.
+
+Under **Preferences > Tools > Text**, set **Default output** to **New Text Layer**
+or **Paint on Current Layer**. The latter commits raster pixels to the selected
+paint layer. This preference is saved per project and affects subsequent drafts.
+Existing Text layers always retain their editable behavior.
 
 1. Drag a text box or click to use the default box size.
 2. Type and edit text while the draft remains active.
 3. Choose a theme, installed, or project font.
 4. Set font size, alignment, wrapping, rotation, text color, and optional box fill.
-5. Press `Ctrl+Enter` or select Commit to rasterize the draft as one undoable action.
+5. Press `Ctrl+Enter` or select Commit to save the Text layer as one undoable action.
+
+Select a Text layer to restore its text box and toolbar settings. Editing and
+committing updates that layer. After committing, draw another box to create a
+new Text layer. Changing tools or layers finishes the current nonempty draft.
+Click the selected layer's letters or anywhere inside its text box to reopen the
+editor and handles after committing or canceling. Rotated boxes are supported.
+Reopening requires the Text tool. Other drawing tools retain your explicit tool
+choice and start on a new paint layer. Clicking outside the box with Text starts a new draft.
+Cancel or `Escape` restores the saved text when editing an existing layer.
+
+Text layers retain their font, text, box position and size, rotation, alignment,
+wrapping, colors, and original selection clipping. Layer opacity and visibility
+stay in Layers. Save a **Layered Project** to preserve editability and embedded
+font data. PNG output is flattened. Use **Rasterize Text Layer** in the layer
+context menu before painting directly on its pixels; Undo restores editability.
 
 The paint-bucket icon in the Text options toggles the text-box background:
 
 - **Off:** the text box remains transparent.
 - **On:** the current background color fills the text box.
+
+Changing this option updates the text preview immediately.
 
 Press `Escape` to discard an uncommitted text draft. Copying highlighted characters copies text; copying with no highlighted characters copies the rendered text box as an image selection.
 

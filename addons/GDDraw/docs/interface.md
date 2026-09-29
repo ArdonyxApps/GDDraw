@@ -12,7 +12,7 @@ Creates, opens, saves, exports, and closes drawing sessions. During a 3D hierarc
 
 ### Edit
 
-Contains undo, redo, clipboard commands, clear, and Preferences. See [Preferences](preferences.md) for Brush, View, and Files defaults.
+Contains undo, redo, clipboard commands, clear, and Preferences. See [Preferences](preferences.md) for Tools, View, and Files defaults.
 
 ### Image
 
@@ -28,7 +28,7 @@ Provides brush presets and settings that complement the contextual options bar.
 
 ### View
 
-Controls the 2D, 3D, and Split View layout, Layers panel visibility, grids, UV overlays, linked hover, tile preview, Navigator, mirroring, and zoom.
+Controls the 2D, 3D, and Split View layout, Layers and Palettes visibility, panel layout reset, grids, UV overlays, linked hover, tile preview, Navigator, mirroring, and zoom.
 
 ### Godot
 
@@ -44,7 +44,7 @@ The row below the menus changes with the selected tool. Shared foreground and ba
 
 ## Tool rail
 
-The left rail selects Brush, Eraser, Paint Bucket, Shapes, Text, Eyedropper, and Selection. Shape and Selection each expose related subtools in the options bar.
+The left rail selects Brush, Eraser, Paint Bucket, Gradient, Shapes, Text, Eyedropper, and Selection. Shape and Selection each expose related subtools in the options bar. Gradient keeps Linear/Radial and Reverse there; output defaults live in Tools preferences, stop opacity in the Gradient panel, and layer opacity in Layers.
 
 See [Tools](tools.md) for every option and interaction.
 
@@ -66,6 +66,33 @@ When the image extends beyond the visible area, hover near the canvas edges to r
 ## Layers panel
 
 The Layers panel can be shown or hidden under **View > Layers Panel**. Its toolbar controls the selected layer's opacity and lock, filters the hierarchy, and optionally enables Scene Sync for a 3D session.
+
+## Right-side panels and placement
+
+The palette icon below Layers opens [Palettes](palettes.md). Both panels use
+the same tab groups, horizontal/vertical splits, placement menus, and project
+layout persistence. Each rail icon independently opens or closes its panel.
+Drag a panel tab left or right to reorder it. A blue insertion marker shows its
+destination; dropping on another group's tab strip also uses that position.
+Tab order is saved with the project layout and survives editor restarts.
+Drop near a group's left, right, top, or bottom edge to create a split, or use
+its three-dot placement menu. Drag a split divider to adjust the space it receives.
+When tabs overflow, the compact arrows at their right select and reveal adjacent
+tabs. With the tab strip focused, Left/Right selects a neighbor and Home/End selects
+the first/last tab.
+Every open panel stays highlighted blue, including inactive tabs. Closing a
+panel removes its tab but remembers its position and split orientation for
+reopening and editor restarts. **View > Reset Panel Layout** opens all panels
+in the default tab group. The group menu can still collapse the entire group.
+Older Layers-only layouts gain a Palettes tab while retaining their visibility
+and arrangement.
+
+The [Gradient](gradients.md) helper is available when its tool or an editable
+Gradient layer is selected. Select the tool or begin a gradient gesture to reveal
+the helper. Enable **Preferences > Tools > Gradients > Always show Gradient panel
+button** to keep its rail button available at all times and persist its placement.
+Its rail button stays highlighted whenever the panel is open, including when a
+different tab is active.
 
 ## Status bar
 

@@ -3,9 +3,10 @@ extends PanelContainer
 ## Owns placement only; never receives a canvas, document, or drawing history.
 
 signal layout_changed
+signal menu_created(button: MenuButton)
 
 const Group := preload("res://addons/GDDraw/gddraw_panel_group.gd")
-const LAYOUT_VERSION := 1
+const LAYOUT_VERSION := 2
 const METADATA_KEY := "right_panel_layout"
 const RAIL_WIDTH := 34.0
 const DEFAULT_WIDTH := 280.0
@@ -24,6 +25,8 @@ var _graph: Control
 var _next_group := 0
 var _generation := 0
 var _scroll_states: Dictionary = {}
+var _temporary_layout: Dictionary = {}
+var _temporary_id := ""
 
 
 func _init() -> void:
@@ -42,6 +45,10 @@ func _init() -> void:
 	rail = VBoxContainer.new()
 	rail.size_flags_horizontal = SIZE_EXPAND_FILL
 	rail_scroll.add_child(rail)
+	var top_divider := HSeparator.new()
+	top_divider.name = "Panel Rail Top Divider"
+	top_divider.custom_minimum_size.y = 6
+	rail.add_child(top_divider)
 	viewport = ScrollContainer.new()
 	viewport.size_flags_horizontal = SIZE_EXPAND_FILL
 	viewport.size_flags_vertical = SIZE_EXPAND_FILL
@@ -63,7 +70,7 @@ func register_panel(id: String, title: String, icon: Texture2D, content: Control
 	var button := rail_button if rail_button else Button.new()
 	button.icon = icon
 	if not icon and not rail_button: button.text = title.left(1)
-	button.tooltip_text = "Open / focus " + title + "; click again to collapse its group"
+	button.tooltip_text = "Show / hide " + title + " (highlighted while open)"
 	button.custom_minimum_size = Vector2(28, 28)
 	button.toggle_mode = true
 	button.focus_mode = FOCUS_ALL
@@ -76,6 +83,57 @@ func register_panel(id: String, title: String, icon: Texture2D, content: Control
 	else: parking.add_child(content)
 	panels[id] = {"title": title, "icon": icon, "content": content, "minimum": minimum, "button": button}
 	return true
+
+
+func open_temporary_panel(id: String, title: String, icon: Texture2D, content: Control, rail_button: Button = null) -> void:
+	if _temporary_id == id: return
+	if not _temporary_id.is_empty(): close_temporary_panel()
+	_temporary_layout = describe_layout()
+	_temporary_id = id
+	register_panel(id, title, icon, content, Vector2(240, 200), rail_button)
+	var group: Dictionary = get_panel_groups()[0]
+	group.tabs.append(id)
+	activate_panel(id)
+
+func close_temporary_panel() -> void:
+	if _temporary_id.is_empty(): return
+	var entry: Dictionary = panels[_temporary_id]
+	entry.content.reparent(parking)
+	entry.content.hide()
+	entry.button.queue_free()
+	_scroll_states.erase(_temporary_id)
+	panels.erase(_temporary_id)
+	var saved := _temporary_layout
+	_temporary_layout = {}
+	_temporary_id = ""
+	restore_description(saved)
+	layout_changed.emit()
+
+func retain_temporary_panel(id: String) -> bool:
+	if _temporary_id != id: return false
+	_temporary_id = ""
+	_temporary_layout = {}
+	_save()
+	return true
+
+
+func unregister_panel(id: String) -> void:
+	if not panels.has(id): return
+	if _temporary_id == id:
+		close_temporary_panel()
+		return
+	var entry: Dictionary = panels[id]
+	entry.content.reparent(parking)
+	entry.content.hide()
+	entry.button.queue_free()
+	panels.erase(id)
+	_scroll_states.erase(id)
+	for group in get_panel_groups():
+		group.tabs.erase(id)
+		group.closed.erase(id)
+		_sync_group(group)
+	layout = _prune(layout)
+	_changed()
 
 
 func restore_layout(settings: Object = null, legacy_width: Variant = DEFAULT_WIDTH, legacy_expanded: Variant = false) -> bool:
@@ -92,22 +150,26 @@ func restore_description(saved: Variant, legacy_width: Variant = DEFAULT_WIDTH, 
 	_capture_scroll_states()
 	var valid := false
 	var normalized: Dictionary = {}
-	if saved is Dictionary and saved.get("version") == LAYOUT_VERSION:
+	if saved is Dictionary and saved.get("version") in [1, LAYOUT_VERSION]:
 		var seen := {}
 		var groups := {}
-		normalized = _validate_node(saved.get("root"), seen, groups, 0)
+		normalized = _validate_node(saved.get("root"), seen, groups, 0, saved.version == 1)
 		valid = not normalized.is_empty() and _valid_number(saved.get("width"))
 		if valid:
 			# Newly registered / previously missing clients remain reachable as tabs.
 			var first := _groups_in(normalized)[0] as Dictionary
 			for id in panels:
-				if not seen.has(id): first.tabs.append(id)
+				if not seen.has(id):
+					first.tabs.append(id)
+					first.closed.append(id)
 			dock_width = clampf(float(saved.width), DEFAULT_WIDTH, 1600)
 	if valid:
 		layout = normalized
 	else:
 		dock_width = clampf(float(legacy_width), DEFAULT_WIDTH, 520) if _valid_number(legacy_width) else DEFAULT_WIDTH
 		layout = _default_layout(legacy_expanded if legacy_expanded is bool else false)
+		if not layout.is_empty() and layout.visible:
+			layout.closed = layout.tabs.slice(1)
 	_render()
 	# Loading is read-only. The first actual layout operation writes the migration.
 	return valid
@@ -117,7 +179,7 @@ func _valid_number(value: Variant) -> bool:
 	return (value is int or value is float) and is_finite(float(value))
 
 
-func _validate_node(value: Variant, seen: Dictionary, groups: Dictionary, depth: int) -> Dictionary:
+func _validate_node(value: Variant, seen: Dictionary, groups: Dictionary, depth: int, legacy := false) -> Dictionary:
 	if depth > 16 or not value is Dictionary:
 		return {}
 	if value.get("type") == "group":
@@ -134,12 +196,22 @@ func _validate_node(value: Variant, seen: Dictionary, groups: Dictionary, depth:
 			ids.append(panel_id)
 		if ids.is_empty(): return {}
 		var active: Variant = value.get("active")
-		return {"type": "group", "id": id, "tabs": ids, "active": active if active in ids else ids[0], "visible": value.visible}
+		var closed: Array = []
+		if legacy:
+			if not value.visible: closed = ids.duplicate()
+		else:
+			if not value.get("closed") is Array or value.closed.size() > 128: return {}
+			for panel_id in value.closed:
+				if not panel_id is String or closed.has(panel_id): return {}
+				if panel_id in ids: closed.append(panel_id)
+		var result := {"type": "group", "id": id, "tabs": ids, "closed": closed, "active": active if active in ids else ids[0], "visible": value.visible}
+		_sync_group(result)
+		return result
 	if value.get("type") == "split":
 		if value.get("axis") not in ["horizontal", "vertical"] or not _valid_number(value.get("ratio")): return {}
 		if float(value.ratio) <= 0 or float(value.ratio) >= 1: return {}
-		var first := _validate_node(value.get("first"), seen, groups, depth + 1)
-		var second := _validate_node(value.get("second"), seen, groups, depth + 1)
+		var first := _validate_node(value.get("first"), seen, groups, depth + 1, legacy)
+		var second := _validate_node(value.get("second"), seen, groups, depth + 1, legacy)
 		if first.is_empty() or second.is_empty(): return {}
 		return {"type": "split", "axis": value.axis, "ratio": clampf(value.ratio, 0.1, 0.9), "first": first, "second": second}
 	return {}
@@ -147,7 +219,28 @@ func _validate_node(value: Variant, seen: Dictionary, groups: Dictionary, depth:
 
 func _default_layout(expanded: bool) -> Dictionary:
 	if panels.is_empty(): return {}
-	return {"type": "group", "id": "main", "tabs": panels.keys(), "active": panels.keys()[0], "visible": expanded}
+	return {"type": "group", "id": "main", "tabs": panels.keys(), "closed": [] if expanded else panels.keys(), "active": panels.keys()[0], "visible": expanded}
+
+
+func open_tabs(group: Dictionary) -> Array:
+	# A live @tool host may still hold version-1 groups after script reload.
+	if not group.has("closed"):
+		group.closed = [] if group.visible else group.tabs.duplicate()
+	var result: Array = []
+	for id in group.tabs:
+		if id not in group.closed: result.append(id)
+	return result
+
+
+func _sync_group(group: Dictionary) -> void:
+	var opened := open_tabs(group)
+	group.visible = not opened.is_empty()
+	if group.visible and group.active not in opened: group.active = opened[0]
+
+
+func is_panel_open(id: String) -> bool:
+	var group := group_for_panel(id)
+	return not group.is_empty() and id in open_tabs(group)
 
 
 func describe_layout() -> Dictionary:
@@ -186,19 +279,40 @@ func has_visible_groups() -> bool:
 
 
 func toggle_panel(id: String) -> void:
-	if is_panel_active(id): collapse_group(group_for_panel(id).id)
+	if is_panel_open(id): close_panel(id)
 	else: activate_panel(id)
 
 
-func activate_panel(id: String) -> void:
+func close_panel(id: String) -> void:
+	var group := group_for_panel(id)
+	if group.is_empty() or not is_panel_open(id): return
+	_capture_scroll_states()
+	group.closed.append(id)
+	_sync_group(group)
+	_changed()
+	panels[id].button.grab_focus()
+
+
+func activate_panel(id: String, take_focus := true) -> void:
 	var group := group_for_panel(id)
 	if group.is_empty(): return
+	var already_open := id in open_tabs(group)
 	_capture_scroll_states()
+	group.closed.erase(id)
 	group.active = id
 	group.visible = true
-	_changed()
+	if already_open and group_views.has(group.id):
+		# Keep the TabBar in the tree during its mouse press so an inactive
+		# tab can become the source of a drag without losing native input state.
+		group_views[group.id].configure(group)
+		_sync_panel_buttons()
+		_save()
+		layout_changed.emit()
+		call_deferred("_restore_scroll_states", _generation)
+	else:
+		_changed()
 	var view: Control = group_views[group.id]
-	view.tabs.grab_focus()
+	if take_focus: view.tabs.grab_focus()
 	viewport.ensure_control_visible(view)
 
 
@@ -206,6 +320,7 @@ func collapse_group(id: String) -> void:
 	for group in get_panel_groups():
 		if group.id == id:
 			_capture_scroll_states()
+			group.closed = group.tabs.duplicate()
 			group.visible = false
 			_changed()
 			panels[group.active].button.grab_focus()
@@ -229,24 +344,41 @@ func accepts_drag(data: Variant) -> bool:
 	return data is Dictionary and data.get("gddraw_panel_host") == get_instance_id() and panels.has(data.get("panel_id"))
 
 
-func move_panel(id: String, destination_id: String, zone := "tab") -> bool:
+func move_panel(id: String, destination_id: String, zone := "tab", insertion_index := -1) -> bool:
 	if zone not in ["tab", "left", "right", "top", "bottom"]: return false
 	var source := group_for_panel(id)
 	var destination: Dictionary = {}
 	for group in get_panel_groups():
 		if group.id == destination_id: destination = group
 	if source.is_empty() or destination.is_empty(): return false
-	if source.id == destination.id and (zone == "tab" or source.tabs.size() == 1): return false
+	open_tabs(source)
+	open_tabs(destination)
+	if source.id == destination.id:
+		if zone == "tab":
+			if insertion_index < 0: return false
+			var old_index: int = source.tabs.find(id)
+			var new_index := clampi(insertion_index, 0, source.tabs.size())
+			if new_index > old_index: new_index -= 1
+			if old_index == new_index: return false
+			_capture_scroll_states()
+			source.tabs.erase(id)
+			source.tabs.insert(new_index, id)
+			_changed()
+			return true
+		if source.tabs.size() == 1: return false
 	_capture_scroll_states()
 	source.tabs.erase(id)
+	source.closed.erase(id)
 	if source.active == id: source.active = source.tabs[0] if not source.tabs.is_empty() else ""
+	_sync_group(source)
 	if zone == "tab":
-		destination.tabs.append(id)
+		destination.tabs.insert(destination.tabs.size() if insertion_index < 0 else clampi(insertion_index, 0, destination.tabs.size()), id)
+		destination.closed.erase(id)
 		destination.active = id
 		destination.visible = true
 	else:
 		var new_id := _new_group_id()
-		var new_group := {"type": "group", "id": new_id, "tabs": [id], "active": id, "visible": true}
+		var new_group := {"type": "group", "id": new_id, "tabs": [id], "closed": [], "active": id, "visible": true}
 		var old := destination.duplicate(true)
 		destination.clear()
 		destination.merge({"type": "split", "axis": "horizontal" if zone in ["left", "right"] else "vertical", "ratio": 0.5,
@@ -289,16 +421,24 @@ func _changed() -> void:
 
 
 func _save() -> void:
+	if not _temporary_id.is_empty(): return
 	if is_instance_valid(_settings):
 		_settings.set_project_metadata("GDDraw", METADATA_KEY, describe_layout())
 
 
 func _render() -> void:
 	_generation += 1
+	var client_focus: Control = get_viewport().gui_get_focus_owner() if is_inside_tree() else null
+	var retain_focus := false
+	if client_focus:
+		for entry in panels.values():
+			if entry.content == client_focus or entry.content.is_ancestor_of(client_focus):
+				retain_focus = true
 	# Park clients before freeing any obsolete placement nodes. Their complete
 	# subtrees stay alive and connected exactly once, including TreeItem selection.
 	for entry in panels.values():
 		var content: Control = entry.content
+		content.hide()
 		if content.get_parent() != parking: content.reparent(parking)
 	for view in group_views.values():
 		if view.get_parent() != parking: view.reparent(parking)
@@ -311,6 +451,7 @@ func _render() -> void:
 			var view := Group.new()
 			parking.add_child(view)
 			view.initialize(self, group.id)
+			menu_created.emit(view.menu)
 			group_views[group.id] = view
 		group_views[group.id].configure(group)
 	for id in group_views.keys():
@@ -322,9 +463,15 @@ func _render() -> void:
 		viewport.add_child(_graph)
 	viewport.visible = has_visible_groups()
 	custom_minimum_size = Vector2(DEFAULT_WIDTH if viewport.visible else RAIL_WIDTH, 32)
-	for id in panels:
-		panels[id].button.set_pressed_no_signal(is_panel_active(id))
+	_sync_panel_buttons()
+	if retain_focus and is_instance_valid(client_focus) and client_focus.is_visible_in_tree():
+		client_focus.grab_focus()
 	call_deferred("_restore_scroll_states", _generation)
+
+
+func _sync_panel_buttons() -> void:
+	for id in panels:
+		panels[id].button.set_pressed_no_signal(is_panel_open(id))
 
 
 func _build_node(node: Dictionary) -> Control:
@@ -380,6 +527,7 @@ func _capture_scroll(node: Node, state: Array) -> void:
 func _restore_scroll_states(generation: int) -> void:
 	if generation != _generation: return
 	for id in _scroll_states:
+		if not panels.has(id): continue
 		if panels[id].content.is_visible_in_tree():
 			for item in _scroll_states[id]:
 				var bar: Object = item[0].get_ref()

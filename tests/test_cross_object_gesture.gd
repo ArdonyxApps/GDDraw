@@ -341,10 +341,46 @@ func exercise(shared: bool, side := 32, separate_slots := false) -> void:
 	native_target = dock._layer_session.get_target(a.target_id)
 	check(native_target.get_selected_layer_image_reference().get_size() == Vector2i(8, 8), "no-op cannot expand native layer bounds")
 	check(dock._history._undo_stack.size() == history_count and dock._history.can_redo(), "native-layer no-op preserves history")
+	await exercise_editable_destinations(dock, a, b, uv_a, uv_b)
 	var retained_session = dock._layer_session
 	dock._canvas.brush_color = Color.WHITE
 	dock._on_3d_paint_uv_started(hit(dock, a, uv_a))
 	dock.free()
 	check(retained_session.get_target(a.target_id).get_selected_layer_image_reference().get_size() == Vector2i(8, 8), "dock teardown restores an interrupted gesture")
 	source.free()
+	await process_frame
+
+func exercise_editable_destinations(dock, a: Dictionary, b: Dictionary, uv_a: Vector2, uv_b: Vector2) -> void:
+	var original: Dictionary = dock._layer_session.capture_state()
+	var counts := {}
+	for binding in [a, b]:
+		if counts.has(binding.target_id): continue
+		dock._route_3d_hit_to_paint_target(hit(dock, binding, uv_a))
+		dock._select_tool(Canvas.ToolMode.GRADIENT)
+		dock._canvas.begin_gradient(Vector2.ZERO)
+		dock._canvas.update_gradient(Vector2(24, 0))
+		dock._canvas.commit_gradient()
+		var target = dock._layer_session.get_target(binding.target_id)
+		counts[binding.target_id] = target.get_paint_layer_count()
+		check(target.get_selected_layer().is_gradient_layer(), "3D fixture selects editable Gradient")
+	for mode in ["cancel", "transparent", "commit"]:
+		dock._select_tool(Canvas.ToolMode.BRUSH)
+		dock._canvas.brush_color = Color.TRANSPARENT if mode == "transparent" else Color.RED
+		var history_count: int = dock._history._undo_stack.size()
+		dock._on_3d_paint_uv_started(hit(dock, a, uv_a))
+		dock._on_3d_paint_uv_dragged(hit(dock, b, uv_b))
+		check(dock._canvas.active_tool == Canvas.ToolMode.BRUSH, "cross-target routing preserves explicit Brush")
+		dock._resolve_3d_brush_gesture(mode == "cancel")
+		check(dock._canvas.active_tool == Canvas.ToolMode.BRUSH, "resolving automatic layers preserves Brush")
+		for target_id in counts:
+			var target = dock._layer_session.get_target(target_id)
+			check(target.get_paint_layer_count() == counts[target_id] + (1 if mode == "commit" else 0), "3D %s keeps only effective automatic layers" % mode)
+		check(dock._history._undo_stack.size() == history_count + (1 if mode == "commit" else 0), "3D automatic layers share gesture history")
+		if mode == "commit":
+			dock._undo()
+			for target_id in counts:
+				check(dock._layer_session.get_target(target_id).get_paint_layer_count() == counts[target_id], "3D undo removes automatic paint layers across targets")
+	dock._restore_layer_session(original)
+	dock._sync_canvas_to_active_layer()
+	dock._select_tool(Canvas.ToolMode.BRUSH)
 	await process_frame

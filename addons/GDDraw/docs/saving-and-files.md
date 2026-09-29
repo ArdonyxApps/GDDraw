@@ -18,6 +18,8 @@ PNG cannot preserve the editable layer hierarchy.
 Choose **File > Save Layered Project** to write a `.gddraw` document. It preserves:
 
 - Paint layers and nested groups.
+- Editable Gradient layers, including color stops, endpoints, and fixed selection masks.
+- Editable Text layers, including text, embedded font data, layout, colors, and fixed selection masks.
 - Layer pixels and out-of-canvas bounds.
 - Names, order, visibility, opacity, and locking.
 - Per-target canvas dimensions.
@@ -26,6 +28,10 @@ Choose **File > Save Layered Project** to write a `.gddraw` document. It preserv
 - Eraser baselines required for restored 3D texture editing.
 
 For 3D projects, mesh geometry remains in the Godot Scene and is not silently duplicated into the layered file.
+
+Layered documents now use format version 4. This version reads older version 1/2/3
+files; older plugin versions cannot open version 4 files. PNG exports remain
+flattened and do not retain Gradient or Text editability.
 
 ## Closing a document
 
@@ -47,12 +53,20 @@ By default, project-owned files are separated from replaceable plugin files:
 - `res://addons/GDDraw/` contains installed plugin code, icons, and this manual.
 - `res://gddraw/images/` contains generated or saved PNG files.
 - `res://gddraw/fonts/` is the default custom-font discovery folder.
+- `res://gddraw/palettes/collection.json` stores imported [palettes](palettes.md),
+  stable IDs, order, draft snapshots, and the active palette independently of artwork and layout.
+- Plain `.hex` files store RGBA colors; names remain in the internal collection. The default folder
+  is `res://gddraw/palettes`, configurable under Preferences > Files > Palettes.
+  Palette Save offers Save Changes and Save as New. Export HEX offers RGB or RGBA
+  copies. GPL/TXT/legacy GDDraw originals are kept when converted to HEX.
 - `res://gddraw/brushes/` is reserved for file-backed brush assets; parameter-only presets use project editor metadata.
 - `user://gddraw/updates/` stores explicitly downloaded update staging and recovery data.
 
 Folders are created lazily when an operation actually needs to write into them.
 
-Use **Edit > Preferences > Files** to change the default blank-canvas dimensions, PNG save folder, or custom-font folder. See [Preferences](preferences.md) for when each default applies and which settings leave existing documents unchanged.
+Use **Edit > Preferences > Files** to change the default blank-canvas dimensions,
+PNG save folder, custom-font folder, or palette folder. See [Preferences](preferences.md)
+for when each default applies and which settings leave existing documents unchanged.
 
 ## Safe updates
 

@@ -5,6 +5,8 @@ extends RefCounted
 enum Kind {
 	PAINT,
 	GROUP,
+	GRADIENT,
+	TEXT,
 }
 
 var id := ""
@@ -19,10 +21,31 @@ var origin := Vector2i.ZERO
 var image: Image
 var eraser_source: Image
 var children: Array = []
+var text_recipe: Dictionary = {}
+var text_mask: Image
+var gradient_recipe: Dictionary = {}
+var gradient_mask: Image
+
+func is_text_layer() -> bool:
+	return kind == Kind.TEXT
+
+func is_editable_layer() -> bool:
+	return kind in [Kind.GRADIENT, Kind.TEXT]
+
+func is_gradient_layer() -> bool:
+	return kind == Kind.GRADIENT
+
+func rasterize() -> void:
+	if not is_editable_layer(): return
+	kind = Kind.PAINT
+	text_recipe = {}
+	text_mask = null
+	gradient_recipe = {}
+	gradient_mask = null
 
 
 func is_paint_layer() -> bool:
-	return kind == Kind.PAINT
+	return kind in [Kind.PAINT, Kind.GRADIENT, Kind.TEXT]
 
 
 func is_group() -> bool:
@@ -37,6 +60,10 @@ func capture_state() -> Dictionary:
 	return {
 		"id": id,
 		"kind": kind,
+		"text_recipe": text_recipe.duplicate(true),
+		"text_mask": text_mask.duplicate() if text_mask else null,
+		"gradient_recipe": gradient_recipe.duplicate(true),
+		"gradient_mask": gradient_mask.duplicate() if gradient_mask else null,
 		"name": name,
 		"visible": visible,
 		"opacity": opacity,
@@ -67,6 +94,10 @@ func capture_history_state(
 	return {
 		"id": id,
 		"kind": kind,
+		"text_recipe": text_recipe.duplicate(true),
+		"text_mask": text_mask.duplicate() if text_mask else null,
+		"gradient_recipe": gradient_recipe.duplicate(true),
+		"gradient_mask": gradient_mask.duplicate() if gradient_mask else null,
 		"name": name,
 		"visible": visible,
 		"opacity": opacity,
@@ -85,6 +116,12 @@ func capture_history_state(
 func restore_state(state: Dictionary) -> void:
 	id = str(state.get("id", ""))
 	kind = int(state.get("kind", Kind.PAINT))
+	text_recipe = state.get("text_recipe", {}).duplicate(true)
+	var saved_text_mask: Image = state.get("text_mask")
+	text_mask = saved_text_mask.duplicate() if saved_text_mask else null
+	gradient_recipe = state.get("gradient_recipe", {}).duplicate(true)
+	var mask: Image = state.get("gradient_mask")
+	gradient_mask = mask.duplicate() if mask else null
 	name = str(state.get("name", "Layer"))
 	visible = bool(state.get("visible", true))
 	opacity = clampf(float(state.get("opacity", 1.0)), 0.0, 1.0)

@@ -4,8 +4,11 @@
 
 The accepted scope and implementation gates are recorded in
 [`0.4.0-release-plan.md`](0.4.0-release-plan.md): continuous cross-object
-painting, reusable right-side docking with Palettes, a gradient tool, and exact
-selection sizing. The older release sections below are historical references.
+painting, reusable right-side docking, editable palettes with HEX save/export,
+editable Gradient and Text layers, and multi-layer workflows. Feature additions
+are complete; release validation, documentation, and packaging remain.
+Exact selection sizing with aspect lock is deferred to a later revision, with no
+release assigned. The older release sections below are historical references.
 
 This document records shipped milestones, the planned `0.2.0` development
 scope, known limitations, and work being considered for later releases.

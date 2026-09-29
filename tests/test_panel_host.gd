@@ -56,13 +56,66 @@ func _run() -> void:
 		await _demo()
 		return
 	await _layout_and_lifetime()
+	await _independent_toggles()
+	await _temporary_panel()
 	await _overflow()
 	await _drag_input()
+	await _reorder_tabs()
 	await _validation()
 	await _dock_integration()
 	await _active_3d_session()
 	print("Panel host: %d assertions, %d failures" % [assertions, failures.size()])
 	quit(0 if failures.is_empty() else 1)
+
+func _temporary_panel() -> void:
+	var host = make_host(2)
+	var settings := Settings.new()
+	host.restore_layout(settings)
+	host.activate_panel("test_0")
+	host.activate_panel("test_1")
+	host.move_panel("test_1", host.group_for_panel("test_0").id, "right")
+	var saved: Dictionary = host.describe_layout()
+	var writes := settings.writes
+	var content := VBoxContainer.new()
+	host.open_temporary_panel("gradient", "Gradient", null, content)
+	check(host.is_panel_active("gradient"), "temporary panel becomes active")
+	await settle()
+	host._capture_scroll_states()
+	check(host._scroll_states.has("gradient"), "visible temporary panel has captured scroll state")
+	host.set_dock_width(450)
+	check(settings.writes == writes, "temporary layout operations never persist")
+	host.close_temporary_panel()
+	check(not host._scroll_states.has("gradient"), "closing temporary panel clears its captured scroll state")
+	await settle()
+	# Deferred callbacks must also tolerate stale state from a removed client.
+	host._scroll_states["removed_panel"] = []
+	host._restore_scroll_states(host._generation)
+	host._scroll_states.erase("removed_panel")
+	check(host.describe_layout() == saved and settings.writes == writes, "temporary panel restores split layout and active tabs without writes")
+	check(is_instance_valid(content) and not content.visible, "temporary content stays alive while parked")
+	host.open_temporary_panel("gradient", "Gradient", null, content)
+	await settle()
+	host._capture_scroll_states()
+	host.close_temporary_panel()
+	await settle()
+	check(host.describe_layout() == saved, "temporary panel can reopen without duplicate registration")
+	host.open_temporary_panel("gradient", "Gradient", null, content)
+	var gradient_group: String = host.group_for_panel("gradient").id
+	host.move_panel("gradient", gradient_group, "bottom")
+	check(host.retain_temporary_panel("gradient"), "temporary panel can become persistent")
+	var retained: Dictionary = host.describe_layout()
+	host.close_temporary_panel()
+	check(host.describe_layout() == retained and host.is_panel_open("gradient"), "retaining preserves panel placement and open state")
+	var fresh = make_host(2)
+	var fresh_content := VBoxContainer.new()
+	fresh.register_panel("gradient", "Gradient", null, fresh_content, Vector2(240,200))
+	fresh.restore_layout(settings)
+	check(fresh.describe_layout() == retained, "retained panel layout survives recreation")
+	fresh.unregister_panel("gradient")
+	check(not fresh.panels.has("gradient") and fresh.get_panel_groups().size() == 2 and is_instance_valid(fresh_content), "unregister prunes panel-only split and parks client")
+	fresh.free()
+	host.free()
+	await settle()
 
 func _demo() -> void:
 	# Temporary clients exist only in this standalone review fixture, never in
@@ -120,9 +173,10 @@ func _layout_and_lifetime() -> void:
 		check(tree.get_selected() == item and tree.get_instance_id() == content_id, "collapse/reopen retains exact control and selected TreeItem")
 		check(is_equal_approx(tree_scroll(tree).value, scroll), "collapse/reopen retains scroll")
 	host.activate_panel("test_1")
-	check(not host.panels.test_0.button.button_pressed and host.panels.test_1.button.button_pressed, "rail marks only the active tab")
+	check(host.panels.test_0.button.button_pressed and host.panels.test_1.button.button_pressed, "rail marks every open tab")
 	host.toggle_panel("test_0")
-	check(host.has_visible_groups() and host.is_panel_active("test_0"), "inactive rail click focuses instead of collapsing")
+	check(host.has_visible_groups() and host.is_panel_active("test_1") and not host.is_panel_open("test_0"), "inactive open rail click closes only its panel")
+	host.toggle_panel("test_0")
 	await settle()
 	check(tree_scroll(tree).value == scroll, "tab switching retains scroll")
 	check(host.move_panel("test_0", "main", "right"), "split active tab horizontally")
@@ -189,13 +243,14 @@ func _layout_and_lifetime() -> void:
 
 func _overflow() -> void:
 	var host = make_host(8)
+	host.reset_layout()
 	host.size = Vector2(280, 280)
 	host.activate_panel("test_0")
 	await settle()
 	var group = host.group_views.main
 	check(group.previous.visible and group.next.visible, "narrow tabs display both compact arrows")
 	check(group.previous.disabled and not group.next.disabled, "first tab disables left arrow only")
-	check(group.previous.custom_minimum_size == Vector2(28, 28), "arrow click target is 28 pixels")
+	check(group.previous.size.x == 20 and group.next.position.x - group.previous.position.x == 20, "arrow layout uses adjacent 20-pixel buttons with 2-pixel side padding")
 	check(not group.previous.tooltip_text.is_empty() and group.previous.focus_mode == Control.FOCUS_ALL, "arrows expose tooltip and keyboard focus")
 	for i in range(1, 8):
 		group.next.pressed.emit()
@@ -247,7 +302,7 @@ func _validation() -> void:
 	host.reset_layout()
 	var valid: Dictionary = host.describe_layout()
 	var bad_values: Array = [null, [], "layout", {"version": 999}, {"version": 1, "root": null}]
-	for field in ["visible", "tabs", "id"]:
+	for field in ["visible", "tabs", "id", "closed"]:
 		var bad := valid.duplicate(true)
 		bad.root[field] = 12
 		bad_values.append(bad)
@@ -286,6 +341,7 @@ func _validation() -> void:
 
 func _drag_input() -> void:
 	var host = make_host(3)
+	host.reset_layout()
 	host.size = Vector2(700, 360)
 	host.activate_panel("test_0")
 	host.move_panel("test_1", "main", "right")
@@ -313,13 +369,21 @@ func _drag_input() -> void:
 	motion.relative = finish - start
 	motion.global_position = motion.position
 	root.push_input(motion)
+	await process_frame
 	check(not destination._drop_zone.is_empty(), "native drag supplies visible drop feedback")
 	press.pressed = false
 	press.position = finish
 	press.global_position = press.position
 	root.push_input(press)
 	await settle()
+	if "--forwarded-drag" in OS.get_cmdline_user_args():
+		# Some sandboxed DisplayServers return invalid system mouse coordinates
+		# during native dragging. Validate the forwarding contract explicitly.
+		destination._can_drop_tab(Vector2(30, 12), data_for_panel(host, "test_0"), destination.tabs)
+		destination._drop_tab(Vector2(30, 12), data_for_panel(host, "test_0"))
+		await settle()
 	check(host.group_for_panel("test_0").id == destination_id, "native tab drop moves the panel between groups")
+	check(host.group_for_panel("test_0").tabs == ["test_0", "test_1"], "cross-group header drop inserts before the pointed tab")
 	check(not root.gui_is_dragging(), "native tab drop ends drag state")
 	check(not destination.drop_overlay.visible, "drop overlay releases content input after dragging")
 	destination = host.group_views.main
@@ -331,6 +395,75 @@ func _drag_input() -> void:
 	destination._drop_tab(Vector2(6, 90), data)
 	await settle()
 	check(host.get_panel_groups().size() == 3, "content-edge drop callback creates a new split group")
+	host.free()
+
+func data_for_panel(host, id: String) -> Dictionary:
+	return {"gddraw_panel_host": host.get_instance_id(), "panel_id": id}
+
+func _reorder_tabs() -> void:
+	var host = make_host(3)
+	var settings := Settings.new()
+	host.restore_layout(settings)
+	host.reset_layout()
+	host.size = Vector2(900, 360)
+	await settle()
+	var view = host.group_views.main
+	var content = host.panels.test_2.content
+	var start: Vector2 = view.tabs.global_position + view.tabs.get_tab_rect(2).get_center()
+	var finish: Vector2 = view.tabs.global_position + Vector2(4, 12)
+	var press := InputEventMouseButton.new()
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	press.position = start
+	press.global_position = start
+	root.push_input(press)
+	var motion := InputEventMouseMotion.new()
+	motion.button_mask = MOUSE_BUTTON_MASK_LEFT
+	motion.position = start + Vector2(25, 0)
+	motion.relative = Vector2(25, 0)
+	motion.global_position = motion.position
+	root.push_input(motion)
+	await process_frame
+	check(root.gui_is_dragging(), "same-group tab gesture starts native drag")
+	motion.position = finish
+	motion.global_position = finish
+	motion.relative = finish - start
+	root.push_input(motion)
+	await process_frame
+	if "--forwarded-drag" in OS.get_cmdline_user_args():
+		view._can_drop_tab(Vector2(4, 12), data_for_panel(host, "test_2"), view.tabs)
+	check(view._drop_index == 0, "tab header exposes first insertion slot")
+	press.pressed = false
+	press.position = finish
+	press.global_position = finish
+	root.push_input(press)
+	await settle()
+	if "--forwarded-drag" in OS.get_cmdline_user_args():
+		view._can_drop_tab(Vector2(4, 12), data_for_panel(host, "test_2"), view.tabs)
+		view._drop_tab(Vector2(4, 12), data_for_panel(host, "test_2"))
+		await settle()
+	check(host.group_for_panel("test_2").tabs == ["test_2", "test_0", "test_1"], "native drag reorders within a tab group")
+	check(host.is_panel_active("test_2") and host.panels.test_2.content == content, "reorder retains active panel and content identity")
+	check(not root.gui_is_dragging() and not view.drop_overlay.visible, "reorder releases overlay input")
+	host.close_panel("test_0")
+	check(host.move_panel("test_2", "main", "tab", 3), "tab moves to final insertion slot")
+	check(host.group_for_panel("test_2").tabs == ["test_0", "test_1", "test_2"], "moving right adjusts index after removal")
+	check(not host.is_panel_open("test_0"), "reordering leaves closed panels closed")
+	var writes: int = settings.writes
+	check(not host.move_panel("test_2", "main", "tab", 3) and settings.writes == writes, "dropping into own slot does not rewrite layout")
+	await settle()
+	view = host.group_views.main
+	var data := {"gddraw_panel_host": host.get_instance_id(), "panel_id": "test_2"}
+	var position: Vector2 = view.tabs.get_tab_rect(0).position + Vector2(4, 12)
+	check(view._can_drop_tab(position, data, view.tabs) and view._drop_index == 1, "visible insertion slot accounts for a preceding closed panel")
+	view._drop_tab(position, data)
+	await settle()
+	var fresh = make_host(3)
+	fresh.restore_layout(settings)
+	check(fresh.group_for_panel("test_2").tabs == ["test_0", "test_2", "test_1"] and not fresh.is_panel_open("test_0"), "reordered tabs and closed state survive restart")
+	fresh.activate_panel("test_0")
+	check(fresh.group_views.main.tab_ids == ["test_0", "test_2", "test_1"], "reopening restores remembered order")
+	fresh.free()
 	host.free()
 
 func _dock_integration() -> void:
@@ -450,3 +583,44 @@ func _active_3d_session() -> void:
 		check(dock._layers_tree.get_root() == tree_root, "panel operations do not rebuild Layers in view %d" % mode)
 	dock.free()
 	source.free()
+
+func _independent_toggles() -> void:
+	var host = make_host(2)
+	var settings := Settings.new()
+	host.restore_layout(settings)
+	host.panels.test_0.button.button_pressed = true
+	await settle()
+	check(host.group_views.main.tab_ids == ["test_0"], "opening first panel shows only its tab")
+	host.panels.test_1.button.button_pressed = true
+	await settle()
+	check(host.group_views.main.tab_ids == ["test_0", "test_1"], "opening second adds adjacent tab")
+	check(host.panels.test_0.button.button_pressed and host.panels.test_1.button.button_pressed, "both rail buttons stay highlighted")
+	host.activate_panel("test_0")
+	check(host.is_panel_open("test_1") and host.panels.test_1.button.button_pressed, "tab selection does not close or unhighlight other panels")
+	host.panels.test_0.button.button_pressed = false
+	await settle()
+	check(host.group_views.main.tab_ids == ["test_1"] and host.is_panel_active("test_1"), "closing active tab selects remaining open tab")
+	host.toggle_panel("test_0")
+	check(host.group_views.main.tab_ids == ["test_0", "test_1"], "reopening retains original tab order")
+	host.move_panel("test_1", "main", "bottom")
+	await settle()
+	host.layout.ratio = 0.37
+	var group_id: String = host.group_for_panel("test_1").id
+	host.close_panel("test_1")
+	await settle()
+	var saved: Dictionary = host.describe_layout()
+	check(host.layout.type == "split" and host.layout.ratio == 0.37 and host.is_panel_open("test_0"), "closing split retains placement and other open panel")
+	var fresh = make_host(2)
+	check(fresh.restore_layout(settings), "per-panel state restores from project storage")
+	check(not fresh.is_panel_open("test_1") and fresh.is_panel_open("test_0"), "restoration retains independent open state")
+	fresh.toggle_panel("test_1")
+	await settle()
+	check(fresh.group_for_panel("test_1").id == group_id and fresh.layout.axis == "vertical" and fresh.layout.ratio == 0.37, "reopening after restart restores split orientation and ratio")
+	check(fresh.panels.test_0.button.button_pressed and fresh.panels.test_1.button.button_pressed, "restored open panels both highlighted")
+	host.close_panel("test_0")
+	check(not host.has_visible_groups() and host.rail.is_visible_in_tree(), "closing final panel leaves only rail")
+	check(host.layout.type == saved.root.type, "closing final panel retains split tree")
+	var legacy := {"version": 1, "width": 380, "root": {"type": "group", "id": "legacy", "tabs": ["test_0"], "active": "test_0", "visible": true}}
+	check(fresh.restore_description(legacy) and fresh.is_panel_open("test_0") and not fresh.is_panel_open("test_1"), "old Layers-only layout does not auto-open new panels")
+	host.free()
+	fresh.free()

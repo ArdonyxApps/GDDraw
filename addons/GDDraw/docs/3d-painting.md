@@ -40,13 +40,19 @@ Selecting a Layers row does not force Godot's Scene selection, avoiding editor f
 
 Brush and Eraser strokes use ray hits against the visible preview geometry and convert them into texture coordinates. Shape tools operate across compatible UV-connected triangles.
 
-- A stroke remains on the target where it began.
+- A held Brush or Eraser gesture can cross imported objects and compatible material slots, including different texture targets. Each target uses its remembered selected layer and native texture dimensions.
+- The complete gesture is one undo/redo action, even when it revisits earlier targets. Misses and disconnected surfaces break interpolation, preventing lines across unrelated texture areas.
+- Target Lock restricts painting to the active target. Shape and single-click tools keep their existing per-operation behavior.
 - Hidden objects are not paint targets.
 - Locked paint layers reject 2D and 3D edits.
 - Mirrored or shared UV regions display the same underlying pixels.
 - Overlapping UV shells can be ambiguous when several surfaces map to the same texture location.
 
 Use the UV overlay in 2D or Split View to understand the model's texture layout.
+
+Brush strokes on a selected editable Text or Gradient layer create a paint layer
+above it, including during cross-target gestures. Layer creation shares the stroke's
+undo action. Eraser requires an ordinary paint layer or explicit rasterization.
 
 ## Preview controls
 

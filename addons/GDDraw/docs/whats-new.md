@@ -2,6 +2,62 @@
 
 New features, improvements, and fixes in GDDraw, with the latest version first. Scroll down for earlier releases.
 
+## 0.4.0 — Palettes, editable tools, and flexible panels
+
+### Palettes for drawing and texture painting
+
+- Create palettes, add colors with Godot's color picker, and edit or remove individual swatches.
+- Remove focused swatches with Delete or use Edit/Remove Selected Color in the palette menu. Palette-local Undo/Redo reverses swatch edits independently of artwork history.
+- Import GIMP `.gpl` palettes and RGB/RGBA `.hex` or `.txt` files, with or without a leading `#` on hex colors.
+- Save palettes as standard RGBA HEX files. Export separate RGB or RGBA copies for use in other applications.
+- Support bundled starter HEX palettes from `addons/GDDraw/resources/palettes`, with Save as Copy and per-project Hide/Restore actions.
+- Show author credits and links beneath attributed palettes. Saved user copies retain their original author credit in the project collection.
+- Optionally enable HEX/GPL visibility in Godot's FileSystem from Preferences > Files > Palettes, preserving existing editor-wide text extensions.
+- Choose a palette folder under **Preferences > Files > Palettes**, defaulting to `res://gddraw/palettes`. Palettes are discovered on startup, and successful saves, exports, and imports refresh the folder.
+- Use left-click for foreground and right-click for background. Choose small, medium, or large swatches, or horizontal rows with hex values.
+
+See [Palettes](palettes.md) for editing, file formats, and keyboard controls.
+
+### Editable Gradient and Text layers
+
+- Draw linear or radial gradients with the new **Gradient** tool (`G`), between Paint Bucket and Shapes. Release the drag to create an editable Gradient layer.
+- Adjust endpoints on the canvas or edit colors, positions, and opacity in the Gradient panel. Add, duplicate, and delete intermediate stops. Drag away from existing handles to create another gradient.
+- Keep Text editable in its own layer, with font, content, layout, rotation, colors, and optional background fill preserved. Select the layer to resume editing; with Text active, click the letters or text box to reopen its handles.
+- Preview Text background-fill changes immediately. Text controls remain in the top bar and canvas editor.
+- Choose the default output for Text and Gradients under **Preferences > Tools**. Both default to new editable layers; raster output remains available.
+- Save `.gddraw` projects to retain editable tool layers, selection masks, and embedded Text fonts. PNG output remains flattened. Layer thumbnails have small type indicators, and context menus provide explicit rasterization.
+
+Learn more in [Gradients](gradients.md), [Text](tools.md#text), and [Saving and Files](saving-and-files.md).
+
+### A configurable right-side workspace
+
+- Toggle Layers and Palettes independently. A blue rail button means its panel is open, even when another tab is active.
+- Reorder tabs by dragging, move panels between groups, or split groups horizontally or vertically. Placement, tab order, and open states are remembered for persistent panels.
+- Use the panel placement menu or **View > Reset Panel Layout** to reorganize the workspace. Compact Godot-style arrows navigate overflowing tabs.
+- Keep the Gradient button available through **Preferences > Tools > Gradients > Always show Gradient panel button**. Selecting Gradient or starting a gesture reveals its helper panel.
+- On ordinary layers, the Gradient panel previews the next gradient using current foreground/background colors. Existing Gradient layers and active drafts retain their edited stops.
+
+See [Interface](interface.md) and [Preferences](preferences.md).
+
+### Layer workflow improvements
+
+- **Shift-click** selects a range; **Ctrl-click** toggles individual layers. Right-click offers Show, Hide, Lock, Unlock, Duplicate, Group, and Delete for the selection.
+- Drag selected layers together to reorder them or move them into groups and subgroups. Relative stacking order is preserved, and selected descendants travel with their selected parent only once.
+- Bulk edits and moves each use one undo step. Locks and the final paint layer remain protected. Delete confirmation counts all affected layers and groups, including nested contents.
+- Starting Brush, Fill, or a shape on a selected Text or Gradient layer creates a paint layer above it. The editable original remains intact, and creation plus drawing share one undo step. Canceled or ineffective gestures leave no empty layer.
+- Eraser still requires a paint layer or explicit rasterization. Selecting a tool, panning, or sampling a color does not create layers.
+
+See [Layers](layers.md) and [Shortcuts](shortcuts.md).
+
+### Continuous painting across 3D objects
+
+- Hold a Brush or Eraser gesture across imported objects and compatible material slots, including different texture targets. Each target uses its remembered selected layer and native resolution.
+- Undo or redo the whole gesture as one action, including strokes that leave and revisit a target.
+- Misses and disconnected surfaces break interpolation instead of drawing a line across unrelated texture areas. Hidden objects, locks, UV validation, and Target Lock continue to apply.
+- Target handoffs reuse painting state and avoid repeatedly rebuilding the Layers tree during a stroke.
+
+See [Painting in 3D](3d-painting.md).
+
 ## 0.3.0 — Layers and multi-object painting
 
 ### Layered artwork

@@ -2,7 +2,7 @@
 
 Open **Edit > Preferences** to configure GDDraw drawing, view, and file behavior. Changes apply immediately. File defaults and selected workspace preferences are remembered through Godot's project editor metadata.
 
-> **Screenshot placeholder:** Show the complete Preferences overlay with the Brush, View, and Files tabs visible. Use a second close crop of the Files tab showing Default Canvas, Default Save Location, and Fonts.
+> **Screenshot placeholder:** Show Preferences with the Tools, View, and Files tabs visible, including the Brush and Gradients sections under Tools.
 
 ## Project-specific settings
 
@@ -12,7 +12,9 @@ Changing a default does not rewrite existing drawings, textures, or saved files.
 
 Close Preferences with the **Close** button or `Escape`. Values are updated as their controls are changed; there is no separate Apply button. Brush settings and several grid controls describe the active dock state, while the Files defaults, checkerboard colors, and grid snapping choice are saved as project-specific preferences.
 
-## Brush tab
+## Tools tab
+
+The Tools tab groups settings by tool. The Brush section retains the existing draw mode, hardness, and stroke-overlap controls.
 
 ### Draw Mode
 
@@ -21,7 +23,7 @@ Close Preferences with the **Close** button or `Escape`. Values are updated as t
 
 The selected mode also appears in the contextual Brush options bar.
 
-Brush-tab changes affect the active GDDraw dock. Save a custom Brush preset when a reusable brush configuration is needed.
+Brush-section changes affect the active GDDraw dock. Save a custom Brush preset when a reusable brush configuration is needed.
 
 ### Hardness
 
@@ -32,6 +34,41 @@ Hardness controls the falloff of the antialiased brush from `0%` to `100%`. It i
 When enabled, repeatedly passing over a pixel during one continuous stroke can build additional color or opacity. Disable it when one stroke should apply consistent coverage regardless of how often its path overlaps itself.
 
 See [Tools](tools.md) for the other Brush options and their drawing behavior.
+
+### Gradients
+
+**Always show Gradient panel button** is off by default. Enable it to keep the
+right-side Gradient button available with any tool or layer. Enabling it alone does
+not force the panel open; its open state and placement are saved with the project layout. An
+already-open contextual Gradient panel retains its position when enabled.
+Selecting the Gradient tool or starting a gradient gesture opens its helper panel.
+On ordinary layers, the panel previews the next gradient using current foreground
+and background colors. Saved Gradient layers retain their own stops.
+
+**Default output** is saved for the current project:
+
+- **New Gradient Layer** (default) creates an editable layer when a canvas drag ends.
+- **Paint on Current Layer** applies pixels to the selected paint layer.
+
+Existing Gradient handles always edit their own layer. A new drag on a selected
+Gradient layer creates another editable layer; pixel painting requires explicit
+rasterization. Changing this preference does not alter an in-progress preview.
+
+Linear/Radial and Reverse remain in the toolbar. Use Layers for overall layer
+opacity and the Gradient panel for individual stop colors and opacity. Set a
+stop's opacity to zero for a fade to transparent.
+
+### Text
+
+**Default output** is saved for the current project:
+
+- **New Text Layer** (default) creates an editable layer when text is committed.
+- **Paint on Current Layer** commits raster text to the selected paint layer.
+
+Existing Text layers remain editable regardless of this preference. New boxes on
+a selected Text layer create another editable layer; use **Rasterize Text Layer**
+for direct pixel painting. A preference change applies after any active draft
+finishes. Text editing controls remain in the top toolbar.
 
 ## View tab
 
@@ -84,6 +121,24 @@ The font folder controls where the Text tool discovers project-specific custom f
 - Supported formats are TTF, OTF, WOFF, and WOFF2.
 - Fonts remain in their selected location and are not copied into GDDraw.
 - Reopen the Text font selector after adding files so its available choices can refresh.
+
+### Palette folder and view
+
+**Files > Palettes** chooses the scan and default save folder, initially
+`res://gddraw/palettes`. Project and absolute folders outside `addons/GDDraw` are
+supported. Save writes RGBA `.hex`; Export HEX offers RGB or RGBA copies.
+Startup scans HEX, TXT, GPL, and legacy `.gddrawpalette` files; the
+palette menu also offers Rescan. Scanning does not create missing folders.
+Palette tile size or horizontal-row view is remembered through the palette menu.
+**Show palette files in Godot's FileSystem > Enable** opens a confirmation.
+**Continue** adds missing HEX/GPL
+extensions to Godot's editor-wide text file list and refreshes the FileSystem.
+It preserves existing extensions, applies across projects, and remains enabled
+when GDDraw is disabled. This is optional; GDDraw loads palettes independently.
+The button reads **Enabled** when both extensions are already registered.
+**Cancel** leaves editor settings unchanged. Preference tabs scroll when their
+contents exceed the available space, with focused controls brought into view.
+See [Palettes](palettes.md) for editing, saving, and source-update behavior.
 
 ## Other remembered workspace settings
 

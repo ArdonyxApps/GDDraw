@@ -192,6 +192,7 @@ func requires_layered_persistence() -> bool:
 			default_layer_name = texture_path.get_file()
 	return (
 		not node.is_paint_layer()
+		or node.is_editable_layer()
 		or node.name != default_layer_name
 		or not node.visible
 		or not is_equal_approx(node.opacity, 1.0)
@@ -359,6 +360,12 @@ func _append_layer_fingerprint(parts: PackedStringArray, nodes: Array) -> void:
 		parts.push_back("node")
 		parts.push_back(node.id)
 		parts.push_back(str(node.kind))
+		if node.is_text_layer():
+			parts.push_back(JSON.stringify(node.text_recipe))
+			parts.push_back(_image_fingerprint(node.text_mask))
+		if node.is_gradient_layer():
+			parts.push_back(JSON.stringify(node.gradient_recipe))
+			parts.push_back(_image_fingerprint(node.gradient_mask))
 		parts.push_back(node.name)
 		parts.push_back(str(node.visible))
 		parts.push_back(str(node.opacity))

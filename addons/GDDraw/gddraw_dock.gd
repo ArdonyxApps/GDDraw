@@ -2,6 +2,8 @@
 extends VBoxContainer
 
 const PanelHost := preload("res://addons/GDDraw/gddraw_panel_host.gd")
+const PalettePanel := preload("res://addons/GDDraw/gddraw_palette_panel.gd")
+const GradientPanel := preload("res://addons/GDDraw/gddraw_gradient_panel.gd")
 
 class MeshDropHost:
 	extends Control
@@ -191,16 +193,22 @@ class LayerHierarchyTree:
 	extends Tree
 
 	signal selected_row_reclicked(context: Dictionary)
+	signal context_menu_requested(position: Vector2, button: int)
 	signal lock_slot_hover_changed(context: Dictionary, hovered: bool)
 
 	var can_drop_callback := Callable()
 	var drop_callback := Callable()
+	var drag_callback := Callable()
 	var stable_selected_context: Dictionary = {}
 	var _reclick_candidate: Dictionary = {}
 	var _reclick_press_position := Vector2.ZERO
 	var _hovered_lock_context: Dictionary = {}
 
 	func _gui_input(event: InputEvent) -> void:
+		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+			context_menu_requested.emit(event.position, event.button_index)
+			accept_event()
+			return
 		if event is InputEventMouseMotion:
 			if not _reclick_candidate.is_empty() and event.position.distance_to(_reclick_press_position) > 4.0:
 				_reclick_candidate.clear()
@@ -210,6 +218,7 @@ class LayerHierarchyTree:
 			return
 		if event.pressed:
 			_reclick_candidate.clear()
+			if event.shift_pressed or event.ctrl_pressed or event.meta_pressed: return
 			var item := get_item_at_position(event.position)
 			if not item or item != get_selected() or get_column_at_position(event.position) != 0:
 				return
@@ -293,6 +302,8 @@ class LayerHierarchyTree:
 		var metadata: Variant = item.get_metadata(0)
 		if not metadata is Dictionary or str(metadata.get("kind", "")) not in ["paint", "group"]:
 			return null
+		if drag_callback.is_valid():
+			return drag_callback.call(metadata, item.get_text(0))
 		var preview := Label.new()
 		preview.text = item.get_text(0)
 		preview.modulate = Color(1.0, 1.0, 1.0, 0.9)
@@ -427,6 +438,15 @@ const LAYER_CONTEXT_DUPLICATE := 9
 const LAYER_CONTEXT_HIDE_OTHERS := 10
 const LAYER_CONTEXT_SHOW_ALL := 11
 const LAYER_CONTEXT_MERGE_DOWN := 12
+const LAYER_CONTEXT_RASTERIZE_GRADIENT := 100
+const LAYER_CONTEXT_EDIT_GRADIENT := 101
+const LAYER_CONTEXT_EDIT_TEXT := 102
+const LAYER_CONTEXT_RASTERIZE_TEXT := 103
+const LAYER_CONTEXT_SHOW_SELECTED := 110
+const LAYER_CONTEXT_HIDE_SELECTED := 111
+const LAYER_CONTEXT_LOCK_SELECTED := 112
+const LAYER_CONTEXT_UNLOCK_SELECTED := 113
+var _text_suppress_reopen := false
 const LAYER_CONTEXT_MERGE_VISIBLE := 13
 const LAYER_CONTEXT_NEW_PAINT := 14
 const LAYER_CONTEXT_NEW_GROUP := 15
@@ -535,6 +555,7 @@ enum MenuCommand {
 	SELECT_CANCEL,
 	SELECT_CROP,
 	TOOL_ALPHA_LOCK,
+	TOOL_GRADIENT,
 	TOOL_BRUSH_HEAD_HEADER,
 	TOOL_BRUSH_HEAD_SQUARE,
 	TOOL_BRUSH_HEAD_CIRCLE,
@@ -549,6 +570,7 @@ enum MenuCommand {
 	VIEW_MODE_SPLIT_HORIZONTAL,
 	VIEW_MODE_SPLIT_VERTICAL,
 	VIEW_LAYERS_PANEL,
+	VIEW_PALETTES_PANEL,
 	VIEW_RESET_PANEL_LAYOUT,
 	VIEW_GRID_2D,
 	VIEW_GRID_3D,
@@ -639,6 +661,8 @@ var _canvas_split: SplitContainer
 var _canvas_2d_host: Control
 var _canvas_3d_host: Control
 var _canvas: Control
+var _palette_panel: VBoxContainer
+var _gradient_panel: VBoxContainer
 var _panel_host: PanelContainer
 var _layers_panel_root: PanelContainer
 var _layers_panel_content: VBoxContainer
@@ -784,6 +808,25 @@ var _icon_recovery_cycle := {
 var _icon_import_recovery_torn_down := false
 var _brush_button: Button
 var _fill_button: Button
+var _gradient_button: Button
+var _gradient_options: HBoxContainer
+var _gradient_output_mode: OptionButton
+var _gradient_default_new_layer := true
+var _gradient_always_show_panel := false
+var _gradient_context_key := ""
+var _text_output_mode: OptionButton
+var _text_default_new_layer := true
+var _layers_multi_contexts: Array[Dictionary] = []
+var _layers_multi_focus: Dictionary = {}
+var _layers_multi_pending := false
+var _auto_layer_before: Dictionary = {}
+var _auto_layer_syncing := false
+var _auto_3d_layers: Dictionary = {}
+var _gradient_shape_control: OptionButton
+var _gradient_reverse_control: CheckButton
+var _gradient_suppress_reopen := false
+var _gradient_auto_apply: Timer
+var _gradient_loading := false
 var _shape_button: Button
 var _text_button: Button
 var _line_button: Button
@@ -987,6 +1030,10 @@ var _brush_preset_name: LineEdit
 var _save_location: LineEdit
 var _save_location_dialog: FileDialog
 var _font_location: LineEdit
+var _palette_location: LineEdit
+var _palette_extensions_button: Button
+var _palette_extensions_dialog: ConfirmationDialog
+var _palette_location_dialog: FileDialog
 var _font_location_dialog: FileDialog
 var _create_textured_csg_overlay: PanelContainer
 var _create_textured_csg_shape: OptionButton
@@ -1262,6 +1309,8 @@ func _draw() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if _palette_panel and _palette_panel.owns_input_focus():
+		return
 	if _panel_host and _panel_host.owns_chrome_focus():
 		return
 	_ensure_helpers()
@@ -1282,7 +1331,9 @@ func _input(event: InputEvent) -> void:
 	if action.is_empty() or not _shortcut_is_scoped_to_gddraw():
 		return
 
-	if action == GDDrawShortcutMap.ACTION_COPY:
+	if action == GDDrawShortcutMap.ACTION_GRADIENT:
+		_select_tool(GDDrawCanvasControl.ToolMode.GRADIENT)
+	elif action == GDDrawShortcutMap.ACTION_COPY:
 		if _canvas and _canvas.has_text_draft():
 			_copy_text_draft_contextual()
 		else:
@@ -1313,7 +1364,10 @@ func _input(event: InputEvent) -> void:
 	elif action == GDDrawShortcutMap.ACTION_DUPLICATE:
 		_duplicate_selection()
 	elif action == GDDrawShortcutMap.ACTION_COMMIT:
-		_commit_selection_transform()
+		if _canvas and _canvas._gradient_base:
+			_canvas.commit_gradient()
+		else:
+			_commit_selection_transform()
 	else:
 		return
 
@@ -1566,6 +1620,7 @@ func _select_paint_layer(
 	preserve_same_target_display := false,
 	fast_3d_binding_key := ""
 ) -> bool:
+	_flush_gradient_controls()
 	_resolve_3d_brush_gesture(false)
 	if not _layer_session or not _canvas:
 		return false
@@ -1631,10 +1686,14 @@ func _sync_canvas_to_active_layer(
 			_canvas.set_eraser_restore_image(target.get_selected_eraser_source())
 	else:
 		_canvas.clear_eraser_restore_image()
-	_canvas.editing_enabled = not target.is_node_effectively_locked(target.selected_layer_id)
+	var selected_layer = target.get_selected_layer()
+	_canvas.text_editing_enabled = selected_layer != null and selected_layer.is_editable_layer() and not target.is_node_effectively_locked(target.selected_layer_id)
+	_canvas.gradient_editing_enabled = selected_layer != null and selected_layer.is_editable_layer() and not target.is_node_effectively_locked(target.selected_layer_id)
+	_canvas.editing_enabled = not target.is_node_effectively_locked(target.selected_layer_id) and not (selected_layer and selected_layer.is_editable_layer())
 	_syncing_layer_session = false
 	if _layer_session.session_kind == "3d":
 		_sync_active_3d_uv_overlay()
+	_update_text_output_mode()
 	if _canvas.has_method("get_display_image_reference"):
 		var live_display: Image = _canvas.get_display_image_reference()
 		if live_display:
@@ -1666,6 +1725,12 @@ func _sync_canvas_to_active_layer(
 		"target_id": target.target_id,
 		"node_id": target.selected_layer_id,
 	})
+	if selected_layer and selected_layer.is_text_layer() and not _text_suppress_reopen and not _auto_layer_syncing:
+		_select_tool(GDDrawCanvasControl.ToolMode.TEXT)
+	elif selected_layer and selected_layer.is_gradient_layer() and not _gradient_suppress_reopen and not _auto_layer_syncing:
+		_select_tool(GDDrawCanvasControl.ToolMode.GRADIENT)
+	else:
+		_open_selected_gradient_layer()
 	return true
 
 
@@ -1820,6 +1885,8 @@ func _build_menu_bar() -> void:
 	_select_menu.add_item("Crop to Selection", MenuCommand.SELECT_CROP)
 
 	_tool_menu = _add_menu("Tool")
+	_tool_menu.add_check_item("Gradient", MenuCommand.TOOL_GRADIENT)
+	_tool_menu.add_separator()
 	_brush_preset_menu = PopupMenu.new()
 	_brush_preset_menu.name = "Brush Presets"
 	_brush_preset_menu.id_pressed.connect(_on_brush_preset_menu_selected)
@@ -1855,6 +1922,7 @@ func _build_menu_bar() -> void:
 	_view_menu.add_radio_check_item("Split Vertical", MenuCommand.VIEW_MODE_SPLIT_VERTICAL)
 	_view_menu.add_separator()
 	_view_menu.add_check_item("Layers Panel", MenuCommand.VIEW_LAYERS_PANEL)
+	_view_menu.add_check_item("Palettes Panel", MenuCommand.VIEW_PALETTES_PANEL)
 	_view_menu.add_separator()
 	_view_menu.add_item("Reset Panel Layout", MenuCommand.VIEW_RESET_PANEL_LAYOUT)
 	_view_menu.add_separator()
@@ -2055,6 +2123,8 @@ func _on_menu_command(command_id: int) -> void:
 			var alpha_lock_enabled := not _alpha_lock.button_pressed
 			_alpha_lock.set_pressed_no_signal(alpha_lock_enabled)
 			_on_alpha_lock_toggled(alpha_lock_enabled)
+		MenuCommand.TOOL_GRADIENT:
+			_select_tool(GDDrawCanvasControl.ToolMode.GRADIENT)
 		MenuCommand.TOOL_BRUSH_HEAD_SQUARE:
 			_select_brush_head(GDDrawCanvasControl.BrushHead.SQUARE)
 		MenuCommand.TOOL_BRUSH_HEAD_CIRCLE:
@@ -2084,6 +2154,8 @@ func _on_menu_command(command_id: int) -> void:
 			_set_split_layout(true)
 		MenuCommand.VIEW_LAYERS_PANEL:
 			if _panel_host: _panel_host.toggle_panel("layers")
+		MenuCommand.VIEW_PALETTES_PANEL:
+			if _panel_host: _panel_host.toggle_panel("palettes")
 		MenuCommand.VIEW_RESET_PANEL_LAYOUT:
 			if _panel_host: _panel_host.reset_layout()
 		MenuCommand.VIEW_GRID_2D:
@@ -2253,6 +2325,7 @@ func _sync_menu_state() -> void:
 	_set_menu_item_disabled(_select_menu, MenuCommand.SELECT_CROP, not has_selection or has_active_texture)
 	_set_menu_item_tooltip(_select_menu, MenuCommand.SELECT_CROP, CROP_LOCK_TOOLTIP if has_active_texture else "Crop to the occupied selection bounds.")
 	_set_menu_item_checked(_tool_menu, MenuCommand.TOOL_ALPHA_LOCK, _canvas.alpha_lock)
+	_set_menu_item_checked(_tool_menu, MenuCommand.TOOL_GRADIENT, _canvas.active_tool == GDDrawCanvasControl.ToolMode.GRADIENT)
 	_set_menu_item_checked(_tool_menu, MenuCommand.TOOL_BRUSH_HEAD_SQUARE, _canvas.brush_head == GDDrawCanvasControl.BrushHead.SQUARE)
 	_set_menu_item_checked(_tool_menu, MenuCommand.TOOL_BRUSH_HEAD_CIRCLE, _canvas.brush_head == GDDrawCanvasControl.BrushHead.CIRCLE)
 	_set_menu_item_checked(_tool_menu, MenuCommand.TOOL_TOUCH_PIXELS, _canvas.brush_touch_pixels)
@@ -2264,6 +2337,7 @@ func _sync_menu_state() -> void:
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MODE_SPLIT_HORIZONTAL, _canvas_mode == CANVAS_MODE_SPLIT and not _split_vertical)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_MODE_SPLIT_VERTICAL, _canvas_mode == CANVAS_MODE_SPLIT and _split_vertical)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_LAYERS_PANEL, _layers_panel_expanded)
+	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_PALETTES_PANEL, _panel_host.is_panel_open("palettes") if _panel_host else false)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_GRID_2D, _canvas.show_grid)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_GRID_3D, _preview_3d_grid_visible)
 	_set_menu_item_checked(_view_menu, MenuCommand.VIEW_SNAP_TO_GRID, _canvas.snap_to_grid)
@@ -2407,6 +2481,12 @@ func _build_tool_rail(parent: Container) -> void:
 	_fill_button = _make_icon_button("paint-bucket_0.svg", "Paint bucket", true)
 	_fill_button.toggled.connect(_on_fill_toggled)
 	tool_rail.add_child(_fill_button)
+
+	_gradient_button = _make_icon_button("gradient_0.svg", "Gradient (G): drag and release to apply; drag a node to edit, drag elsewhere for a new layer", true, "gradient_1.svg")
+	_gradient_button.toggled.connect(func(enabled: bool):
+		if enabled: _select_tool(GDDrawCanvasControl.ToolMode.GRADIENT)
+		elif not _has_selected_tool(): _select_tool(GDDrawCanvasControl.ToolMode.BRUSH))
+	tool_rail.add_child(_gradient_button)
 
 	_shape_button = _make_icon_button("shapes_0.svg", "Shapes", true)
 	_shape_button.toggled.connect(_on_shape_toggled)
@@ -2798,6 +2878,21 @@ func _build_options_bar() -> void:
 	_update_fill_settings_button()
 
 	_shape_options = HBoxContainer.new()
+	_gradient_options = HBoxContainer.new()
+	_gradient_options.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
+	options_bar.add_child(_gradient_options)
+	var gradient_shape := OptionButton.new()
+	_gradient_shape_control = gradient_shape
+	gradient_shape.add_item("Linear")
+	gradient_shape.add_item("Radial")
+	gradient_shape.tooltip_text = "Gradient shape"
+	gradient_shape.item_selected.connect(func(index: int): _canvas.gradient_radial = index == 1)
+	_gradient_options.add_child(gradient_shape)
+	var gradient_reverse := CheckButton.new()
+	_gradient_reverse_control = gradient_reverse
+	gradient_reverse.text = "Reverse"
+	gradient_reverse.toggled.connect(func(enabled: bool): _canvas.gradient_reverse = enabled)
+	_gradient_options.add_child(gradient_reverse)
 	_shape_options.add_theme_constant_override("separation", TOOLBAR_SEPARATION)
 	options_bar.add_child(_shape_options)
 
@@ -2926,7 +3021,7 @@ func _build_options_bar() -> void:
 	_text_options.add_child(text_rotation_controls["control"] as Control)
 	_add_tool_options_separator(_text_options, "Text Commit Separator")
 
-	_text_commit_button = _make_icon_button("check_0.svg", "Rasterize this text as one undoable operation (Ctrl+Enter)")
+	_text_commit_button = _make_icon_button("check_0.svg", "Save this editable Text layer as one undoable operation (Ctrl+Enter)")
 	_text_commit_button.name = "Commit Text"
 	_text_commit_button.pressed.connect(_commit_text_draft)
 	_text_options.add_child(_text_commit_button)
@@ -3080,6 +3175,7 @@ func _build_layer_workspace(parent: Container) -> void:
 
 func _build_layers_panel(parent: Container) -> void:
 	_panel_host = PanelHost.new()
+	_panel_host.menu_created.connect(_register_panel_menu_icon)
 	_layers_panel_root = _panel_host
 	_layers_content_background_color = _get_layers_tab_background_color()
 	_panel_host.surface_color = _layers_content_background_color
@@ -3158,63 +3254,79 @@ func _build_layers_panel(parent: Container) -> void:
 	# native ellipsis rendering and retain their complete value in the tooltip.
 	_layers_tree.scroll_horizontal_enabled = false
 	_layers_tree.scroll_vertical_enabled = true
-	_layers_tree.select_mode = Tree.SELECT_ROW
-	# Match Godot's Scene/FileSystem docks: right-click first selects the row,
-	# then item_mouse_selected supplies that stable row to the native PopupMenu.
+	_layers_tree.select_mode = Tree.SELECT_MULTI
+	# The custom right-click signal also fires on already-selected rows;
+	# the menu handler preserves their multi-selection.
 	_layers_tree.allow_rmb_select = true
 	_layers_tree.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_layers_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_layers_tree.custom_minimum_size.y = 72
 	(_layers_tree as LayerHierarchyTree).can_drop_callback = Callable(self, "_can_drop_layer_tree_data")
 	(_layers_tree as LayerHierarchyTree).drop_callback = Callable(self, "_drop_layer_tree_data")
+	(_layers_tree as LayerHierarchyTree).drag_callback = Callable(self, "_make_layer_drag_data")
 	_layers_tree.item_selected.connect(_on_layers_tree_item_selected)
+	_layers_tree.multi_selected.connect(_on_layers_tree_multi_selected)
 	_layers_tree.item_edited.connect(_on_layers_tree_item_edited)
 	_layers_tree.button_clicked.connect(_on_layers_tree_button_clicked)
-	_layers_tree.item_mouse_selected.connect(_on_layers_tree_item_mouse_selected)
+	_layers_tree.context_menu_requested.connect(_on_layers_tree_item_mouse_selected)
 	(_layers_tree as LayerHierarchyTree).selected_row_reclicked.connect(_on_layers_tree_row_reclicked)
 	(_layers_tree as LayerHierarchyTree).lock_slot_hover_changed.connect(_on_layers_tree_lock_slot_hover_changed)
 	_layers_panel_content.add_child(_layers_tree)
 
-	var actions := Control.new()
-	actions.name = "Layers Bottom Toolbar"
-	actions.custom_minimum_size.y = TOOL_BUTTON_SIZE.y
-	_layers_panel_content.add_child(actions)
-	var centered_actions := CenterContainer.new()
-	centered_actions.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	actions.add_child(centered_actions)
-	var create_actions := HBoxContainer.new()
-	create_actions.add_theme_constant_override("separation", 4)
-	centered_actions.add_child(create_actions)
+	var footer := MarginContainer.new()
+	footer.name = "Layers Bottom Toolbar"
+	footer.add_theme_constant_override("margin_top", 4)
+	footer.add_theme_constant_override("margin_bottom", 8)
+	_layers_panel_content.add_child(footer)
+	var actions := HBoxContainer.new()
+	footer.add_child(actions)
 	_layers_add_button = _make_icon_button(
 		"layers-plus_0.svg", "Add Layer: add a paint layer above the current item", false, "layers-plus_1.svg"
 	)
 	_layers_add_button.pressed.connect(_on_layers_add_pressed)
-	create_actions.add_child(_layers_add_button)
 	_layers_group_button = _make_icon_button(
 		"folder-plus_0.svg", "Add Group: create a group containing the current item", false, "folder-plus_1.svg"
 	)
 	_layers_group_button.pressed.connect(_on_layers_group_pressed)
-	create_actions.add_child(_layers_group_button)
 	_layers_delete_button = _make_icon_button(
 		"trash-2_0.svg", "Delete the selected layer or group", false, "trash-2_1.svg"
 	)
 	_layers_delete_button.name = "Delete Selected Layer"
 	_layers_delete_button.pressed.connect(_on_layers_delete_pressed)
-	actions.add_child(_layers_delete_button)
-	# Explicit offsets keep the button's entire rect above the bottom perimeter.
-	# The previous preset ran before layout and could center it on that edge.
-	_layers_delete_button.set_anchor(SIDE_LEFT, 1.0)
-	_layers_delete_button.set_anchor(SIDE_TOP, 0.5)
-	_layers_delete_button.set_anchor(SIDE_RIGHT, 1.0)
-	_layers_delete_button.set_anchor(SIDE_BOTTOM, 0.5)
-	_layers_delete_button.offset_left = -TOOL_BUTTON_SIZE.x
-	_layers_delete_button.offset_top = -TOOL_BUTTON_SIZE.y * 0.5
-	_layers_delete_button.offset_right = 0.0
-	_layers_delete_button.offset_bottom = TOOL_BUTTON_SIZE.y * 0.5
+	# Match the Gradient footer: equal cells center the actions with symmetric
+	# side spacing, while the margin keeps all buttons above the bottom edge.
+	for button in [_layers_add_button, _layers_group_button, _layers_delete_button]:
+		var cell := CenterContainer.new()
+		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		actions.add_child(cell)
+		cell.add_child(button)
 
 	_build_layers_context_menu()
 	_panel_host.register_panel("layers", "Layers", _layers_panel_toggle.icon,
 		_layers_panel_content, Vector2(240, 150), _layers_panel_toggle)
+	_palette_panel = PalettePanel.new()
+	_palette_panel.filesystem_refresh_requested.connect(_request_resource_filesystem_scan)
+	_configure_icon_button(_palette_panel.new_button, "plus_0.svg", "New Palette")
+	_configure_icon_button(_palette_panel.save_button, "save_0.svg", "Save Palette")
+	_palette_panel.new_button.focus_mode = Control.FOCUS_ALL
+	_palette_panel.save_button.focus_mode = Control.FOCUS_ALL
+	_palette_panel.configure(_get_editor_settings(), _get_palette_dir())
+	_register_panel_menu_icon(_palette_panel.menu)
+	_palette_panel.color_requested.connect(_on_palette_color_requested)
+	var palette_button := _make_icon_button("palette_0.svg", "Palettes", true, "palette_1.svg")
+	_panel_host.register_panel("palettes", "Palettes", palette_button.icon,
+		_palette_panel, Vector2(160, 100), palette_button)
+	_palette_panel.set_colors(_foreground_color_picker.color, _background_color_picker.color)
+	_gradient_panel = GradientPanel.new()
+	_configure_icon_button(_gradient_panel.add_button, "plus_0.svg", "Add gradient stop")
+	_configure_icon_button(_gradient_panel.duplicate_button, "copy_0.svg", "Duplicate selected stop")
+	_configure_icon_button(_gradient_panel.delete_button, "trash-2_0.svg", "Delete selected stop")
+	_panel_host.parking.add_child(_gradient_panel)
+	_gradient_panel.hide()
+	_gradient_panel.bind_canvas(_canvas)
+	_gradient_panel.edit_layer_requested.connect(func(): _select_tool(GDDrawCanvasControl.ToolMode.GRADIENT))
+	_gradient_always_show_panel = _get_gradient_always_show_panel()
+	if _gradient_always_show_panel: _register_persistent_gradient_panel()
 	_panel_host.restore_layout(_get_editor_settings(), _layers_panel_width, _layers_panel_expanded)
 	_panel_host.layout_changed.connect(_on_panel_layout_changed)
 	var group: Dictionary = _panel_host.group_for_panel("layers")
@@ -3258,18 +3370,21 @@ func _make_layers_tree_panel_style() -> StyleBoxFlat:
 func _on_layers_panel_toggled(expanded: bool) -> void:
 	if not _panel_host: return
 	if expanded: _panel_host.activate_panel("layers")
-	else: _panel_host.collapse_group(_panel_host.group_for_panel("layers").id)
+	else: _panel_host.close_panel("layers")
 
 
 func _on_panel_layout_changed() -> void:
-	_layers_panel_expanded = _panel_host.is_panel_active("layers")
+	_layers_panel_expanded = _panel_host.is_panel_open("layers")
 	_layers_panel_width = _panel_host.dock_width
 	var group: Dictionary = _panel_host.group_for_panel("layers")
 	var view: Control = _panel_host.group_views[group.id]
 	_layers_panel_surface = view
 	_layers_tab_strip = view.strip
 	_layers_panel_tabs = view.tabs
-	_update_toggle_button_icon(_layers_panel_toggle)
+	for id in _panel_host.panels:
+		var button: Button = _panel_host.panels[id].button
+		button.set_pressed_no_signal(_panel_host.is_panel_open(id))
+		_update_toggle_button_icon(button)
 	_workspace_layers_split.dragger_visibility = (
 		SplitContainer.DRAGGER_VISIBLE if _panel_host.has_visible_groups()
 		else SplitContainer.DRAGGER_HIDDEN_COLLAPSED)
@@ -3360,6 +3475,9 @@ func _refresh_layers_tree(preferred_selection: Dictionary = {}) -> void:
 		return
 	if not _layers_tree or not _layer_session:
 		return
+	if not preferred_selection.is_empty():
+		_layers_multi_contexts.clear()
+		_layers_multi_focus.clear()
 	var selection := preferred_selection
 	if selection.is_empty():
 		selection = _get_selected_layers_context()
@@ -3380,6 +3498,7 @@ func _refresh_layers_tree(preferred_selection: Dictionary = {}) -> void:
 		(_layers_tree as LayerHierarchyTree).stable_selected_context = selected_item.get_metadata(0).duplicate(true)
 	else:
 		(_layers_tree as LayerHierarchyTree).stable_selected_context.clear()
+	_restore_layers_multi_selection()
 	if _layers_target_lock:
 		_layers_target_lock.set_pressed_no_signal(_layer_session.target_lock_enabled)
 	_syncing_layers_ui = false
@@ -3557,7 +3676,7 @@ func _append_layer_node_tree_item(
 	item.set_metadata(0, metadata)
 	item.set_text(0, _get_layer_tree_display_text(row_name))
 	item.set_text_overrun_behavior(0, TextServer.OVERRUN_TRIM_ELLIPSIS)
-	item.set_tooltip_text(0, "%s (%s)" % [row_name, "paint layer" if node.is_paint_layer() else "layer group"])
+	item.set_tooltip_text(0, "%s (%s)" % [row_name, "editable text layer" if node.is_text_layer() else ("editable gradient layer" if node.is_gradient_layer() else ("paint layer" if node.is_paint_layer() else "layer group"))])
 	var hierarchy_selected := _layers_context_matches(metadata, selection)
 	var effectively_locked: bool = target.is_node_effectively_locked(node.id)
 	var inherited_locked: bool = target.is_node_locked_by_ancestor(node.id)
@@ -3589,7 +3708,7 @@ func _append_layer_node_tree_item(
 	var thumbnail_texture := _get_layer_thumbnail_texture(target, node)
 	if thumbnail_texture:
 		item.set_icon(0, thumbnail_texture)
-		item.set_icon_max_width(0, LAYER_THUMBNAIL_SIZE)
+		item.set_icon_max_width(0, LAYER_THUMBNAIL_SIZE + 12)
 	item.set_collapsed(false)
 	var selected_item: TreeItem = item if hierarchy_selected else null
 	for child in node.children:
@@ -3624,7 +3743,16 @@ func _get_layer_thumbnail_texture(target, node) -> Texture2D:
 		)
 	if not thumbnail:
 		return _get_layer_tree_icon("folder_1.svg", 16) if node.is_group() else null
-	var texture := ImageTexture.create_from_image(thumbnail)
+	# A narrow type column remains outside the artwork thumbnail.
+	var decorated := Image.create_empty(LAYER_THUMBNAIL_SIZE + 12, LAYER_THUMBNAIL_SIZE, false, Image.FORMAT_RGBA8)
+	decorated.blit_rect(thumbnail, Rect2i(Vector2i.ZERO, thumbnail.get_size()), Vector2i(12, 0))
+	var type_icon := _get_layer_tree_icon("type_0.svg" if node.is_text_layer() else ("gradient_0.svg" if node.is_gradient_layer() else ("folder_1.svg" if node.is_group() else "pencil_0.svg")), 10)
+	var marker: Image = type_icon.get_image() if type_icon else null
+	if marker:
+		if marker.is_compressed(): marker.decompress()
+		marker.convert(Image.FORMAT_RGBA8)
+		decorated.blit_rect(marker, Rect2i(Vector2i.ZERO, marker.get_size()), Vector2i(0, (LAYER_THUMBNAIL_SIZE - marker.get_height()) / 2))
+	var texture := ImageTexture.create_from_image(decorated)
 	_layer_thumbnail_cache[cache_key] = texture
 	return texture
 
@@ -3637,6 +3765,7 @@ func _make_layer_thumbnail_cache_key(target, node) -> String:
 
 func _append_layer_thumbnail_cache_key(parts: PackedStringArray, target_id: String, node) -> void:
 	parts.push_back(str(node.id))
+	parts.push_back("kind=" + str(node.kind))
 	parts.push_back(str(node.visible))
 	parts.push_back(str(node.opacity))
 	parts.push_back("revision=" + str(_layer_thumbnail_revisions.get(target_id + ":" + str(node.id), 0)))
@@ -3885,6 +4014,16 @@ func _sync_layers_tree_selection(context: Dictionary) -> void:
 		return
 	if not _layers_tree or context.is_empty():
 		return
+	if not _layers_multi_contexts.is_empty():
+		for selected in _layers_multi_contexts:
+			if _layers_context_matches(selected, context):
+				_refresh_layers_controls()
+				return
+		_layers_multi_contexts.clear()
+		_layers_multi_focus.clear()
+		_syncing_layers_ui = true
+		_layers_tree.deselect_all()
+		_syncing_layers_ui = false
 	var current_item := _layers_tree.get_selected()
 	var current_context: Variant = current_item.get_metadata(0) if current_item else null
 	if current_context is Dictionary and _layers_context_matches(current_context, context):
@@ -3925,6 +4064,8 @@ func _layers_context_matches(left: Variant, right: Dictionary) -> bool:
 
 
 func _get_selected_layers_context() -> Dictionary:
+	if not _layers_multi_contexts.is_empty():
+		return (_layers_multi_focus if not _layers_multi_focus.is_empty() else _layers_multi_contexts[0]).duplicate(true)
 	if not _layers_tree:
 		return {}
 	var item := _layers_tree.get_selected()
@@ -3962,18 +4103,87 @@ func _refresh_layers_controls() -> void:
 	_layers_group_button.disabled = target == null or effectively_locked
 	_layers_add_button.disabled = target == null or (node != null and node.is_group() and effectively_locked)
 	_layers_delete_button.disabled = node == null or not target.can_remove_node(node.id)
+	var ids := _selected_layer_ids(str(context.get("target_id", "")))
+	if target and ids.size() > 1:
+		_layers_delete_button.disabled = not target.can_apply_selection(ids, "delete")
+		_layers_group_button.disabled = target.group_selection_plan(ids).is_empty()
+		_layers_lock_button.disabled = not target.can_apply_selection(ids, "lock")
 	for button in [_layers_lock_button, _layers_add_button, _layers_group_button, _layers_delete_button]:
 		_update_icon_button_icon(button)
 	_syncing_layers_ui = false
 
 
 func _on_layers_tree_item_selected() -> void:
+	if _layers_tree.select_mode == Tree.SELECT_MULTI: return
 	if _syncing_layers_ui:
 		return
 	var context := _get_selected_layers_context()
 	# Selection is a native Tree callback. Carry only stable IDs across the
 	# message boundary so canvas synchronization cannot clear the live TreeItem.
 	call_deferred("_apply_layers_tree_selection", context.duplicate(true))
+
+func _on_layers_tree_multi_selected(item: TreeItem, column: int, selected: bool) -> void:
+	if _syncing_layers_ui or column != 0: return
+	if selected and item.get_metadata(0) is Dictionary:
+		_layers_multi_focus = item.get_metadata(0).duplicate(true)
+	if not _layers_multi_pending:
+		_layers_multi_pending = true
+		call_deferred("_apply_layers_multi_selection")
+
+func _apply_layers_multi_selection() -> void:
+	_layers_multi_pending = false
+	if not is_instance_valid(_layers_tree): return
+	var selected: Array[Dictionary] = []
+	var item := _layers_tree.get_next_selected(null)
+	while item:
+		var context: Variant = item.get_metadata(0)
+		if context is Dictionary: selected.append(context.duplicate(true))
+		item = _layers_tree.get_next_selected(item)
+	if selected.is_empty():
+		_layers_multi_contexts.clear()
+		_layers_multi_focus.clear()
+		_refresh_layers_controls()
+		return
+	if not selected.any(func(context): return _layers_context_matches(context, _layers_multi_focus)):
+		_layers_multi_focus = selected[0]
+	# One target owns a layer group. Headers and other targets cannot become
+	# accidental members of a Shift-selected range.
+	var focus_kind := str(_layers_multi_focus.get("kind", ""))
+	var target_id := str(_layers_multi_focus.get("target_id", ""))
+	_layers_multi_contexts.clear()
+	for context in selected:
+		if focus_kind in ["paint", "group"]:
+			if str(context.get("kind", "")) in ["paint", "group"] and str(context.get("target_id", "")) == target_id:
+				_layers_multi_contexts.append(context)
+		elif _layers_context_matches(context, _layers_multi_focus): _layers_multi_contexts.append(context)
+	_syncing_layers_ui = true
+	_restore_layers_multi_selection()
+	_syncing_layers_ui = false
+	if _layers_multi_contexts.size() == 1:
+		_apply_layers_tree_selection(_layers_multi_focus.duplicate(true))
+	else:
+		_prepare_layer_operation()
+		_refresh_layers_controls()
+
+func _restore_layers_multi_selection() -> void:
+	if _layers_multi_contexts.is_empty(): return
+	_layers_tree.deselect_all()
+	var valid: Array[Dictionary] = []
+	for context in _layers_multi_contexts:
+		var item := _find_layers_tree_item(_layers_tree.get_root(), str(context.get("kind", "")), str(context.get("target_id", "")), str(context.get("node_id", "")), str(context.get("group_id", "")))
+		if item:
+			item.select(0)
+			valid.append(context)
+	_layers_multi_contexts = valid
+	if not valid.any(func(context): return _layers_context_matches(context, _layers_multi_focus)):
+		_layers_multi_focus = valid[0] if not valid.is_empty() else {}
+
+func _selected_layer_ids(target_id: String) -> Array:
+	var ids: Array = []
+	for context in _layers_multi_contexts:
+		if str(context.get("target_id", "")) == target_id and str(context.get("kind", "")) in ["paint", "group"]:
+			ids.append(str(context.node_id))
+	return ids
 
 
 func _apply_layers_tree_selection(context: Dictionary) -> void:
@@ -4004,6 +4214,10 @@ func _apply_layers_tree_selection(context: Dictionary) -> void:
 				)
 				paint_binding_key = str(paint_binding.get("binding_key", ""))
 			_select_paint_layer(target.target_id, selected_node_id, true, paint_binding_key)
+		elif target.find_node(selected_node_id).is_gradient_layer():
+			_select_tool(GDDrawCanvasControl.ToolMode.GRADIENT)
+		elif target.find_node(selected_node_id).is_text_layer():
+			_select_tool(GDDrawCanvasControl.ToolMode.TEXT)
 		_sync_layers_tree_selection(context)
 	elif kind == "target":
 		var target_binding: Dictionary
@@ -4243,6 +4457,12 @@ func _sync_layers_tree_lock_hover_items(parent: TreeItem) -> void:
 
 
 func _on_layers_tree_row_reclicked(context: Dictionary) -> void:
+	if _layers_multi_contexts.size() > 1: return
+	var target = _get_layers_context_target(context)
+	var node = target.find_node(str(context.get("node_id", ""))) if target else null
+	if node and node.is_text_layer():
+		call_deferred("_select_tool", GDDrawCanvasControl.ToolMode.TEXT)
+		return
 	# The release originated inside Tree._gui_input. Resolve the row by stable
 	# IDs on the next message cycle before enabling native inline editing.
 	call_deferred("_begin_layer_inline_rename", context.duplicate(true))
@@ -4269,7 +4489,8 @@ func _build_layers_context_menu() -> void:
 
 
 func _show_layers_context_menu(context: Dictionary, screen_position: Vector2i) -> void:
-	if not _select_layers_tree_context(context):
+	var keep_selection := _layers_multi_contexts.size() > 1 and _layers_multi_contexts.any(func(selected): return _layers_context_matches(selected, context))
+	if not keep_selection and not _select_layers_tree_context(context):
 		return
 	_layers_context_menu_context = context.duplicate(true)
 	_layers_context_menu.clear()
@@ -4282,6 +4503,19 @@ func _show_layers_context_menu(context: Dictionary, screen_position: Vector2i) -
 		_configure_3d_target_context_menu(context)
 	else:
 		_configure_2d_document_context_menu(context)
+	if keep_selection:
+		_layers_context_menu.clear()
+		var ids := _selected_layer_ids(str(context.target_id))
+		_layers_context_menu_context["node_ids"] = ids.duplicate()
+		var target = _get_layers_context_target(context)
+		for entry in [["Show Selected", LAYER_CONTEXT_SHOW_SELECTED, "show"], ["Hide Selected", LAYER_CONTEXT_HIDE_SELECTED, "hide"], ["Lock Selected", LAYER_CONTEXT_LOCK_SELECTED, "lock"], ["Unlock Selected", LAYER_CONTEXT_UNLOCK_SELECTED, "unlock"], ["Duplicate Selected", LAYER_CONTEXT_DUPLICATE, "duplicate"]]:
+			_layers_context_menu.add_item(entry[0], entry[1])
+			_set_layers_context_item_disabled(entry[1], not target or not target.can_apply_selection(ids, entry[2]))
+		_layers_context_menu.add_separator()
+		_layers_context_menu.add_item("Group Selected", LAYER_CONTEXT_NEW_GROUP, GDDrawShortcutMap.LAYER_TREE_NEW_GROUP_ACCELERATOR)
+		_set_layers_context_item_disabled(LAYER_CONTEXT_NEW_GROUP, not target or target.group_selection_plan(_selected_layer_ids(target.target_id)).is_empty())
+		_layers_context_menu.add_item("Delete Selected", LAYER_CONTEXT_DELETE, GDDrawShortcutMap.LAYER_TREE_DELETE_ACCELERATOR)
+		_set_layers_context_item_disabled(LAYER_CONTEXT_DELETE, not target or not target.can_apply_selection(ids, "delete"))
 	if _layers_context_menu.item_count <= 0:
 		return
 	_layers_context_menu.position = screen_position
@@ -4311,6 +4545,16 @@ func _configure_layer_context_menu(context: Dictionary) -> void:
 	_layers_context_menu.add_item("Unlock" if node.locked else "Lock", LAYER_CONTEXT_LOCK)
 	_layers_context_menu.add_separator()
 	_layers_context_menu.add_item("Merge Down", LAYER_CONTEXT_MERGE_DOWN)
+	if node.is_text_layer():
+		_layers_context_menu.add_item("Edit Text Layer", LAYER_CONTEXT_EDIT_TEXT)
+		_set_layers_context_item_disabled(LAYER_CONTEXT_EDIT_TEXT, effectively_locked)
+		_layers_context_menu.add_item("Rasterize Text Layer", LAYER_CONTEXT_RASTERIZE_TEXT)
+		_set_layers_context_item_disabled(LAYER_CONTEXT_RASTERIZE_TEXT, effectively_locked)
+	if node.is_gradient_layer():
+		_layers_context_menu.add_item("Edit Gradient Layer", LAYER_CONTEXT_EDIT_GRADIENT)
+		_set_layers_context_item_disabled(LAYER_CONTEXT_EDIT_GRADIENT, effectively_locked)
+		_layers_context_menu.add_item("Rasterize Gradient Layer", LAYER_CONTEXT_RASTERIZE_GRADIENT)
+		_set_layers_context_item_disabled(LAYER_CONTEXT_RASTERIZE_GRADIENT, effectively_locked)
 	_layers_context_menu.add_item("Merge Visible", LAYER_CONTEXT_MERGE_VISIBLE)
 	_layers_context_menu.add_separator()
 	_layers_context_menu.add_item("New Paint Layer", LAYER_CONTEXT_NEW_PAINT, GDDrawShortcutMap.LAYER_TREE_NEW_PAINT_ACCELERATOR)
@@ -4434,7 +4678,10 @@ func _select_layers_tree_context(context: Dictionary) -> bool:
 	)
 	if not item:
 		return false
+	_layers_multi_contexts.clear()
+	_layers_multi_focus.clear()
 	_syncing_layers_ui = true
+	_layers_tree.deselect_all()
 	item.select(0)
 	_syncing_layers_ui = false
 	(_layers_tree as LayerHierarchyTree).stable_selected_context = context.duplicate(true)
@@ -4448,7 +4695,20 @@ func _on_layers_context_menu_id_pressed(command_id: int) -> void:
 	var context := _layers_context_menu_context.duplicate(true)
 	if context.is_empty():
 		return
+	var bulk_actions := {LAYER_CONTEXT_SHOW_SELECTED: "show", LAYER_CONTEXT_HIDE_SELECTED: "hide", LAYER_CONTEXT_LOCK_SELECTED: "lock", LAYER_CONTEXT_UNLOCK_SELECTED: "unlock", LAYER_CONTEXT_DUPLICATE: "duplicate"}
+	if context.has("node_ids") and bulk_actions.has(command_id):
+		_apply_layer_selection_action(context, bulk_actions[command_id])
+		return
 	match command_id:
+		LAYER_CONTEXT_EDIT_TEXT:
+			_select_paint_layer(str(context.get("target_id", "")), str(context.get("node_id", "")))
+			_select_tool(GDDrawCanvasControl.ToolMode.TEXT)
+		LAYER_CONTEXT_RASTERIZE_TEXT:
+			_rasterize_text_layer(context)
+		LAYER_CONTEXT_RASTERIZE_GRADIENT:
+			_rasterize_gradient_layer(context)
+		LAYER_CONTEXT_EDIT_GRADIENT:
+			_select_paint_layer(str(context.get("target_id", "")), str(context.get("node_id", "")))
 		LAYER_CONTEXT_CUT:
 			_cut_layer_context(context)
 		LAYER_CONTEXT_COPY:
@@ -4616,6 +4876,12 @@ func _open_missing_textures_for_object_context(context: Dictionary) -> void:
 
 
 func _duplicate_layer_context(context: Dictionary) -> void:
+	var ids := _selected_layer_ids(str(context.get("target_id", "")))
+	if ids.size() > 1:
+		var bulk := context.duplicate(true)
+		bulk["node_ids"] = ids
+		_apply_layer_selection_action(bulk, "duplicate")
+		return
 	var target = _get_layers_context_target(context)
 	var node_id := str(context.get("node_id", ""))
 	if not target or node_id.is_empty():
@@ -5125,17 +5391,29 @@ func _toggle_layer_context_lock(context: Dictionary) -> void:
 func _on_layers_lock_toggled(_enabled: bool) -> void:
 	if _syncing_layers_ui:
 		return
+	var context := _get_selected_layers_context().duplicate(true)
+	var ids := _selected_layer_ids(str(context.get("target_id", "")))
+	if ids.size() > 1:
+		context["node_ids"] = ids
+		_apply_layer_selection_action(context, "lock" if _enabled else "unlock")
+		return
 	_toggle_layer_context_lock(_get_selected_layers_context())
 
 
 func _prepare_layer_operation() -> void:
+	if not _auto_layer_before.is_empty() and _canvas:
+		_canvas._end_stroke()
+		_canvas.cancel_surface_shape_preview()
+	_flush_gradient_controls()
 	_resolve_3d_brush_gesture(false)
 	if not _canvas:
 		return
+	_canvas.cancel_gradient()
 	if _canvas.has_text_draft():
 		_canvas.finish_text_draft(true)
 	if _canvas.has_floating_selection():
 		_canvas.commit_active_selection_transform()
+	_finish_auto_layer_if_idle()
 
 
 func _refresh_layer_composite() -> void:
@@ -5147,7 +5425,10 @@ func _refresh_layer_composite() -> void:
 	)
 	var target = _layer_session.get_active_target()
 	if target:
-		_canvas.editing_enabled = not target.is_node_effectively_locked(target.selected_layer_id)
+		var node = target.get_selected_layer()
+		_canvas.text_editing_enabled = node != null and node.is_editable_layer() and not target.is_node_effectively_locked(target.selected_layer_id)
+		_canvas.gradient_editing_enabled = node != null and node.is_editable_layer() and not target.is_node_effectively_locked(target.selected_layer_id)
+		_canvas.editing_enabled = not target.is_node_effectively_locked(target.selected_layer_id) and not (node and node.is_editable_layer())
 	_sync_3d_paint_texture()
 	_update_3d_session_status(_get_canvas_output_image())
 	_refresh_canvas_visible_pixels_state()
@@ -5185,6 +5466,19 @@ func _on_layers_group_pressed() -> void:
 	var target = _get_layers_context_target(context)
 	if not target:
 		return
+	var selected_ids := _selected_layer_ids(target.target_id)
+	if selected_ids.size() > 1:
+		_prepare_layer_operation()
+		var before: Dictionary = _layer_session.capture_state()
+		var grouped: String = target.group_nodes(selected_ids)
+		if grouped.is_empty():
+			_set_status("Could not group the selection. Check layer and ancestor locks.")
+			return
+		_push_layer_session_state_undo(before)
+		_refresh_layer_composite()
+		_refresh_layers_tree({"kind": "group", "target_id": target.target_id, "node_id": grouped})
+		_set_status("Grouped the selected layers.")
+		return
 	_prepare_layer_operation()
 	var previous_state: Dictionary = _layer_session.capture_state()
 	var selected_node = target.find_node(str(context.get("node_id", ""))) if context.has("node_id") else null
@@ -5213,7 +5507,19 @@ func _on_layers_delete_pressed() -> void:
 
 
 func _request_layer_delete(context: Dictionary) -> void:
+	context = context.duplicate(true)
+	if not context.has("node_ids"):
+		var ids := _selected_layer_ids(str(context.get("target_id", "")))
+		if ids.size() > 1: context["node_ids"] = ids
 	var target = _get_layers_context_target(context)
+	if target and context.has("node_ids"):
+		if not target.can_apply_selection(context.node_ids, "delete"):
+			_set_status("The selection is protected by a lock or includes the target's last paint layer.")
+			return
+		_pending_layer_delete_context = context
+		_configure_layer_delete_count(target, context.node_ids)
+		_layers_delete_dialog.popup_centered(Vector2i(390, 130))
+		return
 	var node_id := str(context.get("node_id", ""))
 	if not target or node_id.is_empty():
 		return
@@ -5223,11 +5529,29 @@ func _request_layer_delete(context: Dictionary) -> void:
 		_refresh_layers_tree(context)
 		return
 	_pending_layer_delete_context = context.duplicate(true)
-	_layers_delete_dialog.dialog_text = "Delete %s \"%s\"?" % [
-		"paint layer" if node.is_paint_layer() else "layer group",
-		node.name,
-	]
+	_configure_layer_delete_count(target, [node_id])
 	_layers_delete_dialog.popup_centered(Vector2i(390, 130))
+
+
+func _configure_layer_delete_count(target, ids: Array) -> void:
+	var pending: Array = target.selection_roots(ids).map(func(id): return target.find_node(id))
+	var layers := 0
+	var groups := 0
+	while not pending.is_empty():
+		var node = pending.pop_back()
+		if node.is_group():
+			groups += 1
+			pending.append_array(node.children)
+		else: layers += 1
+	var parts: PackedStringArray = []
+	if layers > 0: parts.append("%d layer%s" % [layers, "s" if layers != 1 else ""])
+	if groups > 0: parts.append("%d group%s" % [groups, "s" if groups != 1 else ""])
+	var description := " and ".join(parts)
+	_layers_delete_dialog.title = "Delete " + description
+	_layers_delete_dialog.ok_button_text = "Delete %d item%s" % [layers + groups, "s" if layers + groups != 1 else ""]
+	_layers_delete_dialog.dialog_text = "Delete %s?" % description
+	if ids.size() == 1:
+		_layers_delete_dialog.dialog_text = "Delete \"%s\" (%s)?" % [target.find_node(ids[0]).name, description]
 
 
 func _cancel_layer_delete() -> void:
@@ -5238,6 +5562,9 @@ func _cancel_layer_delete() -> void:
 func _confirm_layer_delete() -> void:
 	var context := _pending_layer_delete_context.duplicate(true)
 	_pending_layer_delete_context.clear()
+	if context.has("node_ids"):
+		_apply_layer_selection_action(context, "delete")
+		return
 	var target = _get_layers_context_target(context)
 	var node_id := str(context.get("node_id", ""))
 	if not target or node_id.is_empty():
@@ -5286,6 +5613,44 @@ func _move_layer_context_with_method(context: Dictionary, method_name: String, s
 	_set_status(success_message)
 
 
+func _set_layer_multi_selection(target, ids: Array) -> void:
+	_layers_multi_contexts.clear()
+	for id in ids:
+		var node = target.find_node(id)
+		if node:
+			_layers_multi_contexts.append({"kind": "group" if node.is_group() else "paint", "target_id": target.target_id, "node_id": id})
+	_layers_multi_focus = _layers_multi_contexts[0] if not _layers_multi_contexts.is_empty() else {}
+
+
+func _apply_layer_selection_action(context: Dictionary, action: String) -> void:
+	_prepare_layer_operation()
+	var target = _get_layers_context_target(context)
+	var ids: Array = context.get("node_ids", [])
+	if not target or not target.can_apply_selection(ids, action):
+		_set_status("That selection is protected; no layers were changed.")
+		return
+	var before: Dictionary = _layer_session.capture_state()
+	var changed: Array = target.apply_selection(ids, action)
+	if changed.is_empty(): return
+	_push_layer_session_state_undo(before)
+	if target.target_id == _layer_session.active_target_id: _sync_canvas_to_active_layer()
+	_set_layer_multi_selection(target, changed if action == "duplicate" else ids)
+	_refresh_layer_composite()
+	_refresh_layers_tree()
+	_set_status("Updated the selected layer items.")
+
+
+func _make_layer_drag_data(context: Dictionary, label: String) -> Dictionary:
+	var ids := _selected_layer_ids(str(context.target_id))
+	if not ids.has(str(context.node_id)): ids = [str(context.node_id)]
+	var source := context.duplicate(true)
+	source["node_ids"] = ids.duplicate()
+	var preview := Label.new()
+	preview.text = "%d layer items" % ids.size() if ids.size() > 1 else label
+	_layers_tree.set_drag_preview(preview)
+	return {"gddraw_layer_node": source}
+
+
 func _get_layer_drop_destination(at_position: Vector2, data: Variant) -> Dictionary:
 	# A filtered tree preserves its hierarchy, but omitted siblings still make a
 	# displayed drop index ambiguous. Keep reordering available after clearing
@@ -5332,7 +5697,7 @@ func _get_layer_drop_destination(at_position: Vector2, data: Variant) -> Diction
 		return {}
 	var sibling_index := int(location.get("index", 0)) + (1 if drop_section > 0 else 0)
 	var source_location: Dictionary = target.get_node_location(source_node_id)
-	if (
+	if not source.has("node_ids") and (
 		str(source_location.get("parent_group_id", "")) == str(location.get("parent_group_id", ""))
 		and int(source_location.get("index", -1)) < sibling_index
 	):
@@ -5355,6 +5720,8 @@ func _can_drop_layer_tree_data(at_position: Vector2, data: Variant) -> bool:
 		return false
 	var source: Dictionary = data.get("gddraw_layer_node", {})
 	var target = destination.get("target")
+	if target and source.has("node_ids"):
+		return not target.selection_move_plan(source.node_ids, str(destination.parent_group_id), int(destination.index)).is_empty()
 	return target != null and target.can_move_node(
 		str(source.get("node_id", "")),
 		str(destination.get("parent_group_id", "")),
@@ -5371,6 +5738,16 @@ func _drop_layer_tree_data(at_position: Vector2, data: Variant) -> void:
 		return
 	var source: Dictionary = data.get("gddraw_layer_node", {})
 	var target = destination.get("target")
+	if target and source.has("node_ids"):
+		_prepare_layer_operation()
+		var before: Dictionary = _layer_session.capture_state()
+		if target.move_nodes(source.node_ids, str(destination.parent_group_id), int(destination.index)):
+			_push_layer_session_state_undo(before)
+			_set_layer_multi_selection(target, target.selection_roots(source.node_ids))
+			_refresh_layer_composite()
+			_refresh_layers_tree()
+			_set_status("Moved the selected layer items.")
+		return
 	var node_id := str(source.get("node_id", ""))
 	if not target or not target.can_move_node(
 		node_id,
@@ -5560,6 +5937,27 @@ func _build_canvas_region(parent: Container) -> void:
 	_refresh_canvas_visible_pixels_state()
 	_canvas.active_tool = GDDrawCanvasControl.ToolMode.BRUSH
 	_canvas.stroke_committed.connect(_on_stroke_committed)
+	_gradient_default_new_layer = _get_gradient_default_new_layer()
+	_canvas.gradient_layer_mode = _gradient_default_new_layer
+	_canvas.gradient_layer_commit_requested.connect(_commit_gradient_layer)
+	_canvas.gradient_gesture_finished.connect(_on_gradient_gesture_finished)
+	_canvas.gradient_gesture_started.connect(_show_gradient_helper_panel)
+	_canvas.gradient_interaction_started.connect(func():
+		_flush_gradient_controls()
+		if _canvas._gradient_base: _show_gradient_helper_panel()
+	)
+	_gradient_auto_apply = Timer.new()
+	_gradient_auto_apply.one_shot = true
+	_gradient_auto_apply.wait_time = 0.3
+	add_child(_gradient_auto_apply)
+	_gradient_auto_apply.timeout.connect(_apply_gradient_controls)
+	_canvas.gradient_stops_changed.connect(func():
+		if not _gradient_loading and _canvas._gradient_base and _canvas.gradient_layer_mode and not _canvas._gradient_creating_layer:
+			_gradient_auto_apply.start()
+	)
+	_canvas.gradient_layer_preview_compositor = func(pixels: Image):
+		var target = _layer_session.get_active_target()
+		return target.composite_gradient_preview(pixels, _canvas.get_workspace_origin(), _canvas._gradient_creating_layer)
 	_canvas.canvas_size_changed.connect(_on_canvas_size_changed)
 	_canvas.view_changed.connect(_on_view_changed)
 	_canvas.color_picked.connect(_on_color_picked)
@@ -5570,6 +5968,15 @@ func _build_canvas_region(parent: Container) -> void:
 	_canvas.image_drop_requested.connect(_on_canvas_image_drop_requested)
 	_canvas.image_changed.connect(_on_canvas_image_changed)
 	_canvas.hover_uv_changed.connect(_on_canvas_hover_uv_changed)
+	_text_default_new_layer = _get_text_default_new_layer()
+	_canvas.text_layer_mode = _text_default_new_layer
+	_canvas.prepare_drawing_layer = _prepare_drawing_layer
+	_canvas.drawing_gesture_finished.connect(func(): call_deferred("_finish_auto_layer_if_idle"))
+	_canvas.text_layer_commit_requested.connect(_commit_text_layer)
+	_canvas.text_layer_edit_at = _edit_selected_text_at
+	_canvas.text_layer_preview_compositor = func(pixels: Image, origin: Vector2i, creating: bool):
+		var target = _layer_session.get_active_target() if _layer_session else null
+		return target.composite_gradient_preview(pixels, origin, creating) if target else pixels
 	_canvas.text_draft_started.connect(_on_text_draft_started)
 	_canvas.text_draft_finished.connect(_on_text_draft_finished)
 	_canvas.text_draft_copied.connect(_on_text_draft_copied)
@@ -6284,11 +6691,11 @@ func _build_settings_menu() -> void:
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_settings_panel.add_child(tabs)
 
-	var brush_tab := _add_preferences_tab(tabs, "Brush")
+	var tools_tab := _add_preferences_tab(tabs, "Tools")
 
 	var brush_section := _add_preferences_section(
-		brush_tab,
-		"Brush mode",
+		tools_tab,
+		"Brush",
 		"Brush mode controls how strokes are applied while drawing. Pixel perfect keeps marks aligned to exact image pixels; stroke overlap allows repeated passes during one stroke to build opacity."
 	)
 	var brush_mode_row := _add_preferences_control_row(brush_section)
@@ -6344,6 +6751,46 @@ func _build_settings_menu() -> void:
 	brush_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	brush_row.add_child(brush_spacer)
 	_sync_brush_mode_controls()
+	var gradients_section := _add_preferences_section(
+		tools_tab, "Gradients",
+		"Choose the default output for new gradients. Existing gradient handles always edit their own layer."
+	)
+	var gradient_row := _add_preferences_control_row(gradients_section)
+	var output_label := Label.new()
+	output_label.text = "Default output"
+	gradient_row.add_child(output_label)
+	_gradient_output_mode = OptionButton.new()
+	_gradient_output_mode.name = "Gradient Default Output"
+	_gradient_output_mode.add_item("New Gradient Layer")
+	_gradient_output_mode.add_item("Paint on Current Layer")
+	_gradient_output_mode.select(0 if _gradient_default_new_layer else 1)
+	_gradient_output_mode.tooltip_text = "Saved for this project. On a Gradient layer, new drags create another editable layer; use Rasterize for pixel painting."
+	_gradient_output_mode.item_selected.connect(_on_gradient_default_output_selected)
+	gradient_row.add_child(_gradient_output_mode)
+	var gradient_panel_toggle := CheckBox.new()
+	gradient_panel_toggle.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	gradient_panel_toggle.name = "Always Show Gradient Panel"
+	gradient_panel_toggle.text = "Always show Gradient panel button"
+	gradient_panel_toggle.button_pressed = _gradient_always_show_panel
+	gradient_panel_toggle.tooltip_text = "Keep the panel button available with any tool or layer. Opening the panel remains optional."
+	gradient_panel_toggle.toggled.connect(_on_gradient_always_show_panel_toggled)
+	gradients_section.add_child(gradient_panel_toggle)
+	var text_section := _add_preferences_section(
+		tools_tab, "Text",
+		"Choose the default output for new text. Existing Text layers remain editable."
+	)
+	var text_row := _add_preferences_control_row(text_section)
+	var text_output_label := Label.new()
+	text_output_label.text = "Default output"
+	text_row.add_child(text_output_label)
+	_text_output_mode = OptionButton.new()
+	_text_output_mode.name = "Text Default Output"
+	_text_output_mode.add_item("New Text Layer")
+	_text_output_mode.add_item("Paint on Current Layer")
+	_text_output_mode.select(0 if _text_default_new_layer else 1)
+	_text_output_mode.tooltip_text = "Saved for this project. On a Text layer, new boxes create another editable layer; use Rasterize for pixel painting."
+	_text_output_mode.item_selected.connect(_on_text_default_output_selected)
+	text_row.add_child(_text_output_mode)
 
 	var view_tab := _add_preferences_tab(tabs, "View")
 
@@ -6519,10 +6966,95 @@ func _build_settings_menu() -> void:
 	font_browse_button.pressed.connect(_show_font_location_dialog)
 	font_row.add_child(font_browse_button)
 
+	var palette_section := _add_preferences_section(files_tab, "Palettes", "Save RGBA HEX palettes in res://gddraw/palettes by default. Startup scans HEX, TXT, GPL and legacy GDDraw palettes. Missing folders are created only when saving.")
+	var palette_row := _add_preferences_control_row(palette_section)
+	_palette_location = LineEdit.new()
+	_palette_location.text = _get_palette_dir()
+	_palette_location.placeholder_text = "res://gddraw/palettes"
+	_palette_location.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_apply_preferences_line_edit_style(_palette_location)
+	_palette_location.text_submitted.connect(_apply_palette_location)
+	_palette_location.focus_exited.connect(func(): _apply_palette_location(_palette_location.text))
+	palette_row.add_child(_palette_location)
+	var palette_browse := _make_icon_button("folder-open_0.svg", "Choose the palette folder")
+	_palette_location_dialog = FileDialog.new()
+	_palette_location_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_palette_location_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	_palette_location_dialog.title = "Palette Folder"
+	_palette_location_dialog.dir_selected.connect(_apply_palette_location)
+	add_child(_palette_location_dialog)
+	palette_browse.pressed.connect(func():
+		_palette_location_dialog.current_dir = _font_directory_dialog_path(_get_palette_dir())
+		_palette_location_dialog.popup_centered_ratio(0.75))
+	palette_row.add_child(palette_browse)
+	var visibility_row := _add_preferences_control_row(palette_section)
+	var visibility_label := Label.new()
+	visibility_label.text = "Show palette files in Godot's FileSystem"
+	visibility_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	visibility_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	visibility_row.add_child(visibility_label)
+	_palette_extensions_button = Button.new()
+	_apply_preferences_small_button_style(_palette_extensions_button)
+	_palette_extensions_button.pressed.connect(func(): _palette_extensions_dialog.popup_centered())
+	visibility_row.add_child(_palette_extensions_button)
+	_palette_extensions_dialog = ConfirmationDialog.new()
+	_palette_extensions_dialog.title = "Show Palette Files"
+	_palette_extensions_dialog.ok_button_text = "Continue"
+	_palette_extensions_dialog.cancel_button_text = "Cancel"
+	_palette_extensions_dialog.dialog_text = "Add HEX and GPL to Godot's recognized text file extensions?\n\nThis editor-wide setting applies across projects and remains\nenabled when GDDraw is disabled. Existing extensions are kept.\n\nYou can remove these extensions later in Editor Settings >\nDocks > FileSystem > Textfile Extensions."
+	_palette_extensions_dialog.confirmed.connect(_enable_palette_file_visibility)
+	add_child(_palette_extensions_dialog)
+	_refresh_palette_file_visibility()
+
+
+const PALETTE_TEXT_EXTENSIONS_SETTING := "docks/filesystem/textfile_extensions"
+
+static func _missing_palette_file_extensions(settings: Object) -> PackedStringArray:
+	var missing := PackedStringArray(["hex", "gpl"])
+	if not settings or not settings.has_setting(PALETTE_TEXT_EXTENSIONS_SETTING): return missing
+	for extension in str(settings.get_setting(PALETTE_TEXT_EXTENSIONS_SETTING)).split(",", false):
+		var index := missing.find(extension.strip_edges().to_lower())
+		if index >= 0: missing.remove_at(index)
+	return missing
+
+
+static func _register_palette_file_extensions(settings: Object) -> bool:
+	# Only the explicit Enable action calls this; never alter settings at startup.
+	if not settings or not settings.has_setting(PALETTE_TEXT_EXTENSIONS_SETTING): return false
+	var missing := _missing_palette_file_extensions(settings)
+	if missing.is_empty(): return true
+	var existing := str(settings.get_setting(PALETTE_TEXT_EXTENSIONS_SETTING))
+	var separator := "" if existing.is_empty() or existing.ends_with(",") else ","
+	settings.set_setting(PALETTE_TEXT_EXTENSIONS_SETTING, existing + separator + ",".join(missing))
+	return _missing_palette_file_extensions(settings).is_empty()
+
+
+func _refresh_palette_file_visibility() -> void:
+	if not is_instance_valid(_palette_extensions_button): return
+	var settings := _get_editor_settings()
+	var available: bool = settings != null and settings.has_setting(PALETTE_TEXT_EXTENSIONS_SETTING)
+	var enabled := available and _missing_palette_file_extensions(settings).is_empty()
+	_palette_extensions_button.text = "Enabled" if enabled else "Enable"
+	_palette_extensions_button.disabled = enabled or not available
+	_palette_extensions_button.tooltip_text = "" if available else "Available when GDDraw runs inside the Godot editor."
+
+
+func _enable_palette_file_visibility() -> void:
+	if _register_palette_file_extensions(_get_editor_settings()):
+		_request_resource_filesystem_scan()
+		_set_status("HEX and GPL files are now recognized by Godot's FileSystem.")
+	_refresh_palette_file_visibility()
+
 
 func _add_preferences_tab(tabs: TabContainer, tab_name: String) -> VBoxContainer:
+	var tab_scroll := ScrollContainer.new()
+	tab_scroll.name = tab_name
+	tab_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tab_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tab_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	tab_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	tab_scroll.follow_focus = true
 	var margin := MarginContainer.new()
-	margin.name = tab_name
 	margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	margin.add_theme_constant_override("margin_left", 4)
@@ -6535,7 +7067,8 @@ func _add_preferences_tab(tabs: TabContainer, tab_name: String) -> VBoxContainer
 	content.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	content.add_theme_constant_override("separation", 10)
 	margin.add_child(content)
-	tabs.add_child(margin)
+	tab_scroll.add_child(margin)
+	tabs.add_child(tab_scroll)
 	return content
 
 
@@ -6729,10 +7262,21 @@ func _make_icon_button(icon_name: String, tooltip: String, toggle := false, sele
 
 func _make_icon_menu_button(icon_name: String, tooltip: String) -> MenuButton:
 	var button := MenuButton.new()
+	_configure_icon_button(button, icon_name, tooltip)
+	return button
+
+
+func _register_panel_menu_icon(button: MenuButton) -> void:
+	_configure_icon_button(button, "ellipsis-vertical_0.svg", button.tooltip_text)
+	button.focus_mode = Control.FOCUS_ALL
+
+
+func _configure_icon_button(button: Button, icon_name: String, tooltip: String) -> void:
 	# MenuButton defaults to a flat appearance, unlike the regular GDDraw
 	# icon buttons. Draw the shared normal/hover/pressed styleboxes so this
 	# contextual control remains visually consistent with the viewport UI.
 	button.flat = false
+	button.text = ""
 	button.custom_minimum_size = TOOL_BUTTON_SIZE
 	button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	button.size_flags_vertical = Control.SIZE_SHRINK_CENTER
@@ -6749,7 +7293,6 @@ func _make_icon_menu_button(icon_name: String, tooltip: String) -> MenuButton:
 	button.set_meta("active_icon_name", icon_name)
 	_icon_buttons.append(button)
 	_update_icon_button_icon(button)
-	return button
 
 
 func _make_static_icon(icon_name: String, tooltip: String) -> TextureRect:
@@ -8587,6 +9130,7 @@ func _on_brush_toggled(enabled: bool) -> void:
 
 
 func _open_preferences() -> void:
+	_refresh_palette_file_visibility()
 	if _fill_settings_overlay:
 		_fill_settings_overlay.visible = false
 	if _create_textured_csg_overlay:
@@ -9483,10 +10027,108 @@ func _refocus_text_editor() -> void:
 		_canvas.focus_text_editor()
 
 
-func _commit_text_draft() -> void:
-	if _canvas and _canvas.commit_text_draft():
-		_set_status("Committed text to the image.")
+func _commit_text_layer(payload: Dictionary) -> void:
+	var target = _layer_session.get_active_target()
+	if not target or target.is_node_effectively_locked(target.selected_layer_id): return
+	var node = target.get_selected_layer()
+	if not node: return
+	var creating: bool = bool(payload.create_layer) or not node.is_text_layer()
+	if not creating and preload("res://addons/GDDraw/gddraw_text_recipe.gd").equivalent(node.text_recipe, payload.recipe) and node.origin == payload.origin: return
+	var previous: Dictionary = _layer_session.capture_state()
+	var id: String = node.id
+	if creating:
+		var location: Dictionary = target.get_node_location(id)
+		id = target.add_paint_layer("Text", payload.image, str(location.parent_group_id), int(location.index), payload.origin)
+	if id.is_empty() or not target.update_text_layer(id, payload.recipe, payload.image, payload.origin, payload.get("mask")):
+		_layer_session.restore_state(previous)
+		_set_status("Could not save the Text layer.")
+		return
+	_push_layer_session_state_undo(previous)
+	_text_suppress_reopen = true
+	_sync_canvas_to_active_layer()
+	_text_suppress_reopen = false
+	_refresh_layers_tree()
+	_sync_3d_paint_texture()
+
+func _edit_selected_text_at(document_pixel: Vector2i) -> bool:
+	var target = _layer_session.get_active_target() if _layer_session else null
+	var node = target.get_selected_layer() if target else null
+	if not node or not node.is_text_layer() or target.is_node_effectively_locked(node.id): return false
+	var pixel := document_pixel - Vector2i(node.origin)
+	# Check rendered letters first, including any glyph pixels near a rotated
+	# box edge. Empty space inside the rotated box is also an editing target.
+	var hit_ink: bool = node.image and Rect2i(Vector2i.ZERO, node.image.get_size()).has_point(pixel) and node.image.get_pixelv(pixel).a > 0.0
+	var box: Array = node.text_recipe.box
+	var bounds := Rect2(Vector2(box[0], box[1]), Vector2(box[2], box[3]))
+	var center := bounds.get_center()
+	var unrotated := (Vector2(pixel) + Vector2(0.5, 0.5) - center).rotated(-float(node.text_recipe.rotation)) + center
+	if not hit_ink and not bounds.has_point(unrotated): return false
+	_select_tool(GDDrawCanvasControl.ToolMode.TEXT)
+	_canvas.focus_text_editor()
+	return _canvas.has_text_draft()
+
+func _get_text_default_new_layer() -> bool:
+	var settings := _get_editor_settings()
+	if settings:
+		var value: Variant = settings.get_project_metadata(SETTINGS_SECTION, "text_default_new_layer", true)
+		return value if value is bool else true
+	return _text_default_new_layer
+
+func _on_text_default_output_selected(index: int) -> void:
+	_text_default_new_layer = index == 0
+	var settings := _get_editor_settings()
+	if settings: settings.set_project_metadata(SETTINGS_SECTION, "text_default_new_layer", _text_default_new_layer)
+	_update_text_output_mode()
+
+func _update_text_output_mode() -> void:
+	# Preserve the destination of a draft already in progress.
+	if not _canvas or _canvas.has_text_draft(): return
+	var target = _layer_session.get_active_target() if _layer_session else null
+	var node = target.get_selected_layer() if target else null
+	_canvas.text_layer_mode = _text_default_new_layer or (node != null and node.is_text_layer())
+	if _text_commit_button:
+		_text_commit_button.tooltip_text = ("Save this editable Text layer" if _canvas.text_layer_mode else "Paint this text on the current layer") + " as one undoable operation (Ctrl+Enter)"
+
+func _open_selected_text_layer() -> void:
+	_update_text_output_mode()
+	if _text_suppress_reopen or not _canvas or not _layer_session or _canvas.active_tool != GDDrawCanvasControl.ToolMode.TEXT or _canvas.has_text_draft(): return
+	var target = _layer_session.get_active_target()
+	var node = target.get_selected_layer() if target else null
+	if not node or not node.is_text_layer() or not _canvas.text_editing_enabled: return
+	_canvas.load_text_layer(node.text_recipe, node.origin, node.text_mask)
+	_text_font_size.set_value_no_signal(_canvas.text_font_size)
+	_text_fill_toggle.set_pressed_no_signal(_canvas.text_fill_mode == GDDrawCanvasControl.TextFillMode.BACKGROUND)
+	_text_wrap_button.set_pressed_no_signal(_canvas.text_wrapping == GDDrawCanvasControl.TextWrapping.WORD_WRAP)
+	for i in range(_text_alignment_buttons.size()):
+		_text_alignment_buttons[i].set_pressed_no_signal(i == _canvas.text_alignment)
+		_update_toggle_button_icon(_text_alignment_buttons[i])
+	_update_toggle_button_icon(_text_fill_toggle)
+	_update_toggle_button_icon(_text_wrap_button)
+	_foreground_color_picker.color = _canvas.brush_color
+	_background_color_picker.color = _canvas.background_color
+	_text_font_sources[TEXT_FONT_CUSTOM_ID] = _canvas.text_font
+	var index := _text_font_selector.get_item_index(TEXT_FONT_CUSTOM_ID)
+	if index < 0:
+		_text_font_selector.add_item(str(node.text_recipe.get("font_name", "Layer Font")), TEXT_FONT_CUSTOM_ID)
+		index = _text_font_selector.get_item_index(TEXT_FONT_CUSTOM_ID)
 	else:
+		_text_font_selector.set_item_text(index, str(node.text_recipe.get("font_name", "Layer Font")))
+	_text_font_selected_id = TEXT_FONT_CUSTOM_ID
+	_text_font_selector.select(index)
+
+func _rasterize_text_layer(context: Dictionary) -> void:
+	_prepare_layer_operation()
+	var target = _get_layers_context_target(context)
+	if not target: return
+	var previous: Dictionary = _layer_session.capture_state()
+	if not target.rasterize_text_layer(str(context.get("node_id", ""))): return
+	_push_layer_session_state_undo(previous)
+	_sync_canvas_to_active_layer()
+	_refresh_layers_tree()
+	_set_status("Text rasterized to a paint layer. Undo restores its editable settings.")
+
+func _commit_text_draft() -> void:
+	if not _canvas or not _canvas.commit_text_draft():
 		_set_status("No visible text to commit.")
 
 
@@ -9503,8 +10145,11 @@ func _on_text_draft_started() -> void:
 
 
 func _on_text_draft_finished(committed: bool) -> void:
+	call_deferred("_finish_auto_layer_if_idle")
 	_update_text_rotation_controls()
-	_set_status("Committed text to the image." if committed else "Canceled the text draft.")
+	var saved_message := "Saved editable Text layer." if _canvas.text_layer_mode else "Painted text on the current layer."
+	_set_status(saved_message if committed else "Canceled the text draft.")
+	_update_text_output_mode()
 
 
 func _on_text_draft_copied(as_image: bool) -> void:
@@ -9565,6 +10210,19 @@ func _on_swap_colors_pressed() -> void:
 	_set_background_color(foreground)
 
 
+func _on_palette_color_requested(color: Color, background: bool) -> void:
+	if background:
+		_set_background_color(color)
+	else:
+		_set_foreground_color(color)
+		_record_recent_color(color)
+
+
+func _sync_palette_colors() -> void:
+	if _palette_panel and _foreground_color_picker and _background_color_picker:
+		_palette_panel.set_colors(_foreground_color_picker.color, _background_color_picker.color)
+
+
 func _set_foreground_color(color: Color, synchronize_picker := true) -> void:
 	if synchronize_picker and _foreground_color_picker:
 		_foreground_color_picker.set_block_signals(true)
@@ -9572,6 +10230,8 @@ func _set_foreground_color(color: Color, synchronize_picker := true) -> void:
 		_foreground_color_picker.set_block_signals(false)
 	if _canvas:
 		_canvas.brush_color = color
+		_sync_gradient_drawing_colors()
+	_sync_palette_colors()
 	_update_fill_settings_button()
 	_refresh_3d_brush_preview_color()
 
@@ -9583,6 +10243,8 @@ func _set_background_color(color: Color, synchronize_picker := true) -> void:
 		_background_color_picker.set_block_signals(false)
 	if _canvas:
 		_canvas.background_color = color
+		_sync_gradient_drawing_colors()
+	_sync_palette_colors()
 	_update_fill_settings_button()
 
 
@@ -11118,6 +11780,202 @@ func _refresh_canvas_visible_pixels_state() -> void:
 	_canvas_has_visible_pixels = _canvas != null and _canvas.has_visible_pixels()
 
 
+func _get_gradient_default_new_layer() -> bool:
+	var settings := _get_editor_settings()
+	if settings:
+		var value: Variant = settings.get_project_metadata(SETTINGS_SECTION, "gradient_default_new_layer", true)
+		return value if value is bool else true
+	return _gradient_default_new_layer
+
+func _on_gradient_default_output_selected(index: int) -> void:
+	_gradient_default_new_layer = index == 0
+	var settings := _get_editor_settings()
+	if settings: settings.set_project_metadata(SETTINGS_SECTION, "gradient_default_new_layer", _gradient_default_new_layer)
+	# A preference change affects subsequent gestures, not a preview in progress.
+	if _canvas and not _canvas._gradient_base:
+		_open_selected_gradient_layer()
+
+func _apply_gradient_controls() -> void:
+	if not _canvas or not _canvas._gradient_base or _canvas._gradient_creating_layer: return
+	if _canvas._gradient_drag_handle != -1 or _canvas._gradient_drag_stop != -1 or (_gradient_panel and _gradient_panel._strip_drag):
+		_gradient_auto_apply.start()
+		return
+	_canvas.commit_gradient()
+
+func _flush_gradient_controls() -> void:
+	if _gradient_auto_apply and not _gradient_auto_apply.is_stopped():
+		_gradient_auto_apply.stop()
+		_apply_gradient_controls()
+
+func _commit_gradient_layer(payload: Dictionary) -> void:
+	if _gradient_auto_apply: _gradient_auto_apply.stop()
+	var target = _layer_session.get_active_target()
+	if not target or target.is_node_effectively_locked(target.selected_layer_id): return
+	var node = target.get_selected_layer()
+	if not node: return
+	var id: String = node.id
+	var creating: bool = bool(payload.get("create_layer", false)) or not node.is_gradient_layer()
+	if not creating:
+		if node.gradient_recipe == payload.recipe and node.origin == payload.origin and node.gradient_mask.get_data() == payload.mask.get_data():
+			return
+	var previous: Dictionary = _layer_session.capture_state()
+	if creating:
+		var location: Dictionary = target.get_node_location(id)
+		id = target.add_paint_layer("Gradient", payload.image, str(location.parent_group_id), int(location.index), payload.origin)
+	if id.is_empty() or not target.update_gradient_layer(id, payload.recipe, payload.mask, payload.image, payload.origin):
+		_layer_session.restore_state(previous)
+		_set_status("Could not create the gradient layer.")
+		return
+	var selected_stop: int = _canvas.gradient_selected_stop
+	_canvas.cancel_gradient()
+	_push_layer_session_state_undo(previous)
+	_gradient_suppress_reopen = true
+	_sync_canvas_to_active_layer()
+	_gradient_suppress_reopen = false
+	_open_selected_gradient_layer()
+	_gradient_loading = true
+	_canvas.select_gradient_stop(selected_stop)
+	_gradient_loading = false
+	_refresh_layers_tree()
+	_sync_3d_paint_texture()
+	_set_status("Gradient saved. Drag a handle to edit it, or drag elsewhere to create another layer.")
+
+func _rasterize_gradient_layer(context: Dictionary) -> void:
+	var target = _get_layers_context_target(context)
+	if not target: return
+	_prepare_layer_operation()
+	var previous: Dictionary = _layer_session.capture_state()
+	if not target.rasterize_gradient_layer(str(context.get("node_id", ""))): return
+	_push_layer_session_state_undo(previous)
+	_sync_canvas_to_active_layer()
+	_refresh_layers_tree()
+	_set_status("Gradient rasterized to a paint layer. Undo restores its editable settings.")
+
+func _get_gradient_always_show_panel() -> bool:
+	var settings := _get_editor_settings()
+	var value: Variant = settings.get_project_metadata(SETTINGS_SECTION, "gradient_always_show_panel", false) if settings else _gradient_always_show_panel
+	return value if value is bool else false
+
+
+func _register_persistent_gradient_panel() -> void:
+	var button := _make_icon_button("gradient_0.svg", "Gradient", true, "gradient_1.svg")
+	_panel_host.register_panel("gradient", "Gradient", button.icon, _gradient_panel, Vector2(240, 200), button)
+
+
+func _on_gradient_always_show_panel_toggled(enabled: bool) -> void:
+	_gradient_always_show_panel = enabled
+	var settings := _get_editor_settings()
+	if settings: settings.set_project_metadata(SETTINGS_SECTION, "gradient_always_show_panel", enabled)
+	if not _panel_host: return
+	if enabled:
+		_panel_host.retain_temporary_panel("gradient")
+		if not _panel_host.panels.has("gradient"):
+			var saved: Dictionary = _panel_host.describe_layout()
+			_register_persistent_gradient_panel()
+			_panel_host.restore_description(saved)
+			_panel_host._save()
+	else:
+		_panel_host.unregister_panel("gradient")
+	_open_selected_gradient_layer()
+
+
+func _on_gradient_gesture_finished() -> void:
+	_sync_gradient_drawing_colors()
+	_open_selected_gradient_layer()
+
+
+func _sync_gradient_drawing_colors() -> void:
+	if not _canvas or not _layer_session or _canvas._gradient_base: return
+	var target = _layer_session.get_active_target()
+	var node = target.get_selected_layer() if target else null
+	if node and node.is_gradient_layer(): return
+	# Stored recipes may carry extra stops, overall opacity, or legacy
+	# foreground-to-transparent settings. A fresh layer uses drawing colors.
+	_canvas.gradient_transparent = false
+	_canvas.gradient_opacity = 1.0
+	_canvas.reset_gradient_stops()
+
+
+func _show_gradient_helper_panel() -> void:
+	if _panel_host and _panel_host.panels.has("gradient") and not _panel_host.is_panel_active("gradient"):
+		_panel_host.activate_panel("gradient", false)
+
+
+func _open_selected_gradient_layer() -> void:
+	if not _layer_session or not _canvas: return
+	var target = _layer_session.get_active_target()
+	var node = target.get_selected_layer() if target else null
+	var is_gradient: bool = node != null and node.is_gradient_layer()
+	var context_key: String = "%s:%s:%s" % [target.get_instance_id(), node.get_instance_id(), node.kind] if node else ""
+	if context_key != _gradient_context_key:
+		_gradient_context_key = context_key
+		if not is_gradient: _sync_gradient_drawing_colors()
+	if _panel_host and _gradient_panel:
+		if is_gradient or _canvas.active_tool == GDDrawCanvasControl.ToolMode.GRADIENT:
+			if not _panel_host.panels.has("gradient"):
+				var rail_button := _make_icon_button("gradient_0.svg", "Gradient", true, "gradient_1.svg")
+				_panel_host.open_temporary_panel("gradient", "Gradient", rail_button.icon, _gradient_panel, rail_button)
+		elif not _gradient_always_show_panel:
+			_panel_host.close_temporary_panel()
+	if _gradient_panel:
+		_gradient_panel.set_context_available(node != null)
+		_gradient_panel.refresh()
+	_canvas.gradient_layer_mode = is_gradient or _gradient_default_new_layer
+	if is_gradient and not _gradient_suppress_reopen and _canvas.active_tool == GDDrawCanvasControl.ToolMode.GRADIENT and not _canvas._gradient_base and _canvas.gradient_editing_enabled:
+		_gradient_loading = true
+		_canvas.load_gradient_layer(node.gradient_recipe, node.gradient_mask, node.origin)
+		_gradient_shape_control.select(1 if _canvas.gradient_radial else 0)
+		_gradient_reverse_control.set_pressed_no_signal(_canvas.gradient_reverse)
+		_gradient_loading = false
+
+func _prepare_drawing_layer(tool: int) -> bool:
+	if not _layer_session or not _canvas: return false
+	var target = _layer_session.get_active_target()
+	var node = target.get_selected_layer() if target else null
+	if not node or target.is_node_effectively_locked(node.id): return false
+	if not node.is_editable_layer(): return true
+	if tool == GDDrawCanvasControl.ToolMode.ERASER:
+		_set_status("Select a paint layer or rasterize this layer before erasing pixels.")
+		return false
+	if tool == GDDrawCanvasControl.ToolMode.TEXT and (node.is_text_layer() or _text_default_new_layer):
+		_canvas.text_layer_mode = true
+		return true
+	if tool == GDDrawCanvasControl.ToolMode.GRADIENT and (node.is_gradient_layer() or _gradient_default_new_layer):
+		_canvas.gradient_layer_mode = true
+		return true
+	if tool not in [GDDrawCanvasControl.ToolMode.BRUSH, GDDrawCanvasControl.ToolMode.FILL, GDDrawCanvasControl.ToolMode.LINE, GDDrawCanvasControl.ToolMode.RECTANGLE, GDDrawCanvasControl.ToolMode.ELLIPSE, GDDrawCanvasControl.ToolMode.TEXT, GDDrawCanvasControl.ToolMode.GRADIENT]: return false
+	var in_3d_gesture := not _paint_3d_gesture_before.is_empty()
+	if not in_3d_gesture and _auto_layer_before.is_empty(): _auto_layer_before = _layer_session.capture_state()
+	var location: Dictionary = target.get_node_location(node.id)
+	var pixels := Image.create_empty(_canvas._image.get_width(), _canvas._image.get_height(), false, Image.FORMAT_RGBA8)
+	var selection := {"active": _canvas._has_selection, "rect": _canvas._selection_rect, "mask": _canvas._selection_mask}
+	var id: String = target.add_paint_layer("", pixels, str(location.parent_group_id), int(location.index), _canvas.get_workspace_origin())
+	if id.is_empty():
+		_auto_layer_before.clear()
+		return false
+	if in_3d_gesture: _auto_3d_layers[target.target_id] = {"previous": node.id, "created": id, "image": pixels}
+	_auto_layer_syncing = true
+	_sync_canvas_to_active_layer()
+	_auto_layer_syncing = false
+	_canvas._has_selection = selection.active
+	_canvas._selection_rect = selection.rect
+	_canvas._selection_mask = selection.mask
+	if not in_3d_gesture: _refresh_layers_tree({"kind": "paint", "target_id": target.target_id, "node_id": id})
+	call_deferred("_finish_auto_layer_if_idle")
+	return true
+
+func _finish_auto_layer_if_idle() -> void:
+	if _auto_layer_before.is_empty() or not is_instance_valid(_canvas): return
+	if _canvas._is_drawing or _canvas._is_shape_previewing or _canvas.has_text_draft() or _canvas._gradient_base: return
+	var before := _auto_layer_before
+	_auto_layer_before = {}
+	_layer_session.restore_state(before)
+	_auto_layer_syncing = true
+	_sync_canvas_to_active_layer()
+	_auto_layer_syncing = false
+	_refresh_layers_tree()
+	_sync_3d_paint_texture()
+
 func _on_stroke_committed(previous_image: Image) -> void:
 	_refresh_canvas_visible_pixels_state()
 	if not _dropped_layer_import_context.is_empty():
@@ -11222,6 +12080,9 @@ func _on_3d_paint_uv_started(hit: Dictionary) -> bool:
 func _begin_3d_paint_hit(hit: Dictionary) -> bool:
 	if not _canvas:
 		return false
+	if _canvas.active_tool == GDDrawCanvasControl.ToolMode.GRADIENT:
+		_set_status("Drag gradients in the 2D texture canvas; the result updates the 3D preview.")
+		return false
 	if not _route_3d_hit_to_paint_target(hit):
 		return false
 	var active_target = _layer_session.get_active_target() if _layer_session else null
@@ -11229,13 +12090,14 @@ func _begin_3d_paint_hit(hit: Dictionary) -> bool:
 		_set_status("The selected layer is locked; 3D drawing is disabled for it.")
 		return false
 	if _is_3d_surface_shape_tool(_canvas.active_tool):
-		return _begin_3d_surface_shape(hit)
+		return _prepare_drawing_layer(_canvas.active_tool) and _begin_3d_surface_shape(hit)
 	if not hit.has("uv_overlap_count"):
 		hit["uv_overlap_count"] = _count_3d_uv_overlaps(hit)
 	if _shared_uv_paint_is_blocked(hit):
 		_warn_if_3d_hit_has_uv_overlap(hit)
 		return false
 	_warn_if_3d_hit_has_uv_overlap(hit)
+	if _canvas.active_tool != GDDrawCanvasControl.ToolMode.EYEDROPPER and not _prepare_drawing_layer(_canvas.active_tool): return false
 	if _canvas.active_tool in [GDDrawCanvasControl.ToolMode.BRUSH, GDDrawCanvasControl.ToolMode.ERASER]:
 		_begin_3d_soft_brush_stroke()
 	_canvas.begin_uv_triangle_stroke(
@@ -11288,7 +12150,10 @@ func _route_3d_hit_to_paint_target(hit: Dictionary) -> bool:
 			_set_status("Target Lock rejected a stroke on another imported object; the active paint target is unchanged.")
 			return false
 		var promoted := _promote_cached_3d_preview(target_id, binding_key)
-		if not _sync_canvas_to_active_layer(false, promoted):
+		_auto_layer_syncing = true
+		var synced := _sync_canvas_to_active_layer(false, promoted)
+		_auto_layer_syncing = false
+		if not synced:
 			return false
 	elif not binding_key.is_empty():
 		if not _promote_cached_3d_preview(target_id, binding_key) and not _paint_3d_gesture_before.is_empty():
@@ -11463,6 +12328,7 @@ func _on_3d_paint_uv_finished() -> void:
 
 
 func _get_3d_gesture_original_image(target_id: String) -> Image:
+	if _auto_3d_layers.has(target_id): return _auto_3d_layers[target_id].image
 	for target_state in _paint_3d_gesture_before.get("paint_targets", []):
 		if str(target_state.get("target_id", "")) == target_id:
 			return _find_3d_gesture_layer_image(target_state.get("nodes", []), str(target_state.get("selected_layer_id", "")))
@@ -11533,6 +12399,7 @@ func _drag_3d_brush_gesture(hit: Dictionary) -> void:
 		_remember_3d_gesture_source()
 		_paint_3d_last_stroke_hit.clear()
 	var uv: Vector2 = hit.get("texture_uv", hit.get("uv", Vector2.ZERO))
+	if not _prepare_drawing_layer(_canvas.active_tool): return
 	var triangle_uvs: PackedVector2Array = hit.get("texture_triangle_uvs", hit.get("triangle_uvs", PackedVector2Array()))
 	if not _canvas.is_uv_stroke_active():
 		var state: Dictionary = _paint_3d_gesture_segments.get(target_id, {})
@@ -11554,6 +12421,7 @@ func _resolve_3d_brush_gesture(cancel: bool, refresh_views := true) -> bool:
 	var final_target_id: String = _layer_session.active_target_id
 	var changed := false
 	var expanded := false
+	var had_auto_layers := not _auto_3d_layers.is_empty()
 	for target_id in _paint_3d_gesture_segments:
 		var segment: Dictionary = _paint_3d_gesture_segments[target_id]
 		var target = _layer_session.get_target(target_id)
@@ -11566,6 +12434,14 @@ func _resolve_3d_brush_gesture(cancel: bool, refresh_views := true) -> bool:
 		if target:
 			_invalidate_layer_thumbnail(target_id, target.selected_layer_id)
 	_paint_3d_gesture_before = {}
+	for target_id in _auto_3d_layers:
+		var target = _layer_session.get_target(target_id)
+		var entry: Dictionary = _auto_3d_layers[target_id]
+		var node = target.find_node(entry.created) if target else null
+		if node and node.image.is_invisible():
+			target.select_layer(entry.previous)
+			target.remove_node(entry.created)
+	_auto_3d_layers.clear()
 	_paint_3d_gesture_segments.clear()
 	_paint_3d_gesture_sources.clear()
 	_paint_3d_gesture_binding = ""
@@ -11580,17 +12456,25 @@ func _resolve_3d_brush_gesture(cancel: bool, refresh_views := true) -> bool:
 		_active_3d_binding_key = binding
 		_texture_3d_session = _texture_3d_layer_coordinator.get_active_texture_session()
 		return true
-	if cancel or (not changed and expanded):
+	if cancel or (not changed and (expanded or had_auto_layers)):
 		_restore_layer_session(before)
 		if not cancel:
 			_layer_session.activate_target(final_target_id)
 		_active_3d_binding_key = binding
+		_auto_layer_syncing = true
 		_sync_canvas_to_active_layer()
+		_auto_layer_syncing = false
 		_sync_3d_paint_view(true)
 		_promote_cached_3d_preview(_layer_session.active_target_id, binding)
 	elif changed:
 		_history.push_undo_state_owned(before)
 		_history.clear_redo()
+		if had_auto_layers:
+			# A target visited without depositing pixels may have lost its
+			# temporary layer while other targets retained their new strokes.
+			_auto_layer_syncing = true
+			_sync_canvas_to_active_layer()
+			_auto_layer_syncing = false
 	_refresh_canvas_visible_pixels_state()
 	_update_history_buttons()
 	_update_selection_action_buttons()
@@ -12661,6 +13545,7 @@ func _save_layered_project_to_path(path: String) -> bool:
 	if _canvas:
 		_canvas.finish_text_draft(true)
 	_refresh_3d_layer_scene_dependency()
+	_flush_gradient_controls()
 	var result: Dictionary = _layer_document.save_session(_layer_session, normalized_path)
 	if not bool(result.get("ok", false)):
 		_set_status(str(result.get("message", "Could not save the layered project.")))
@@ -18677,6 +19562,27 @@ func _get_editor_settings() -> Object:
 	return _plugin.get_editor_interface().get_editor_settings()
 
 
+func _get_palette_dir() -> String:
+	var settings := _get_editor_settings()
+	return str(settings.get_project_metadata("GDDraw", "palette_directory", "res://gddraw/palettes")) if settings else "res://gddraw/palettes"
+
+
+func _apply_palette_location(value: String) -> void:
+	var folder := StoragePaths.normalize_path(value)
+	if folder.is_empty(): folder = "res://gddraw/palettes"
+	if StoragePaths.is_plugin_package_path(folder) or (not folder.begins_with("res://") and not folder.is_absolute_path()):
+		_set_status("Choose a project or absolute palette folder outside addons/GDDraw.")
+		_palette_location.text = _get_palette_dir()
+		return
+	if folder == _get_palette_dir(): return
+	var settings := _get_editor_settings()
+	if settings: settings.set_project_metadata("GDDraw", "palette_directory", folder)
+	_palette_location.text = folder
+	if _palette_panel:
+		_palette_panel.palette_folder = folder
+		_palette_panel.rescan()
+
+
 func _on_save_location_submitted(path: String) -> void:
 	_apply_save_location(path)
 
@@ -18750,6 +19656,11 @@ func _on_font_location_selected(path: String) -> void:
 
 
 func _push_undo(image: Image) -> void:
+	if not _auto_layer_before.is_empty():
+		var before := _auto_layer_before
+		_auto_layer_before = {}
+		_push_layer_session_state_undo(before)
+		return
 	if (
 		_layer_session
 		and _layer_session.has_method("capture_history_state_with_active_layer_image")
@@ -18856,7 +19767,9 @@ func _update_tool_options_visibility() -> void:
 	var is_selection_tool := tool == GDDrawCanvasControl.ToolMode.SELECT or tool == GDDrawCanvasControl.ToolMode.LASSO_SELECT
 	var is_stroke_tool := tool == GDDrawCanvasControl.ToolMode.BRUSH or tool == GDDrawCanvasControl.ToolMode.ERASER
 	var is_text_tool := tool == GDDrawCanvasControl.ToolMode.TEXT
-	if is_text_tool:
+	if tool == GDDrawCanvasControl.ToolMode.GRADIENT:
+		_move_shared_color_controls(_gradient_options)
+	elif is_text_tool:
 		_move_shared_color_controls(_text_options)
 	else:
 		_move_shared_paint_controls(_shape_options if is_shape_tool else _brush_options)
@@ -18864,6 +19777,8 @@ func _update_tool_options_visibility() -> void:
 		_brush_options.visible = tool == GDDrawCanvasControl.ToolMode.BRUSH or tool == GDDrawCanvasControl.ToolMode.ERASER or tool == GDDrawCanvasControl.ToolMode.FILL
 	if _shape_options:
 		_shape_options.visible = is_shape_tool
+	if _gradient_options:
+		_gradient_options.visible = tool == GDDrawCanvasControl.ToolMode.GRADIENT
 	if _text_options:
 		_text_options.visible = is_text_tool
 	if _selection_options:
@@ -19083,6 +19998,9 @@ func _shortcut_is_scoped_to_gddraw() -> bool:
 
 
 func _select_tool(tool: int) -> void:
+	if _canvas and tool != _canvas.active_tool and not _auto_layer_before.is_empty():
+		_canvas._end_stroke()
+	_flush_gradient_controls()
 	if _canvas and tool != _canvas.active_tool:
 		_resolve_3d_brush_gesture(false)
 		_cancel_3d_surface_shape("Canceled 3D shape preview because the tool changed.", true)
@@ -19096,6 +20014,8 @@ func _select_tool(tool: int) -> void:
 		_eraser_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.ERASER)
 	if _fill_button:
 		_fill_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.FILL)
+	if _gradient_button:
+		_gradient_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.GRADIENT)
 	if _shape_button:
 		_shape_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.LINE or tool == GDDrawCanvasControl.ToolMode.RECTANGLE or tool == GDDrawCanvasControl.ToolMode.ELLIPSE)
 	if _text_button:
@@ -19118,6 +20038,10 @@ func _select_tool(tool: int) -> void:
 		_pan_button.set_pressed_no_signal(tool == GDDrawCanvasControl.ToolMode.PAN)
 	if _canvas:
 		_canvas.active_tool = tool
+	_open_selected_text_layer()
+	_open_selected_gradient_layer()
+	if tool == GDDrawCanvasControl.ToolMode.GRADIENT:
+		_show_gradient_helper_panel()
 	if tool != GDDrawCanvasControl.ToolMode.EYEDROPPER:
 		_hide_3d_eyedropper_loupe()
 	_update_tool_button_states()
@@ -19129,6 +20053,7 @@ func _has_selected_tool() -> bool:
 		(_brush_button and _brush_button.button_pressed)
 		or (_eraser_button and _eraser_button.button_pressed)
 		or (_fill_button and _fill_button.button_pressed)
+		or (_gradient_button and _gradient_button.button_pressed)
 		or (_shape_button and _shape_button.button_pressed)
 		or (_text_button and _text_button.button_pressed)
 		or (_line_button and _line_button.button_pressed)
@@ -19143,6 +20068,9 @@ func _has_selected_tool() -> bool:
 
 
 func _update_tool_button_states() -> void:
+	if _gradient_button:
+		_update_toggle_button_icon(_gradient_button)
+		_gradient_button.queue_redraw()
 	if _brush_button:
 		_update_toggle_button_icon(_brush_button)
 		_brush_button.queue_redraw()

@@ -1,10 +1,10 @@
 # GDDraw
 
-GDDraw 0.3.0 is a Godot editor plugin for layered prototype art and multi-object albedo texture painting on supported 3D surfaces without leaving the editor.
+GDDraw 0.4.0 is a Godot editor plugin for layered prototype art and multi-object albedo texture painting on supported 3D surfaces without leaving the editor.
 
 ## Requirements
 
-- Godot 4.4 or later. GDDraw 0.3.0 has been tested across Godot 4.4 through 4.7.
+- Godot 4.4 or later. GDDraw 0.4.0 has been tested on Godot 4.4 and 4.7.
 - A desktop editor build. Clipboard and native file-dialog behavior can vary by operating system.
 
 ## Documentation
@@ -16,6 +16,8 @@ GDDraw includes an offline user manual under **Help > Documentation**. The same 
 - [Interface](addons/GDDraw/docs/interface.md)
 - [Preferences](addons/GDDraw/docs/preferences.md)
 - [Tools](addons/GDDraw/docs/tools.md)
+- [Gradients](addons/GDDraw/docs/gradients.md)
+- [Palettes](addons/GDDraw/docs/palettes.md)
 - [Layers](addons/GDDraw/docs/layers.md)
 - [2D Drawing](addons/GDDraw/docs/2d-drawing.md)
 - [Painting in 3D](addons/GDDraw/docs/3d-painting.md)
@@ -37,11 +39,13 @@ For an Asset Store package, `addons/GDDraw` is the package boundary. Do not incl
 
 ## What Is Included
 
-- 2D drawing with brush, eraser, fill, line, rectangle, ellipse, raster text with installed/custom-directory fonts and text-box backgrounds, eyedropper, selection, lasso, transforms, crop, scale, mirror, grid, and tile preview tools.
+- 2D drawing with brush, eraser, fill, line, rectangle, ellipse, editable Text and Gradient layers, eyedropper, selection, lasso, transforms, crop, scale, mirror, grid, and tile preview tools.
+- Palette creation and editing, GPL/HEX/TXT import, RGBA HEX saving, and RGB/RGBA export. A configurable palette folder is scanned on startup and refreshed after file operations.
 - PNG new/open/save/save-as workflows plus `Sprite2D` and configurable textured `CSGBox3D`, `CSGSphere3D`, and `CSGCylinder3D` creation.
 - Undo/redo and exact dirty-state tracking for independent 2D documents.
-- A shared, collapsible Layers panel with paint layers, nested groups, thumbnails, visibility, opacity, locking, reordering, and lossless `.gddraw` project files.
-- Scoped multi-object texture-painting sessions for `MeshInstance3D` and supported single-material CSG geometry with triangle UVs.
+- A shared Layers panel with type indicators, multi-selection, bulk actions, nested-group moves, and editable `.gddraw` project files. Pixel tools automatically create paint layers above selected editable tool layers.
+- Reorderable panel tabs and horizontal/vertical splits, with independent panel toggles and saved workspace placement. Tools preferences collect Brush, Gradient, and Text defaults.
+- Multi-object albedo painting for `MeshInstance3D` and supported single-material CSG geometry with triangle UVs. Continuous Brush/Eraser gestures can cross texture targets as one undoable action.
 - 2D, 3D, and linked split views with UV overlays and editor-style 3D navigation.
 - Protected session replacement, save/discard/cancel flows, 2D workspace restoration, and editor undo/redo for material or texture assignment.
 - A staged stable-release updater in the Help menu with explicit download and Install and Restart consent.
@@ -62,6 +66,8 @@ GDDraw keeps the installed plugin replaceable by separating package files from p
 - `res://gddraw/images/` is the default folder for generated and saved PNGs.
 - `res://gddraw/brushes/` is reserved for future file-backed brush assets. Current custom brush presets contain parameters only and remain in Godot's project-scoped editor metadata.
 - `res://gddraw/fonts/` is the default project-specific custom-font folder. Fonts are discovered in place and are not copied.
+- `res://gddraw/palettes/` is the default palette scan/save folder; RGBA `.hex` files are portable, while `collection.json` retains names, drafts, and collection state.
+- `res://addons/GDDraw/resources/palettes/` is the bundled starter palette source. Bundled entries save as user copies and can be hidden or restored per project.
 - `user://gddraw/updates/downloads/` holds completed update archives and unique `.part` downloads, `staged/` holds validated packages and manifests, and `backups/` holds verified previous plugin packages. These locations are created only after an explicit update action.
 
 These asset folders are lazy: installing or enabling the plugin, initializing the dock, opening Preferences, and scanning missing font or brush folders do not create them. A missing folder is created only immediately before an operation writes there; for example, the first PNG save creates its configured image folder. Existing project metadata always wins over the new defaults, so legacy choices such as `res://gddraw` and `res://fonts` remain unchanged. GDDraw does not migrate, copy, rename, or delete existing user assets.
@@ -93,7 +99,7 @@ Node creation, ownership, material/texture assignment, collision configuration, 
 1. Select a `MeshInstance3D`, a supported material-bearing CSG shape, or a parent containing one.
 2. Switch GDDraw to 3D or Split view and choose **Use Selected 3D Object**. You can also drag a Scene-tree node into the 3D pane.
 3. Choose one surface, the selected hierarchy, or all selected objects. GDDraw previews the compatible targets before opening them; missing materials or textures are created only after explicit confirmation.
-4. Paint any imported object. Hits activate the owning target unless Target Lock is enabled, and a stroke never crosses target boundaries.
+4. Paint any imported object. Hold Brush or Eraser across imported objects and compatible texture targets; the whole gesture is one undo action. Target Lock restricts painting to the active target.
 5. Use **Save** or **Save As** for flattened target PNGs and **Save Layered Project** for the complete editable multi-object session.
 
 Starting a 3D session preserves the independent 2D workspace. Unsaved 2D or 3D changes are guarded by save/discard/cancel prompts.

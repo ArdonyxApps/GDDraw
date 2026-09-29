@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "palettes": {
+	"31.hex": {
+		"author": "catastrofie",
+		"url": "https://lospec.com/palette-list/31",
+		"license": ""
+	},
+	"apollo.hex": {
+		"author": "AdamCYounis",
+		"url": "https://lospec.com/palette-list/apollo",
+		"license": ""
+	},
+	"cc-29.hex": {
+		"author": "Alpha6",
+		"url": "https://lospec.com/palette-list/cc-29",
+		"license": ""
+	},
+	"dawnbringer-32.hex": {
+		"author": "DawnBringer",
+		"url": "https://lospec.com/palette-list/dawnbringer-32",
+		"license": ""
+	},
+	"duel.hex": {
+		"author": "Arilyn",
+		"url": "https://lospec.com/palette-list/duel",
+		"license": ""
+	},
+	"endesga-32.hex": {
+		"author": "MYKRA",
+		"url": "https://lospec.com/palette-list/endesga-32",
+		"license": ""
+	},
+	"endesga-64.hex": {
+		"author": "ENDESGA",
+		"url": "https://lospec.com/palette-list/endesga-64",
+		"license": ""
+	},
+	"lospec500.hex": {
+		"author": "Lospec Discord server",
+		"url": "https://lospec.com/palette-list/lospec500",
+		"license": ""
+	},
+	"oil-6.hex": {
+		"author": "GrafxKid",
+		"url": "https://lospec.com/palette-list/oil-6",
+		"license": ""
+	},
+	"pear36.hex": {
+		"author": "PineappleOnPizza",
+		"url": "https://lospec.com/palette-list/pear36",
+		"license": ""
+	},
+	"resurrect-64.hex": {
+		"author": "Kerrie Lake",
+		"url": "https://lospec.com/palette-list/resurrect-64",
+		"license": ""
+	},
+	"slso8.hex": {
+		"author": "Luis Miguel Maldonado",
+		"url": "https://lospec.com/palette-list/slso8",
+		"license": ""
+	},
+	"vinik24.hex": {
+		"author": "Vinik",
+		"url": "https://lospec.com/palette-list/vinik24",
+		"license": ""
+	},
+	"pico-8.hex": {
+		"author": "Lexaloffle Games",
+		"url": "https://lospec.com/palette-list/pico-8",
+		"license": ""
+	},
+	"nintendo-entertainment-system.hex": {
+		"author": "Nintendo Entertainment System",
+		"url": "https://lospec.com/palette-list/nintendo-entertainment-system",
+		"license": ""
+	},
+}
+}

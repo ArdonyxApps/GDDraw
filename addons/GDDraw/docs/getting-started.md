@@ -36,7 +36,7 @@ The default PNG folder is `res://gddraw/images`. The destination can be changed 
 ## Understand the two save formats
 
 - **PNG** stores the merged visible pixels for one paint target. Other applications can open it, but the layer stack is flattened.
-- **GDDraw layered project (`.gddraw`)** preserves layers, groups, per-target canvas sizes, visibility, opacity, locks, and 3D target bindings.
+- **GDDraw layered project (`.gddraw`)** preserves paint and editable Text/Gradient layers, embedded Text fonts, groups, per-target canvas sizes, visibility, opacity, locks, and 3D target bindings.
 
 See [Saving and Files](saving-and-files.md) for the complete workflow.
 
@@ -45,3 +45,5 @@ See [Saving and Files](saving-and-files.md) for the complete workflow.
 - Learn where controls live in [Interface](interface.md).
 - Read every drawing mode in [Tools](tools.md).
 - Learn layer organization in [Layers](layers.md).
+- Build reusable colors in [Palettes](palettes.md) and editable fills in [Gradients](gradients.md).
+- Choose Text and Gradient output defaults under [Preferences](preferences.md).

@@ -1,6 +1,6 @@
 # Known Limitations
 
-This page describes the intended boundaries of GDDraw 0.3.0 rather than unfinished behavior that should silently fail.
+This page describes the intended boundaries of GDDraw 0.4.0 rather than unfinished behavior that should silently fail.
 
 ## 3D materials and channels
 
@@ -29,10 +29,17 @@ This page describes the intended boundaries of GDDraw 0.3.0 rather than unfinish
 - Native clipboard and file-dialog behavior can differ across desktop operating systems.
 - In-app documentation supports the Markdown subset used by the packaged manual rather than every GitHub Markdown extension.
 
+## Drawing and layer boundaries
+
+- Gradient gestures use the 2D canvas, including the texture canvas in a 3D session. Direct gradient dragging on the model is not supported.
+- Multi-layer grouping and moves stay within one paint target. Clear the Layers filter before dragging to reorder.
+- Eraser requires a paint layer or explicit rasterization of editable Text/Gradient content. Other pixel drawing tools create a new paint layer above editable content.
+- Numeric Width/Height fields with aspect locking for floating selections are deferred to a later revision. Existing selection handles and transforms remain available.
+
 ## File format boundaries
 
 - PNG export is flattened by design.
-- Use `.gddraw` layered projects to preserve editable layers, groups, target bindings, oversized layer content, and eraser baselines.
+- Use `.gddraw` layered projects to preserve editable Text/Gradient content, embedded Text fonts, groups, target bindings, oversized layer content, and eraser baselines. Format 4 reads older formats 1–3; older plugin versions cannot read format 4.
 - Layered 3D documents reference their source Godot Scene; they do not embed a silent duplicate of the model geometry.
 
 If behavior falls outside these documented boundaries without an explanation in the status bar, it may be a defect rather than a limitation.

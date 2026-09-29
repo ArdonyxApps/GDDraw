@@ -3,6 +3,8 @@ class_name GDDrawCanvasControl
 extends Control
 
 signal stroke_committed(previous_image: Image)
+signal drawing_gesture_finished()
+var prepare_drawing_layer: Callable
 signal canvas_size_changed(size: Vector2i)
 signal view_changed(zoom_percent: int)
 signal color_picked(color: Color, pixel: Vector2i)
@@ -14,7 +16,14 @@ signal image_drop_requested(data: Variant)
 signal image_changed(image: Image)
 signal hover_uv_changed(uv: Vector2, has_hover: bool)
 signal text_draft_started()
+signal text_layer_commit_requested(payload: Dictionary)
 signal text_draft_finished(committed: bool)
+signal gradient_draft_changed
+signal gradient_gesture_started
+signal gradient_stops_changed
+signal gradient_layer_commit_requested(payload: Dictionary)
+signal gradient_gesture_finished
+signal gradient_interaction_started
 signal text_draft_copied(as_image: bool)
 
 enum ToolMode {
@@ -29,7 +38,49 @@ enum ToolMode {
 	LASSO_SELECT,
 	PAN,
 	TEXT,
+	GRADIENT,
 }
+
+const GradientRaster := preload("res://addons/GDDraw/gddraw_gradient.gd")
+var gradient_radial := false:
+	set(value):
+		gradient_radial = value
+		_refresh_gradient_settings()
+var gradient_transparent := false:
+	set(value):
+		gradient_transparent = value
+		_refresh_gradient_settings()
+var gradient_reverse := false:
+	set(value):
+		gradient_reverse = value
+		_refresh_gradient_settings()
+var gradient_opacity := 1.0:
+	set(value):
+		gradient_opacity = clampf(value, 0.0, 1.0)
+		_refresh_gradient_settings()
+var _gradient_drag_handle := -1
+var gradient_stops: Array = []
+var gradient_selected_stop := 0
+var _gradient_drag_stop := -1
+var gradient_layer_mode := false
+var _gradient_creating_layer := false
+var gradient_editing_enabled := false
+var gradient_layer_preview_compositor: Callable
+var _gradient_raw_pointer := Vector2.ZERO
+var _gradient_base: Image
+var _gradient_preview: Image
+var _gradient_texture: ImageTexture
+var _gradient_start := Vector2.ZERO
+var _gradient_end := Vector2.ZERO
+var _gradient_raw_end := Vector2.ZERO
+var _gradient_settings := {}
+var _gradient_area := Rect2i()
+var _gradient_mask: Image
+var _gradient_mask_origin := Vector2i.ZERO
+var _gradient_pending := false
+var _gradient_worker: Thread
+var _gradient_revision := 0
+var _gradient_worker_revision := 0
 
 const DEFAULT_IMAGE_SIZE := Vector2i(128, 128)
 const CHECKER_SIZE := 16
@@ -192,6 +243,7 @@ var editing_enabled := true:
 		if editing_enabled:
 			return
 		_cancel_stroke()
+		cancel_gradient()
 		cancel_surface_shape_preview()
 		cancel_text_draft()
 		_selection_nudge_previous_image = null
@@ -200,19 +252,23 @@ var editing_enabled := true:
 var brush_color := Color.BLACK:
 	set(value):
 		brush_color = value
+		_refresh_gradient_settings()
 		_refresh_shape_preview_image()
 		_refresh_text_raster()
 		queue_redraw()
 var background_color := Color.WHITE:
 	set(value):
 		background_color = value
+		_refresh_gradient_settings()
 		if shape_fill_mode == ShapeFillMode.BACKGROUND:
 			_refresh_shape_preview_image()
+		_update_text_layer_preview()
 		queue_redraw()
 var brush_size := 12
 var alpha_lock := false:
 	set(value):
 		alpha_lock = value
+		_refresh_gradient_settings()
 		_refresh_shape_preview_image()
 		queue_redraw()
 var fill_tolerance := 0:
@@ -327,10 +383,13 @@ var text_wrapping := TextWrapping.WORD_WRAP:
 var text_fill_mode := TextFillMode.NONE:
 	set(value):
 		text_fill_mode = clampi(value, TextFillMode.NONE, TextFillMode.BACKGROUND)
+		_update_text_layer_preview()
 		queue_redraw()
 var active_tool := ToolMode.BRUSH:
 	set(value):
+		drawing_gesture_finished.emit()
 		var tool_changed := active_tool != value
+		if tool_changed: cancel_gradient()
 		if tool_changed and _surface_shape_previewing:
 			cancel_surface_shape_preview()
 		if active_tool == ToolMode.TEXT and value != ToolMode.TEXT and _has_text_draft:
@@ -350,6 +409,10 @@ var active_tool := ToolMode.BRUSH:
 			_is_lasso_selecting = false
 			if _has_floating_selection:
 				_commit_floating_selection(true)
+		elif active_tool == ToolMode.GRADIENT:
+			_is_selecting = false
+			_is_lasso_selecting = false
+			if _has_floating_selection: _commit_floating_selection(false)
 		elif active_tool != ToolMode.SELECT and active_tool != ToolMode.LASSO_SELECT:
 			_is_selecting = false
 			_is_lasso_selecting = false
@@ -534,6 +597,14 @@ var _mirror_generated_pixels := {}
 var _selection_nudge_previous_image: Image
 var _last_viewport_size := Vector2.ZERO
 var _has_text_draft := false
+var text_layer_mode := false
+var text_editing_enabled := false
+var text_layer_preview_compositor: Callable
+var text_layer_edit_at: Callable
+var _text_layer_editing := false
+var _loading_text_layer := false
+var _text_layer_texture: ImageTexture
+var _text_layer_mask: Image
 var _text_box := Rect2i()
 var _text_creation_start := Vector2i.ZERO
 var _text_drag_mode := TextDragMode.NONE
@@ -573,6 +644,7 @@ var _canvas_scrollbar_dragging := false
 
 # Lifecycle and public image/session API.
 func _init() -> void:
+	focus_mode = Control.FOCUS_ALL
 	custom_minimum_size = Vector2(360, 220)
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -600,10 +672,17 @@ func _notification(what: int) -> void:
 		_on_drawable_viewport_resized()
 		_update_text_editor_rect()
 	elif what == NOTIFICATION_EXIT_TREE:
+		cancel_gradient()
+		if _gradient_worker and _gradient_worker.is_started(): _gradient_worker.wait_to_finish()
+		_gradient_worker = null
 		_set_canvas_mouse_hidden(false)
+	elif what == NOTIFICATION_WM_WINDOW_FOCUS_OUT:
+		_gradient_drag_handle = -1
+		_gradient_drag_stop = -1
 
 
 func _process(delta: float) -> void:
+	_advance_gradient_preview()
 	_flush_live_composite_refresh()
 	if not _has_text_draft or not _text_editor:
 		return
@@ -863,6 +942,7 @@ func _set_workspace_image(
 	prepared_texture: ImageTexture = null
 ) -> void:
 	cancel_text_draft()
+	cancel_gradient()
 	var next_document_rect := Rect2i(-workspace_origin, document_size)
 	var keep_current_display := (
 		preserve_display
@@ -992,6 +1072,7 @@ func clear_uv_overlay_data() -> void:
 
 
 func begin_uv_stroke(uv: Vector2) -> void:
+	if active_tool != ToolMode.EYEDROPPER and not _prepare_drawing_destination(): return
 	if not editing_enabled and active_tool != ToolMode.EYEDROPPER:
 		return
 	var pixel := _uv_to_image_pixel(uv)
@@ -1029,7 +1110,8 @@ func end_uv_stroke() -> void:
 	_end_stroke()
 
 
-func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array) -> void:
+func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array, original_image: Image = null) -> void:
+	if active_tool != ToolMode.EYEDROPPER and not _prepare_drawing_destination(): return
 	if not editing_enabled and active_tool != ToolMode.EYEDROPPER:
 		return
 	var pixel := _uv_to_image_pixel(uv)
@@ -1045,7 +1127,9 @@ func begin_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array) -> 
 	if not _is_stroke_tool():
 		return
 	_begin_live_stroke_state()
-	_stroke_start_image = get_image_copy()
+	# Native layer bounds can be smaller than the editable document workspace.
+	# In that case raster coverage needs a workspace-sized baseline of its own.
+	_stroke_start_image = original_image if original_image and original_image.get_size() == _image.get_size() else get_image_copy()
 	_begin_stroke_coverage()
 	_last_pixel = pixel
 	_stamp_uv_3d(_last_pixel, triangle_uvs)
@@ -1068,6 +1152,42 @@ func continue_uv_triangle_stroke(uv: Vector2, triangle_uvs: PackedVector2Array, 
 
 func end_uv_triangle_stroke() -> void:
 	_end_stroke()
+
+
+func is_uv_stroke_active() -> bool:
+	return _is_drawing
+
+
+# Transfer segment raster state without emitting a history event. The caller
+# owns the encompassing gesture and must eventually commit or restore it.
+func suspend_uv_triangle_stroke() -> Dictionary:
+	if not _is_drawing:
+		return {}
+	_flush_live_composite_refresh()
+	var state := {
+		"start_image": _stroke_start_image,
+		"coverage": _stroke_coverage,
+		"changed": _stroke_has_changes,
+	}
+	_is_drawing = false
+	_stroke_start_image = null
+	_stroke_coverage = PackedFloat32Array()
+	_stroke_has_changes = false
+	return state
+
+
+func resume_uv_triangle_stroke(state: Dictionary, uv: Vector2, triangle_uvs: PackedVector2Array, previous_image: Image = null) -> void:
+	if state.is_empty():
+		begin_uv_triangle_stroke(uv, triangle_uvs, previous_image)
+		return
+	_begin_live_stroke_state()
+	_stroke_start_image = state["start_image"]
+	_stroke_coverage = state["coverage"]
+	_stroke_has_changes = bool(state["changed"])
+	# Release the transferred packed array before stamping to avoid a full-size
+	# copy-on-write allocation on every return to an earlier target.
+	state.clear()
+	continue_uv_triangle_stroke(uv, triangle_uvs, false)
 
 
 # Pixel-endpoint shape entry points shared by private 3D surface tools. They use
@@ -1955,6 +2075,9 @@ func delete_active_selection() -> bool:
 
 
 func cancel_active_selection_or_preview() -> bool:
+	if cancel_gradient():
+		gradient_gesture_finished.emit()
+		return true
 	if _is_shape_previewing:
 		if _surface_shape_previewing:
 			cancel_surface_shape_preview()
@@ -2077,10 +2200,10 @@ func get_selected_text_draft_value() -> String:
 	return _text_editor.text.substr(from_index, to_index - from_index)
 
 
-func get_text_draft_image_copy() -> Image:
+func get_text_draft_image_copy(refresh_raster := true) -> Image:
 	if not _has_text_draft:
 		return null
-	_refresh_text_raster()
+	if refresh_raster: _refresh_text_raster()
 	if not _text_preview_image or _text_preview_image.is_empty():
 		return null
 	var copied_image := Image.create_empty(
@@ -2127,7 +2250,7 @@ func copy_text_draft_contextual() -> bool:
 
 
 func rotate_text_draft_degrees(degrees: float) -> bool:
-	if not editing_enabled or not _has_text_draft or not is_finite(degrees) or is_zero_approx(degrees):
+	if not (editing_enabled or text_editing_enabled) or not _has_text_draft or not is_finite(degrees) or is_zero_approx(degrees):
 		return false
 	_text_rotation = wrapf(_text_rotation + deg_to_rad(degrees), -PI, PI)
 	_refresh_text_rotated_preview()
@@ -2143,7 +2266,8 @@ func focus_text_editor() -> void:
 
 
 func create_text_draft(pixel_rect: Rect2i, initial_text := "") -> void:
-	if not editing_enabled:
+	if not _prepare_drawing_destination(): return
+	if not (editing_enabled or text_editing_enabled):
 		return
 	if _has_text_draft:
 		finish_text_draft(true)
@@ -2152,6 +2276,12 @@ func create_text_draft(pixel_rect: Rect2i, initial_text := "") -> void:
 		Vector2i(maxi(TEXT_MIN_BOX_SIZE.x, pixel_rect.size.x), maxi(TEXT_MIN_BOX_SIZE.y, pixel_rect.size.y))
 	)
 	_has_text_draft = true
+	if text_layer_mode and _has_selection:
+		_text_layer_mask = Image.create_empty(_image.get_width(), _image.get_height(), false, Image.FORMAT_RGBA8)
+		if _selection_mask:
+			_text_layer_mask.blit_rect(_selection_mask, Rect2i(Vector2i.ZERO, _selection_mask.get_size()), _selection_rect.position)
+		else:
+			_text_layer_mask.fill_rect(_selection_rect, Color.WHITE)
 	_text_rotation = 0.0
 	_text_drag_mode = TextDragMode.NONE
 	_text_editor.text = initial_text
@@ -2163,13 +2293,20 @@ func create_text_draft(pixel_rect: Rect2i, initial_text := "") -> void:
 
 
 func commit_text_draft() -> bool:
-	if not editing_enabled or not _has_text_draft:
+	if not (editing_enabled or text_editing_enabled) or not _has_text_draft:
 		return false
 	if not _text_editor or _text_editor.text.strip_edges().is_empty():
 		_clear_text_draft(false)
 		text_draft_finished.emit(false)
 		return false
 	_refresh_text_raster()
+	if text_layer_mode:
+		var payload := _get_text_layer_payload()
+		_clear_text_draft(false)
+		text_layer_commit_requested.emit(payload)
+		text_draft_finished.emit(true)
+		queue_redraw()
+		return true
 	var coverage_image: Image = _text_preview_image.duplicate() if _text_preview_image else _get_text_coverage_image()
 	if not _text_coverage_has_visible_glyphs(coverage_image):
 		_clear_text_draft(false)
@@ -2229,6 +2366,61 @@ func finish_text_draft(commit_nonempty := true) -> bool:
 	cancel_text_draft()
 	return false
 
+
+func _get_text_layer_payload() -> Dictionary:
+	var pixels := Image.create_empty(_image.get_width(), _image.get_height(), false, Image.FORMAT_RGBA8)
+	var text_pixels := get_text_draft_image_copy(false)
+	if text_pixels: pixels.blit_rect(text_pixels, Rect2i(Vector2i.ZERO, text_pixels.get_size()), _text_preview_rect.position)
+	if _text_layer_mask:
+		var clipped := Image.create_empty(pixels.get_width(), pixels.get_height(), false, Image.FORMAT_RGBA8)
+		clipped.blit_rect_mask(pixels, _text_layer_mask, Rect2i(Vector2i.ZERO, pixels.get_size()), Vector2i.ZERO)
+		pixels = clipped
+	var font_data := ""
+	if text_font is FontFile: font_data = Marshalls.raw_to_base64(text_font.data)
+	var recipe := {
+		"text": _text_editor.text, "font_data": font_data,
+		"font_name": text_font.get_font_name() if text_font else "Theme Default",
+		"font_size": text_font_size, "box": [_text_box.position.x, _text_box.position.y, _text_box.size.x, _text_box.size.y],
+		"rotation": _text_rotation, "alignment": text_alignment, "wrapping": text_wrapping, "fill": text_fill_mode,
+		"color": [brush_color.r, brush_color.g, brush_color.b, brush_color.a],
+		"background": [background_color.r, background_color.g, background_color.b, background_color.a],
+	}
+	return {"recipe": recipe, "image": pixels, "mask": _text_layer_mask, "origin": _workspace_origin, "create_layer": not _text_layer_editing}
+
+func load_text_layer(recipe: Dictionary, origin: Vector2i, mask: Image = null) -> void:
+	if not preload("res://addons/GDDraw/gddraw_text_recipe.gd").valid_recipe(recipe): return
+	if _has_text_draft: cancel_text_draft()
+	text_font = ThemeDB.fallback_font
+	if not str(recipe.get("font_data", "")).is_empty():
+		var font := FontFile.new()
+		font.data = Marshalls.base64_to_raw(recipe.font_data)
+		text_font = font
+	text_font_size = int(recipe.font_size)
+	text_alignment = int(recipe.alignment)
+	text_wrapping = int(recipe.wrapping)
+	text_fill_mode = int(recipe.fill)
+	brush_color = Color(recipe.color[0], recipe.color[1], recipe.color[2], recipe.color[3])
+	background_color = Color(recipe.background[0], recipe.background[1], recipe.background[2], recipe.background[3])
+	var box: Array = recipe.box
+	_loading_text_layer = true
+	create_text_draft(Rect2i(Vector2i(box[0], box[1]) + origin - _workspace_origin, Vector2i(box[2], box[3])), recipe.text)
+	_loading_text_layer = false
+	# Saved scaled boxes can be smaller than the minimum for newly drawn boxes.
+	_text_box.size = Vector2i(box[2], box[3])
+	_text_layer_editing = true
+	_text_layer_mask = null
+	if mask:
+		_text_layer_mask = Image.create_empty(_image.get_width(), _image.get_height(), false, Image.FORMAT_RGBA8)
+		_text_layer_mask.blit_rect(mask, Rect2i(Vector2i.ZERO, mask.get_size()), origin - _workspace_origin)
+	_text_rotation = float(recipe.rotation)
+	_refresh_text_layout()
+
+func _update_text_layer_preview() -> void:
+	if not text_layer_mode or not _has_text_draft or not text_layer_preview_compositor.is_valid(): return
+	var payload := _get_text_layer_payload()
+	var preview: Image = text_layer_preview_compositor.call(payload.image, payload.origin, payload.create_layer)
+	if preview: _text_layer_texture = ImageTexture.create_from_image(preview)
+	queue_redraw()
 
 func _build_text_editor() -> void:
 	_text_editor = TextEdit.new()
@@ -2332,6 +2524,7 @@ func _refresh_text_rotated_preview() -> void:
 		_text_background_preview_texture.update(_text_background_preview_image)
 	else:
 		_text_background_preview_texture = ImageTexture.create_from_image(_text_background_preview_image)
+	_update_text_layer_preview()
 
 
 func _rasterize_text_coverage() -> Image:
@@ -2484,6 +2677,9 @@ func _on_text_editor_gui_input(event: InputEvent) -> void:
 
 func _clear_text_draft(redraw := true) -> void:
 	_has_text_draft = false
+	_text_layer_editing = false
+	_text_layer_texture = null
+	_text_layer_mask = null
 	_text_drag_mode = TextDragMode.NONE
 	_text_resize_handle = -1
 	_text_pointer_selecting = false
@@ -2617,7 +2813,11 @@ func _draw() -> void:
 	var document_local_rect := _image_pixels_to_local_rect(_document_rect)
 	_draw_tile_preview()
 	_draw_checkerboard(document_local_rect)
-	_draw_image_texture(_image_rect)
+	if _text_layer_texture and _has_text_draft:
+		_draw_texture_in_pixel_rect(_text_layer_texture, Rect2i(Vector2i.ZERO, _image.get_size()), 0)
+	else:
+		_draw_image_texture(_image_rect)
+	_draw_gradient_preview()
 	if _use_lightweight_shape_preview and _is_shape_previewing and not _surface_shape_previewing:
 		_draw_shape_preview()
 	else:
@@ -2894,7 +3094,7 @@ func _draw_text_draft() -> void:
 	if not _has_text_draft:
 		return
 	var local_box := _image_pixels_to_local_rect(_text_box)
-	if _text_paragraph:
+	if _text_paragraph and not _text_layer_texture:
 		if text_fill_mode == TextFillMode.BACKGROUND:
 			_draw_text_preview_layer(_text_background_preview_texture, background_color)
 		_draw_text_preview_layer(_text_preview_texture, brush_color)
@@ -3402,6 +3602,11 @@ func _draw_brush_coverage_preview(center: Vector2i, color: Color) -> void:
 
 # Input routing and high-level tool dispatch.
 func _gui_input(event: InputEvent) -> void:
+	if _gradient_base and event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		cancel_gradient()
+		gradient_gesture_finished.emit()
+		accept_event()
+		return
 	if event is InputEventMouseMotion or event is InputEventMouseButton:
 		_update_canvas_scrollbar_proximity(event.position)
 	if active_tool == ToolMode.TEXT and _has_text_draft and event is InputEventKey and event.pressed and not event.echo:
@@ -3424,7 +3629,12 @@ func _gui_input(event: InputEvent) -> void:
 	if previous_shift_constrain != _shift_constrain and _is_shape_previewing:
 		_refresh_shape_preview_image()
 		queue_redraw()
+	if previous_shift_constrain != _shift_constrain and _gradient_drag_handle != -1:
+		_drag_gradient_handle(_gradient_raw_pointer, _shift_constrain)
 	if event is InputEventKey and event.keycode in [KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN]:
+		if _gradient_base:
+			accept_event()
+			return
 		if has_active_selection():
 			if event.pressed:
 				var direction := Vector2i.ZERO
@@ -3461,7 +3671,19 @@ func _gui_input(event: InputEvent) -> void:
 			return
 		if event.button_index != MOUSE_BUTTON_LEFT:
 			return
+		if event.pressed and active_tool == ToolMode.GRADIENT:
+			gradient_interaction_started.emit()
 		if not event.pressed:
+			if _gradient_base:
+				var was_dragging := _gradient_drag_handle != -1 or _gradient_drag_stop != -1
+				_drag_gradient_handle(Vector2(_local_to_unclamped_image_pixel(event.position)), _shift_constrain)
+				_gradient_drag_handle = -1
+				_gradient_drag_stop = -1
+				if was_dragging:
+					if not commit_gradient(): cancel_gradient()
+					gradient_gesture_finished.emit()
+				accept_event()
+				return
 			if active_tool == ToolMode.TEXT and _text_drag_mode != TextDragMode.NONE:
 				_end_text_pointer_drag(event.position)
 				accept_event()
@@ -3514,8 +3736,34 @@ func _gui_input(event: InputEvent) -> void:
 				_begin_selection_transform(event.position, SelectionTransformMode.MOVE)
 				accept_event()
 				return
+		if active_tool == ToolMode.GRADIENT and _gradient_base:
+			var stops := get_gradient_stops()
+			for i in range(1, stops.size() - 1):
+				var offset: float = 1.0 - stops[i].position if gradient_reverse else stops[i].position
+				var point := _gradient_start.lerp(_gradient_end, offset)
+				if event.position.distance_to(_image_pixel_center_to_local(Vector2i(point))) <= 12.0:
+					_gradient_drag_stop = i
+					select_gradient_stop(i)
+					grab_focus()
+					accept_event()
+					return
+			var start_distance: float = event.position.distance_to(_image_pixel_center_to_local(Vector2i(_gradient_start)))
+			var end_distance: float = event.position.distance_to(_image_pixel_center_to_local(Vector2i(_gradient_end)))
+			if minf(start_distance, end_distance) <= 15.0:
+				_gradient_drag_handle = 0 if start_distance < end_distance else 1
+				var index := 0 if _gradient_drag_handle == 0 else stops.size() - 1
+				select_gradient_stop(stops.size() - 1 - index if gradient_reverse else index)
+				_gradient_raw_pointer = _gradient_start if _gradient_drag_handle == 0 else _gradient_end
+				grab_focus()
+				accept_event()
+				return
 		if _image_rect.has_point(event.position):
-			if active_tool == ToolMode.FILL:
+			if active_tool == ToolMode.GRADIENT:
+				grab_focus()
+				begin_gradient(Vector2(_local_to_unclamped_image_pixel(event.position)))
+				_gradient_drag_handle = 1 if _gradient_base else -1
+				_gradient_raw_pointer = _gradient_start
+			elif active_tool == ToolMode.FILL:
 				_fill_at_position(event.position)
 			elif active_tool == ToolMode.EYEDROPPER:
 				_pick_color_at_position(event.position)
@@ -3544,6 +3792,7 @@ func _gui_input(event: InputEvent) -> void:
 			accept_event()
 			return
 		_update_preview(event.position)
+		if _gradient_base: _drag_gradient_handle(Vector2(_local_to_unclamped_image_pixel(event.position)), _shift_constrain)
 		_emit_hover_uv(event.position)
 		if _is_shape_previewing:
 			_update_shape_preview(event.position)
@@ -3635,12 +3884,18 @@ func _pan_from_navigator(local_position: Vector2, preview_rect: Rect2) -> void:
 	queue_redraw()
 
 
+func _try_reopen_text_layer(local_position: Vector2) -> bool:
+	if _has_text_draft or not text_editing_enabled or not text_layer_edit_at.is_valid(): return false
+	if not _image_rect.has_point(local_position): return false
+	return bool(text_layer_edit_at.call(_local_to_unclamped_image_pixel(local_position) + _workspace_origin))
+
 func _handle_text_pointer_press(local_position: Vector2) -> bool:
-	if not editing_enabled:
+	if not (editing_enabled or text_editing_enabled):
 		return false
 	if not _has_text_draft:
 		if not _image_rect.has_point(local_position):
 			return false
+		if _try_reopen_text_layer(local_position): return true
 		_text_creation_start = _local_to_unclamped_image_pixel(local_position)
 		_text_drag_start_pixel = _text_creation_start
 		_text_drag_mode = TextDragMode.CREATE
@@ -3692,6 +3947,7 @@ func _update_text_pointer_drag(local_position: Vector2) -> void:
 		# The raster does not change while moving, so shift its cached destination
 		# instead of waiting for the release-time layout refresh.
 		_text_preview_rect.position += movement
+		_update_text_layer_preview()
 		_update_text_editor_rect()
 		queue_redraw()
 		return
@@ -3814,7 +4070,12 @@ func _begin_live_stroke_state() -> void:
 	_live_composite_refresh_pending = false
 
 
+func _prepare_drawing_destination() -> bool:
+	if _loading_text_layer: return true
+	return not prepare_drawing_layer.is_valid() or bool(prepare_drawing_layer.call(active_tool))
+
 func _begin_stroke(local_position: Vector2) -> void:
+	if not _image_rect.has_point(local_position) or not _prepare_drawing_destination(): return
 	if not editing_enabled:
 		return
 	_begin_live_stroke_state()
@@ -3848,6 +4109,7 @@ func _end_stroke() -> void:
 		_stroke_start_image = null
 	_stroke_has_changes = false
 	_stroke_coverage = PackedFloat32Array()
+	drawing_gesture_finished.emit()
 	queue_redraw()
 
 
@@ -3864,10 +4126,262 @@ func _cancel_stroke() -> void:
 	_stroke_has_changes = false
 	_live_composite_dirty_tiles.clear()
 	_live_composite_refresh_pending = false
+	drawing_gesture_finished.emit()
 	queue_redraw()
 
 
+func get_gradient_stops() -> Array:
+	if not gradient_stops.is_empty(): return gradient_stops.duplicate(true)
+	var last := Color(brush_color.r, brush_color.g, brush_color.b, 0) if gradient_transparent else background_color
+	return [{"position": 0.0, "color": brush_color}, {"position": 1.0, "color": last}]
+
+func get_gradient_settings() -> Dictionary:
+	return {"fg": brush_color, "bg": background_color, "radial": gradient_radial, "transparent": gradient_transparent, "reverse": gradient_reverse, "opacity": gradient_opacity, "alpha_lock": alpha_lock and not gradient_layer_mode, "stops": get_gradient_stops()}
+
+func select_gradient_stop(index: int) -> void:
+	gradient_selected_stop = clampi(index, 0, get_gradient_stops().size() - 1)
+	gradient_stops_changed.emit()
+	queue_redraw()
+
+func edit_gradient_stop(index: int, color: Color, position: float) -> void:
+	var stops := get_gradient_stops()
+	if index < 0 or index >= stops.size(): return
+	stops[index].color = color
+	if index > 0 and index < stops.size() - 1:
+		# Keep identity/order stable while dragging; stops cannot cross neighbors.
+		stops[index].position = clampf(position, stops[index - 1].position + 0.0001, stops[index + 1].position - 0.0001)
+	gradient_stops = stops
+	_refresh_gradient_settings()
+
+func add_gradient_stop(duplicate_selected := false) -> void:
+	var stops := get_gradient_stops()
+	var index := mini(gradient_selected_stop, stops.size() - 2)
+	var position: float = (stops[index].position + stops[index + 1].position) * 0.5
+	if stops[index + 1].position - stops[index].position < 0.0004: return
+	var settings := get_gradient_settings()
+	settings.reverse = false
+	settings.opacity = 1.0
+	var color: Color = stops[gradient_selected_stop].color if duplicate_selected else GradientRaster.make_ramp(settings).sample(position)
+	stops.insert(index + 1, {"position": position, "color": color})
+	gradient_stops = stops
+	gradient_selected_stop = index + 1
+	_refresh_gradient_settings()
+
+func delete_gradient_stop() -> void:
+	var stops := get_gradient_stops()
+	if gradient_selected_stop <= 0 or gradient_selected_stop >= stops.size() - 1: return
+	stops.remove_at(gradient_selected_stop)
+	gradient_stops = stops
+	gradient_selected_stop = mini(gradient_selected_stop, stops.size() - 1)
+	_gradient_drag_stop = -1
+	_refresh_gradient_settings()
+
+func reset_gradient_stops() -> void:
+	gradient_stops.clear()
+	gradient_selected_stop = 0
+	_refresh_gradient_settings()
+
+func _refresh_gradient_settings() -> void:
+	if _gradient_base:
+		_gradient_settings = get_gradient_settings()
+		_gradient_pending = true
+	gradient_stops_changed.emit()
+	queue_redraw()
+
+func _drag_gradient_handle(point: Vector2, constrain: bool) -> void:
+	if _gradient_base and _gradient_drag_stop != -1:
+		var delta := _gradient_end - _gradient_start
+		if delta.length_squared() > 0.000001:
+			var offset := (point - _gradient_start).dot(delta) / delta.length_squared()
+			edit_gradient_stop(_gradient_drag_stop, get_gradient_stops()[_gradient_drag_stop].color, 1.0 - offset if gradient_reverse else offset)
+		return
+	if not _gradient_base or _gradient_drag_handle == -1: return
+	_gradient_raw_pointer = point
+	if _gradient_drag_handle == 1:
+		update_gradient(point, constrain)
+	else:
+		if constrain:
+			var delta := point - _gradient_end
+			point = _gradient_end + Vector2.from_angle(snappedf(delta.angle(), PI / 4.0)) * delta.length()
+		_gradient_start = point
+		_gradient_pending = true
+		queue_redraw()
+
+func load_gradient_layer(recipe: Dictionary, mask: Image, origin: Vector2i) -> void:
+	cancel_gradient()
+	_gradient_creating_layer = false
+	var settings := GradientRaster.recipe_settings(recipe)
+	gradient_stops = settings.stops
+	gradient_selected_stop = 0
+	gradient_radial = settings.radial
+	gradient_reverse = settings.reverse
+	gradient_opacity = settings.opacity
+	var offset := origin - _workspace_origin
+	_gradient_base = Image.create_empty(_image.get_width(), _image.get_height(), false, Image.FORMAT_RGBA8)
+	_gradient_start = Vector2(recipe.start[0], recipe.start[1]) + Vector2(offset)
+	_gradient_end = Vector2(recipe.end[0], recipe.end[1]) + Vector2(offset)
+	_gradient_raw_end = _gradient_end
+	_gradient_area = Rect2i(Vector2i.ZERO, _image.get_size())
+	_gradient_mask = Image.create_empty(_image.get_width(), _image.get_height(), false, Image.FORMAT_RGBA8)
+	_gradient_mask.blit_rect(mask, Rect2i(Vector2i.ZERO, mask.get_size()), offset)
+	_gradient_mask_origin = Vector2i.ZERO
+	_gradient_settings = get_gradient_settings()
+	_gradient_settings.alpha_lock = false
+	_gradient_pending = true
+	gradient_stops_changed.emit()
+	gradient_draft_changed.emit()
+	queue_redraw()
+
+func gradient_layer_payload() -> Dictionary:
+	if not _gradient_base or _gradient_start.is_equal_approx(_gradient_end): return {}
+	var mask := Image.create_empty(_image.get_width(), _image.get_height(), false, Image.FORMAT_RGBA8)
+	if _gradient_mask:
+		mask.blit_rect(_gradient_mask, Rect2i(_gradient_area.position - _gradient_mask_origin, _gradient_area.size), _gradient_area.position)
+	else:
+		mask.fill_rect(_gradient_area, Color.WHITE)
+	var recipe := GradientRaster.recipe(_gradient_start, _gradient_end, _gradient_settings)
+	return {"recipe": recipe, "mask": mask, "origin": _workspace_origin, "create_layer": _gradient_creating_layer, "image": GradientRaster.render_recipe(recipe, _image.get_size(), mask)}
+
+func begin_gradient(start: Vector2) -> bool:
+	if not _document_rect.has_point(Vector2i(start)) or not _prepare_drawing_destination(): return false
+	if not (editing_enabled or gradient_editing_enabled) or not _image or not _document_rect.has_point(Vector2i(start)): return false
+	cancel_gradient()
+	_gradient_creating_layer = gradient_layer_mode
+	_gradient_area = _document_rect.intersection(Rect2i(Vector2i.ZERO, _image.get_size()))
+	if _has_selection: _gradient_area = _gradient_area.intersection(_selection_rect)
+	if not _gradient_area.has_area(): return false
+	_gradient_base = get_image_copy()
+	if gradient_layer_mode:
+		_gradient_base.fill(Color.TRANSPARENT)
+	_gradient_start = start
+	_gradient_end = start
+	_gradient_raw_end = start
+	_gradient_settings = get_gradient_settings()
+	_gradient_mask = _selection_mask.duplicate() if _has_selection and _selection_mask else null
+	_gradient_mask_origin = _selection_rect.position
+	_has_preview = false
+	gradient_gesture_started.emit()
+	gradient_draft_changed.emit()
+	queue_redraw()
+	return true
+
+func update_gradient(end: Vector2, constrain := false) -> void:
+	if not _gradient_base: return
+	_gradient_raw_end = end
+	if constrain:
+		var delta := end - _gradient_start
+		end = _gradient_start + Vector2.from_angle(snappedf(delta.angle(), PI / 4.0)) * delta.length()
+	if _gradient_end == end: return
+	_gradient_end = end
+	_gradient_pending = true
+	queue_redraw()
+
+func _refresh_gradient_preview() -> void:
+	_gradient_pending = false
+	if not _gradient_base: return
+	_gradient_preview = GradientRaster.render(_gradient_base, _gradient_area, _gradient_start, _gradient_end, _gradient_settings, _gradient_mask, _gradient_mask_origin, 512)
+	_show_gradient_preview()
+
+func _show_gradient_preview() -> void:
+	if not _gradient_preview:
+		_gradient_texture = null
+		queue_redraw()
+		return
+	var display: Image
+	if gradient_layer_mode and gradient_layer_preview_compositor.is_valid():
+		display = gradient_layer_preview_compositor.call(_gradient_preview)
+	else:
+		display = _make_display_image(_gradient_preview)
+	if _gradient_texture: _gradient_texture.update(display)
+	else: _gradient_texture = ImageTexture.create_from_image(display)
+	queue_redraw()
+
+func _advance_gradient_preview() -> void:
+	if _gradient_worker and _gradient_worker.is_started():
+		if _gradient_worker.is_alive(): return
+		var result: Image = _gradient_worker.wait_to_finish()
+		_gradient_worker = null
+		if _gradient_base and _gradient_worker_revision == _gradient_revision:
+			_gradient_preview = result
+			_show_gradient_preview()
+	if not _gradient_pending or not _gradient_base: return
+	if maxi(_gradient_area.size.x, _gradient_area.size.y) <= 512:
+		_refresh_gradient_preview()
+		return
+	var colors := GradientRaster.make_colors(_gradient_area, _gradient_start, _gradient_end, _gradient_settings, 512)
+	_gradient_pending = false
+	_gradient_worker_revision = _gradient_revision
+	_gradient_worker = Thread.new()
+	var error := _gradient_worker.start(GradientRaster.blend.bind(_gradient_base, _gradient_area, colors, _gradient_settings.duplicate(), _gradient_mask, _gradient_mask_origin))
+	if error != OK:
+		_gradient_worker = null
+		_refresh_gradient_preview()
+
+func commit_gradient() -> bool:
+	if not _gradient_base: return false
+	if _gradient_start.is_equal_approx(_gradient_end):
+		cancel_gradient()
+		return false
+	if not (editing_enabled or gradient_editing_enabled):
+		cancel_gradient()
+		return false
+	if gradient_layer_mode and gradient_layer_commit_requested.has_connections():
+		var payload := gradient_layer_payload()
+		if payload.is_empty(): return false
+		gradient_layer_commit_requested.emit(payload)
+		return true
+	if maxi(_gradient_area.size.x, _gradient_area.size.y) > 512:
+		_gradient_preview = GradientRaster.render(_gradient_base, _gradient_area, _gradient_start, _gradient_end, _gradient_settings, _gradient_mask, _gradient_mask_origin)
+	elif _gradient_pending: _refresh_gradient_preview()
+	var previous := _gradient_base
+	var next := _gradient_preview
+	var changed := next != null and next.get_data() != previous.get_data()
+	cancel_gradient()
+	if not changed: return false
+	_image = next
+	_refresh_texture()
+	stroke_committed.emit(previous)
+	return true
+
+func cancel_gradient() -> bool:
+	drawing_gesture_finished.emit()
+	var was_active := _gradient_base != null
+	_gradient_revision += 1
+	_gradient_base = null
+	_gradient_creating_layer = false
+	_gradient_preview = null
+	_gradient_texture = null
+	_gradient_mask = null
+	_gradient_settings.clear()
+	_gradient_pending = false
+	_gradient_drag_handle = -1
+	_gradient_drag_stop = -1
+	if was_active:
+		queue_redraw()
+		gradient_draft_changed.emit()
+	return was_active
+
+func _draw_gradient_preview() -> void:
+	if not _gradient_base: return
+	if _gradient_texture:
+		_draw_checkerboard(_image_pixels_to_local_rect(_document_rect))
+		_draw_texture_in_pixel_rect(_gradient_texture, Rect2i(Vector2i.ZERO, _image.get_size()), 0)
+	var start := _image_pixel_center_to_local(Vector2i(_gradient_start))
+	var end := _image_pixel_center_to_local(Vector2i(_gradient_end))
+	var accent := get_theme_color("accent_color", "Editor") if has_theme_color("accent_color", "Editor") else Color("57a0ff")
+	draw_line(start, end, Color.BLACK, 5)
+	draw_line(start, end, accent, 2)
+	var stops := get_gradient_stops()
+	for i in range(stops.size()):
+		var offset: float = 1.0 - stops[i].position if gradient_reverse else stops[i].position
+		var point := start.lerp(end, offset)
+		if i == gradient_selected_stop: draw_circle(point, 10, accent, false, 2)
+		draw_circle(point, 8, Color.BLACK)
+		draw_circle(point, 6, accent)
+		draw_circle(point, 4, stops[i].color)
+
 func _begin_shape_preview(local_position: Vector2) -> void:
+	if not _image_rect.has_point(local_position) or not _prepare_drawing_destination(): return
 	if not editing_enabled:
 		return
 	_is_shape_previewing = true
@@ -4221,6 +4735,7 @@ func _refresh_shape_preview_image() -> void:
 
 
 func _clear_shape_preview_image() -> void:
+	drawing_gesture_finished.emit()
 	_shape_preview_image = null
 	_shape_preview_texture = null
 	_shape_preview_rect = Rect2i()
@@ -4246,6 +4761,7 @@ func _draw_shape_preview_image() -> void:
 
 
 func _fill_at_position(local_position: Vector2) -> void:
+	if not _image_rect.has_point(local_position) or not _prepare_drawing_destination(): return
 	if not editing_enabled or not _image_rect.has_point(local_position):
 		return
 
@@ -6770,6 +7286,9 @@ func _clear_selection() -> void:
 
 
 func _refresh_texture() -> void:
+	# A separate pixel edit (cut/delete/paste/etc.) invalidates the captured base.
+	# Gradient previews never enter this mutation path.
+	if _gradient_base: cancel_gradient()
 	if (
 		_is_drawing
 		and _display_region_compositor.is_valid()

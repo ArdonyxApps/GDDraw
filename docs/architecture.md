@@ -1,5 +1,17 @@
 # GDDraw Architecture
 
+The 0.4.0 feature scope is complete; release validation and packaging are tracked in
+[`0.4.0-release-plan.md`](0.4.0-release-plan.md). Implemented work includes continuous
+cross-object painting, reusable tabbed/split panels, palette editing and HEX
+save/export, editable Gradient and Text layers, bulk layer actions, and multi-layer
+hierarchy moves. Tools preferences collect Brush, Gradient, and Text defaults.
+The user has completed native workflow testing and accepted the final UI adjustments.
+Exact selection sizing is deferred beyond 0.4.0, with no release assigned.
+
+The packaged [What's New](../addons/GDDraw/docs/whats-new.md) page and offline manual
+describe the user-facing 0.4.0 behavior. Runtime release-version changes, packaging,
+and publication remain separate release steps.
+
 This document is a compact handoff for future work on the GDDraw Godot editor plugin.
 
 The active 0.3.0 layer-system design and phased migration plan live in
@@ -15,6 +27,10 @@ Unless otherwise noted, source paths in this document are relative to `addons/GD
 
 - `GDDraw.gd` is the `EditorPlugin` entry point.
 - `gddraw_dock.gd` builds and owns the editor dock UI.
+- `gddraw_panel_host.gd` owns registered right-side panels, rail activation,
+  placement, project layout metadata, validation, migration, and reset.
+- `gddraw_panel_group.gd` owns tab chrome, overflow navigation, placement menus,
+  and panel drag feedback; it has no artwork or history responsibilities.
 - `gddraw_canvas.gd` owns the image data, canvas view state, drawing behavior, and rendering.
 - `gddraw_history.gd` owns the dock undo/redo image stacks.
 - `gddraw_layer_node.gd` owns recursive paint-layer/group state and deep snapshots.
@@ -189,7 +205,8 @@ Current view behavior:
 - The dock writes simple canvas properties directly for active tool, brush/preset settings, fill mode, mirror mode, view preferences, grid visibility, and grid settings.
 - Canvas image mutation methods return or emit the previous image so dock-level undo remains centralized.
 - While a 3D texture session is active, canvas image changes refresh the live preview and recompute dirty state from exact dimensions and RGBA8 bytes. Tool/view/hover/selection-only changes do not affect it.
-- A 3D drag remains one canvas/history stroke, but interpolation between samples is continuity-gated in the dock. Same-triangle hits connect; edge-adjacent triangles connect only across a locally continuous UV boundary. Ray misses, surface changes, nonadjacent triangles, and large UV seams restart with a single stamp so unrelated texture regions are never bridged.
+- A coordinated 3D brush/eraser gesture owns one immutable complete-session history snapshot. The canvas suspends/resumes raster segments without emitting history; the dock retains each target's original image and one-pass coverage across revisits. Binding changes, misses, blocked destinations, and incompatible geometric/UV edges restart interpolation at the accepted hit. Every received held-motion sample is routed, while display uploads remain coalesced. Target promotion reuses prepared preview meshes, materials, indexes, and display caches. Layers-tree and scene-selection synchronization are deferred until release; fill/eyedropper retain single-click behavior and shapes retain their surface restrictions.
+- Release commits one changed gesture; no-ops preserve history and native layer bounds. Escape, application focus loss, source loss, hidden/cleared previews, and session teardown cancel the entire gesture. Tool/layer/layout changes, undo/redo, Stop Editing, and document-transition guards resolve it before replacing state. Cancellation restores pixels, native bounds, selected layers, dirty state, and routing together. History restoration refreshes changed inactive previews even when the active target ID stays the same. See the release-plan checkpoint for automated evidence, performance limits, and remaining native checks.
 - The 3D Line, Rectangle, and Ellipse tools capture their starting mesh/material surface, triangle, mesh/texture UV, deterministic image pixel, foreground/background colors, and shape settings. Their endpoint stays valid only on the same surface and geometry-plus-UV-connected island; seams and disconnected geometry cancel with a status reason. A ray-selected, spatially distinct mirrored piece remains usable with the existing shared-UV warning, while coincident interior mappings that the ray cannot disambiguate are rejected. The canvas owns the temporary raster preview and delegates commit to each ordinary 2D shape path, so preview pixels never enter the editable image and a changed result emits exactly one history event.
 - Switching 2D, 3D, Split Horizontal, and Split Vertical changes layout only. It never detects, starts, ends, or replaces a texture session.
 - Editor scene-tab changes also do not own the texture-session lifecycle. The session retains its mesh snapshot, material, texture identity, UV/cache data, source label, and private preview transform when the original source node leaves the active SceneTree or is freed. Painting and normal texture saving continue without a live source scene; Save As updates the retained private material when no scene property remains to assign.
@@ -230,6 +247,359 @@ Current 3D preview navigation follows Godot's default primary mouse conventions:
 - The UV toggle exclusively controls full topology display and applies to both panes: 2D UV edges/vertices and the 3D mesh wire overlay appear and disappear together. Linked-hover boundaries remain a distinct lightweight location cue.
 - Linked hover is view-only: it changes overlay drawing and preview meshes without touching RGBA8 pixels, selection masks, or history. Disabling the link or leaving Split View clears both directions immediately.
 - 2D-to-3D island selection still inherits the documented ambiguity for overlapping UV shells because the current UV lookup uses camera distance as a visibility proxy.
+
+## Reusable right-side panels (0.4.0 milestone 2)
+
+`gddraw_dock.gd` builds the Layers controls and connects their model actions once,
+then registers stable ID `layers`, title, icon, content control, and minimum
+content size with `gddraw_panel_host.gd`. The existing Layers icon still uses the
+dock's bounded icon-import recovery. Palettes registers stable ID `palettes`
+after Layers, with its content, title, palette icon, and 160×100 minimum.
+Additional built-in clients use the same registration method;
+duplicate IDs and duplicate content ownership are rejected.
+
+The host remains the right child of the workspace split, outside the four
+2D/3D canvas arrangements. Both outer split children expand, so a stored panel
+width actually controls divider geometry. Host-owned groups use native
+horizontal/vertical split containers with always-visible, 10-pixel handles.
+The rail stays outside the scrollable group area. When minimum-size groups
+cannot fit, horizontal/vertical scrolling preserves access to their controls;
+the rail itself can scroll vertically in a short dock.
+
+The version-2 `GDDraw/right_panel_layout` project metadata contains `width` and
+a `root` tree. A group stores `id`, ordered panel `tabs`, `closed`, `active`, and
+derived `visible`. `tabs` retains placement for both open and closed clients;
+`closed` identifies clients omitted from the rendered tab strip.
+A split stores `axis`, normalized `ratio`, `first`, and `second`. Collapse keeps
+the group and ratios in that tree. Each rail icon toggles only its own panel;
+all open clients stay highlighted regardless of the active tab. Closing the
+active client selects the first remaining open tab. Empty groups remain in the
+placement tree but are hidden, retaining orientation/ratios on reopening.
+View > Reset Panel Layout opens every client in one tab group at the default
+280-pixel width. Each group's ⋮ menu
+also exposes reset, collapse, split directions, and moving to other groups.
+
+Registration precedes restoration. Validation bounds recursion and group/tab
+counts, rejects duplicate IDs and invalid types/nonfinite numbers, and normalizes
+finite ratios to 0.1–0.9. Unknown panel IDs are dropped from otherwise usable
+groups; an unknown active tab selects the first known tab. Missing registered
+clients are appended closed to the first group. Version-1 visible groups migrate
+their existing tabs as open; hidden groups migrate them as closed. Legacy
+expanded Layers preferences open only the first client. Live version-1 groups
+are also normalized when tool scripts reload. Invalid or empty branches fall back
+to one safe group containing every registered client. Missing/invalid layouts
+migrate the legacy `layers_panel_width` (280–520) and `layers_panel_expanded`
+preferences. Loading is read-only; the next layout operation writes the new
+metadata key. The old keys are retained but no longer written. Layout data is
+outside the replaceable addon and outside document/history serialization.
+
+Panel lifetime is separate from group/split lifetime. The host parks and
+reparents the same content subtrees while rebuilding placement containers;
+it never reconstructs Layers, TreeItems, client models, or their signal wiring.
+It captures visible clients' scrollbar values (including native Tree bars)
+before placement changes and restores them after container layout. Hidden
+clients keep their saved scroll state. Generation checks and weak split
+references make superseded deferred work harmless. Existing client selection,
+text/caret, layer-session state, and history owners remain intact.
+
+Visible client keyboard focus is restored after reparenting. Explicit rail/tab
+activation still focuses tab chrome; collapse focuses the rail. The palette
+grid independently remembers the focused swatch index across hidden states.
+
+Group tabs use a native TabBar inside a clipped ScrollContainer, with explicit
+28×28 previous/next buttons. Those buttons select adjacent tabs and reveal the
+complete active tab; long titles are bounded to the available width and retain
+full-title tooltips. Arrows disable at the first/last tab and disappear when all
+tabs fit. Left/Right and Home/End work through keyboard focus. Layout chrome
+does not route drawing shortcuts; Layers content retains its existing shortcuts.
+
+Panel drags carry both a host instance token and stable panel ID. A temporary
+overlay receives these drags over client controls such as Tree, without changing
+their ordinary layer/asset drag handlers. The tab strip/center merges tabs;
+left/right/top/bottom drop zones create splits and show a highlighted target.
+Drop/menu mutations defer until native input dispatch completes. The overlay
+disappears after drag completion or cancellation.
+
+`tests/test_panel_host.gd` supplies temporary clients and regression coverage.
+Its `--demo` mode opens a standalone full-dock review fixture; `--screenshot`
+renders that fixture to `res://panel_review.png` and exits. Run those modes in
+a disposable project. Automated GUI event dispatch and renderer screenshots do
+not replace the native-editor interaction checklist in the release plan.
+
+## Palette import and use (0.4.0 milestone 3)
+
+- `gddraw_palette_parser.gd` reads and validates complete candidates without
+  writes. `gddraw_palette_store.gd` owns one project collection and transactional
+  persistence. `gddraw_palette_panel.gd` owns the dropdown, action menu, import,
+  confirmation/error dialogs, and per-palette view state. The virtual
+  `gddraw_palette_grid.gd` draws only visible rows, using one focusable control.
+- The dock registers the panel before restoring layout and connects one color
+  request signal. No palette placement branches or additional history owners
+  are introduced. Existing Layers-only descriptions gain a tab using the host's
+  normal missing-client migration, retaining active tab, ratios, and visibility.
+- The supplied `palette_0.svg`, `_1.svg`, and `_2.svg` remain authored assets.
+  The rail button uses `_make_icon_button`, the same state selection and bounded
+  import recovery as Layers. The existing Lucide notice covers these icons.
+- Left-click/Enter/Space requests foreground; right-click/Shift+Enter requests
+  background. Arrows move spatially; Home/End reach the ends and reveal focus.
+  Focus movement, import, palette selection, removal, reopening, and restoration
+  never assign a default color. Tooltips carry names, hex/alpha, and hints.
+- F/B corner badges use white letters on black backing, distinct from the
+  black/yellow keyboard-focus outline. Checkerboards show alpha. Matching uses
+  Color approximate equality, matching duplicate swatches identically. Marker
+  updates redraw visible swatches without rebuilding controls or palette data.
+- Foreground requests call `_set_foreground_color` and record a recent color;
+  background requests call `_set_background_color`. Both setters synchronize
+  the panel for picker, eyedropper, swap, and fill-control changes. Existing
+  text/shape preview semantics remain in the canvas. Palette focus isolates
+  grid keys and dialogs from drawing shortcuts. Browsing/placement has no
+  drawing commit/cancel, pixel, dirty-state, or history path.
+- Columns adapt around 32-pixel cells; vertical scrolling remains available in
+  narrow/short panels. The same panel/model/grid are retained across placement.
+  Each palette remembers its focused index and scroll while the panel lives;
+  only active palette selection is persisted across editor restart. Pending
+  scroll restoration uses short-lived node processing, so freeing the panel
+  cannot resume asynchronous work against a dead instance. Dropdown text is
+  bounded to 160 displayed characters; full names remain stored.
+
+### Syntax and bounds
+
+The offline [palette manual](../addons/GDDraw/docs/palettes.md) is the complete
+user syntax reference. UTF-8 inputs accept BOM, LF/CRLF, and surrounding
+whitespace. `.hex`/`.txt` require one `RRGGBB` or `RRGGBBAA` token, optionally
+prefixed with `#`, per color
+line, with blank lines and full-line `;`/`//` comments. No inline comments,
+shorthand, or inferred format. Names use the filename stem.
+
+GPL is verified against the [GIMP specification](https://developer.gimp.org/core/standards/gpl/).
+It accepts the header, optional Name/Columns, comments, RGB integers 0–255 and
+optional names. Columns 0–255 is validated but ignored for responsive layout.
+Metadata must precede colors and cannot repeat. Whitespace-only lines, indented
+comments, surrounding whitespace, and Columns without Name are documented
+extensions. GPL is opaque. Both formats preserve order and duplicates, reject
+empty/malformed candidates, and report line numbers. Inputs are bounded to
+1 MiB before reading/parsing and 4,096 swatches before append/UI construction;
+oversized input is rejected without truncation.
+
+### Collection storage contract
+
+`gddraw_palette_store.gd.DEFAULT_STORAGE_PATH`, derived from the existing
+`GDDrawStoragePaths.PROJECT_ASSET_ROOT`, is
+`res://gddraw/palettes/collection.json`, outside the replaceable addon. Version 1:
+
+```json
+{"version":1,"next_id":2,"active_id":"palette_1","palettes":[
+  {"id":"palette_1","name":"Studio","swatches":[
+    {"color":"e84941ff","name":"Coral"}
+  ]}
+]}
+```
+
+`palettes` order is collection order; colors are eight-digit RGBA hex strings.
+Increasing `next_id` supplies nonreused stable IDs. Same-name imports choose
+the first available numbered suffix starting at `(2)`. Missing active IDs fall
+back to the first palette with a warning. Missing/duplicate palette IDs, corrupt
+records, invalid counters, and unsupported versions block writes, retain the
+file, and show a repair/reopen error. Missing storage is an empty collection.
+Loading never creates directories or rewrites migration/fallback state.
+
+Collection files are bounded to 64 MiB before JSON parsing and 256 palettes
+before UI construction; each stored palette also validates its swatch bound,
+names, colors, and stable ID. Complete proposed data is validated before any
+write. A uniquely named sibling temporary file is flushed and read back, then
+one same-directory rename replaces the old collection. The destination is never
+deleted first. A failed write/verification/rename preserves memory and the old
+file; temporary-file cleanup is attempted. Abandoned temporary files are never
+treated as collections on restart. Memory and signals advance only after a
+successful replacement. Byte comparison detects stale writes from external
+collection edits. Storage is designed for one plugin writer per project.
+
+Removal captures an ID in a confirmation dialog, never deletes the external
+source, and selects the next remaining entry (previous when removing the last)
+or the empty state. Cancel is inert. Parsed data remains usable after the source
+file disappears. Collection persistence is independent of layout metadata,
+artwork serialization, and drawing undo/redo.
+
+### Verification boundary
+
+`tests/test_palettes.gd` covers parser/storage failures, view/model recreation,
+keyboard and mouse events, focus reveal, actual dock color setters, text/surface
+draft semantics, all four views, old layout migration, tab/split movement,
+focus/scroll lifetime, and dirty 3D sessions with populated history. Existing
+panel-host, Layers, gesture, storage, text/fill/shape, icon and documentation
+suites run sequentially on Godot 4.7 and 4.4. Exact totals and known diagnostics
+are in the milestone-3 release-plan checkpoint.
+
+`--screenshot` renders a standalone full-dock palette fixture to
+`res://palette_review.png`; use a disposable project. Automated input dispatch
+and renderer checks are distinct from physical native-editor interaction.
+There was no connected GDDraw MCP session during this milestone (the available
+session belonged to another project), so fresh editor imports and renderer
+checks used the disposable project. Native file chooser, rail dragging, keyboard
+feel, high DPI, restart persistence, and real update protection remain manual
+checks. Gradients, authoring, image extraction, online services, additional
+formats, release declarations, and publication are outside this checkpoint.
+
+### HEX as the main palette format — 2026-09-21
+
+The user-approved HEX decision supersedes native JSON writing in the authoring
+extension below. Save writes uppercase `RRGGBBAA` values, one per line, to `.hex`.
+The existing internal collection retains palette/swatch names, IDs, snapshots,
+and source hashes. Empty palettes remain drafts; saving/exporting requires one
+color. Existing HEX sources are updated by Save Changes; GPL, TXT, and legacy
+`.gddrawpalette` sources convert to HEX while retaining the original file.
+All established import formats remain supported. Legacy native IDs are removed
+from converted collection records so scanning the retained original cannot
+replace the new HEX source. Converted source aliases prevent duplicate imports.
+
+Export HEX writes a separate RGB or RGBA copy through the same verified atomic
+file replacement. RGB omits alpha without modifying the palette. Export never
+clears dirty state, changes selection, or changes source metadata; managed source
+paths are protected and existing unrelated export files require confirmation.
+Save-as-new rejects the current source path even if the display name differs.
+Both Godot 4.7 and 4.4 pass 211 palette and 13 startup assertions for this change.
+
+### Palette authoring extension — 2026-09-21 (original file format superseded above)
+
+The approved extension adds native `.gddrawpalette` v1 JSON (stable native ID,
+name, ordered named `#RRGGBBAA` swatches). Native files allow zero colors;
+GPL/HEX/TXT imports retain their nonempty requirement. Limits remain 1 MiB and
+4,096 colors per file, 256 entries and 64 MiB in the internal collection.
+Collection records remain backward compatible and optionally include `source`,
+`source_hash`, `native_id`, `import_sources`, `dirty`, `unsaved`, and
+`saved_swatches`. These fields preserve drafts and the last saved snapshot;
+they do not enter portable palette files or artwork history.
+
+Native saves validate and bound the prospective collection before writing a
+verified sibling temporary and renaming it. Then the collection is committed.
+These are two separate atomic file replacements, not a multi-file transaction.
+If the second write fails, the UI explicitly reports that the native file was
+saved and retains the draft. Source hashes and collection byte comparisons
+reject stale overwrites. Save as New creates a fresh native ID and keeps the
+original entry. Removal deletes only the collection entry, never source files.
+
+Project metadata `GDDraw/palette_directory` defaults to `res://gddraw/palettes`.
+Startup and explicit scans inspect supported files directly in that folder,
+ignore `collection.json`, and skip dirty entries with a warning when sources
+change. Known source paths/native IDs avoid repeated imports. Converted import
+paths are retained to avoid importing both the native file and original again.
+The native file becomes authoritative after conversion. Missing folders are
+created only on writes. Scan selection is restored after imports.
+
+The panel owns New/Save/name/replacement/dirty dialogs and Godot's HSV-wheel
+ColorPicker with alpha, explicit Add/Apply and Cancel. Shift+right-click or
+Shift+F10 opens Edit/Remove; normal right-click retains background assignment.
+The virtual grid includes one final Add tile and selectable 24/32/48-pixel cells
+or full-width rows. `GDDraw/palette_view` remembers presentation separately from
+content. View > Palettes Panel delegates to the same independent panel toggle.
+
+## Gradient tool (0.4.0 milestone 4)
+
+### Editable Gradient layers
+
+LayerNode.Kind.GRADIENT is an image-bearing leaf with a JSON-compatible recipe
+and a fixed selection-mask Image. The cached image remains the compositor,
+thumbnail, and export input. `is_paint_layer()` includes these image-bearing leaves
+for hierarchy traversal; raster mutation APIs reject Gradient nodes until explicit
+rasterization. The canvas separately enables gradient editing while disabling
+ordinary pixel editing. Layer thumbnails prepend a narrow 12-pixel type-icon area
+without shrinking the 24-pixel artwork preview; cache keys include node kind.
+
+The default output creates a Gradient layer above the selected leaf in its group;
+the alternate output retains the existing raster operation. A draft starts from
+transparent pixels in layer mode. Its compositor inserts an ephemeral preview
+leaf into a copied hierarchy, or replaces the selected gradient's cached pixels,
+without modifying the actual layer tree. Commit captures one session undo state
+and writes recipe, mask, origin, and rendered pixels together. Cancel leaves all
+stored layer data unchanged. Reopening uses layer-local endpoints translated to
+the current canvas workspace and retains the stored mask independently of selection.
+
+Mouse release commits a canvas gesture and reloads editable handles immediately.
+An explicit creation flag distinguishes an off-handle drag from editing an existing
+node, including when another Gradient layer is selected. The flag also chooses
+insert-versus-replace preview compositing. Zero-length gestures create nothing;
+Escape restores the previous layer's handles. Apply/Cancel buttons are absent.
+Control changes on saved gradients coalesce after 300 ms of inactivity, wait for
+canvas/strip drags to finish, and flush before tool/layer changes and layered saves.
+Loading stored settings suppresses auto-apply scheduling to avoid feedback loops.
+
+Gradient support introduced layered document format 3, storing the validated recipe
+in manifest JSON and a separate mask PNG alongside cached layer pixels. Current
+format 4 adds Text layers and reads versions 1/2/3. History, duplication, and dirty-state
+fingerprints include recipe/mask. Resize scales endpoints and mask and regenerates
+the image; layer movement retains local coordinates. Merge and explicit Rasterize
+produce ordinary paint leaves. Texture sessions consume the same composite cache.
+
+`gddraw_gradient_panel.gd` edits session-local color stops on the canvas. Stops
+have a color including alpha and a normalized position, with immutable endpoint
+positions and ordered intermediate stops. The native Gradient ramp uses the stop
+array; reverse mirrors offsets and colors and overall opacity multiplies stop
+alpha. Editing a stop detaches the recipe from drawing colors.
+Canvas handles, strip markers, and editable rows share selected-stop state. Each
+row owns a native color picker and position/alpha text fields with persistent
+percent units. Endpoint positions are read-only. Rows survive ordinary preview
+refreshes so focus, unfinished text, and picker popups remain stable; row-count
+changes retire old field callbacks before rebuilding. Add/Duplicate/Delete use
+shared icon styling in evenly spaced bottom slots. The temporary panel rail button
+uses the same icon factory and active styling as the left Gradient tool. Updates
+reuse the existing draft renderer and commit/history path.
+
+The panel host can temporarily register a tool panel, snapshot its layout, and
+suppress layout persistence until that panel closes. Closing parks its content,
+removes its registration, and restores the prior description (including active
+tabs and width). This keeps Gradient out of persistent Layers/Palettes layouts.
+
+`ToolMode.GRADIENT` is appended to the canvas enum, preserving existing numeric
+tool IDs. The dock owns its toolbar button (between Bucket and Shapes), top-bar
+options, Tool menu entry, and scoped G shortcut. The supplied Lucide `blend_0`
+and `blend_1` SVGs use the normal icon import/recovery path. Existing foreground
+and background controls are reparented into the gradient options row.
+
+The gradient toolbar exposes Linear/Radial and Reverse alongside shared colors.
+Preferences > Tools groups Brush and Gradients sections. The gradient output
+default is stored as project metadata `GDDraw/gradient_default_new_layer` (true by
+default, with invalid values falling back to true). Selecting an existing Gradient
+does not mutate the preference; its handles always retain editable-layer behavior.
+Output/color-mode/overall-opacity controls are absent from the toolbar. Stop alpha
+and layer opacity remain the user-facing controls for transparency; legacy recipe
+opacity is retained internally for saved-document compatibility.
+
+`gddraw_gradient.gd` is a raster helper: pixel-space linear projection and radial
+distance drive Godot's native GradientTexture2D generation. Normalized coordinates
+are corrected for non-square linear images; radial color generation uses a square
+domain to preserve circular radii. RGBA interpolation is straight, linear in
+stored sRGB components, then source-over blended. Foreground-to-transparent keeps
+foreground RGB at both ends. Reverse swaps local endpoints; opacity multiplies
+alpha. Alpha lock blends RGB against an opaque copy and restores original alpha
+bytes (including hidden RGB for fully transparent source pixels). Selection masks
+use native masked blits, and affected regions intersect document/workspace bounds.
+
+Canvas drafts capture one immutable active-layer base and mask snapshot. Colors
+and options remain live; either endpoint can be dragged after mouse release.
+Preview never emits image_changed or updates a layer's stored image. Mouse release
+compares output bytes, adopts changed pixels, refreshes through the existing
+compositor, and emits one stroke_committed(previous_image). Existing layer history
+and 3D texture synchronization own the resulting edit. Zero-length/unchanged
+gestures create no history. Escape, tool/layer operations, image replacement,
+and editing disablement cancel. Window focus loss only ends endpoint dragging,
+preserving drafts while color pickers are open. Selecting Gradient preserves
+an existing selection; floating selections are resolved through the existing path.
+
+For regions over 512 pixels, main-thread color generation is bounded to 512;
+one worker blends private Images without nodes or rendering-server calls. Pointer
+updates coalesce while a job runs. Completed results display only for the same
+gesture generation; cancel/restart invalidates older results. Node teardown joins
+the worker. Completed image composition/upload stays on the main thread. Large
+drag previews approximate fine transitions; final commits always render full
+resolution and may pause briefly on large alpha-locked images.
+
+Direct 3D-surface gradient gestures are rejected with a status message. Applying
+the gradient on a 3D session's 2D texture canvas uses the existing texture update
+path. Tests verify raster projections, radial aspect, alpha, clipping, selection
+retention, cancellation, worker replacement/teardown, mouse dispatch, undo/redo,
+layer opacity, inactive-layer preservation, and real-renderer 3D texture updates.
+Godot's dummy renderer retains original ImageTexture uploads on get_image(), so
+GPU texture readback assertions run only with a real renderer.
 
 ## UI Guidelines
 
@@ -278,3 +648,34 @@ Useful MCP checks:
 - `session_activate`
 - `logs_read(source="editor", include_details=true)`
 - `script_manage(op="find_symbols", path="res://addons/GDDraw/...")`
+
+## Editable Text layers
+
+Text commits create a `Kind.TEXT` leaf with a validated text recipe, cached RGBA
+pixels, origin, and optional fixed selection mask. The recipe preserves text,
+font bytes/name, size, box, rotation, alignment, wrapping, fill, and RGBA colors.
+History, clipboard duplication, and dirty fingerprints include the editable data.
+The existing canvas text editor and top toolbar own edits; no Text panel is added.
+Selecting a Text layer reopens that editor. Commit updates the selected Text layer,
+Cancel leaves its stored data intact, and a fresh box after Commit creates a sibling.
+Tool/layer switches and saves finish the current draft. Paint tools require explicit
+Rasterize Text Layer; merging produces paint pixels through existing layer behavior.
+
+The canvas retains its legacy raster commit path for standalone integrations.
+Dock-owned canvases enable `text_layer_mode` and emit a recipe/pixels payload instead
+of a raster stroke. A separate text permission permits editing Text layers while
+ordinary pixel edits are disabled. Preview composition inserts a new layer or
+replaces the selected one, preserving stacking, group opacity, and visibility.
+Selection masks remain fixed across later text edits. 3D sessions receive committed
+composites through the existing texture synchronization path.
+
+Layered format 4 stores recipes in JSON, embedded font bytes in separate archive
+entries, and optional masks in PNG entries. Documents load font bytes from the
+archive rather than following machine-specific paths. Cached pixels preserve
+flattened output; opening the editor reconstructs the font and text layout.
+`tests/test_text_layers.gd` covers creation, replacement, cancellation, undo/redo,
+font/pixel round trips, masks, duplication, locks, rasterization, sizing, and 3D.
+Document scaling updates the box and font size, scales the mask, and regenerates
+cached text pixels through the same canvas text engine using a temporary off-tree
+canvas. This keeps the scaled cache consistent with the reopened editor. Crop and
+canvas-bound changes retain editable data and adjust layer origins as usual.

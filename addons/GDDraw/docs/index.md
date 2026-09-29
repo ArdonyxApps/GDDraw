@@ -1,12 +1,13 @@
 # Welcome to GDDraw
 
-GDDraw 0.3.0 is a Godot editor plugin for layered 2D artwork and multi-object albedo texture painting. It is designed for fast iteration without leaving the editor.
+GDDraw 0.4.0 is a Godot editor plugin for layered 2D artwork and multi-object albedo texture painting. It is designed for fast iteration without leaving the editor.
 
 > **Screenshot placeholder:** Add a wide overview of GDDraw in Split View. Show a layered texture in the 2D canvas, the painted model in the 3D preview, and the Layers panel with a small hierarchy expanded.
 
 ## What you can create
 
-- Layered 2D drawings with paint layers, nested groups, opacity, visibility, locking, and non-destructive project files.
+- Layered 2D drawings with paint, editable Text, and editable Gradient layers, nested groups, and non-destructive project files.
+- Reusable color palettes with standard HEX saving and RGB/RGBA export.
 - PNG sprites and texture assets stored directly in the Godot project.
 - Albedo texture edits painted directly on supported `MeshInstance3D` and CSG surfaces.
 - Coordinated 3D painting sessions containing several objects, materials, and textures from one Scene hierarchy.
@@ -18,11 +19,13 @@ See [What's New](whats-new.md) for the latest changes and highlights from earlie
 
 New users should begin with [Getting Started](getting-started.md), then read [Interface](interface.md) and [Tools](tools.md).
 
-For layered artwork, continue with [Layers](layers.md). For model textures, see [Painting in 3D](3d-painting.md).
+For layered artwork, continue with [Layers](layers.md), [Gradients](gradients.md),
+and [Palettes](palettes.md). For continuous painting across model textures, see
+[Painting in 3D](3d-painting.md). Arrange tabs and splits using [Interface](interface.md).
 
 ## Compatibility
 
-GDDraw 0.3.0 supports Godot 4.4 and later and is tested through Godot 4.7. It requires a desktop editor build. Native clipboard and file-dialog details can vary by operating system.
+GDDraw 0.4.0 supports Godot 4.4 and later and is tested through Godot 4.7. It requires a desktop editor build. Native clipboard and file-dialog details can vary by operating system.
 
 ## Documentation conventions
 

@@ -83,6 +83,187 @@ func add_paint_layer(
 	return layer.id
 
 
+func update_text_layer(node_id: String, recipe: Dictionary, pixels: Image, origin: Vector2i, mask: Image = null) -> bool:
+	var node = find_node(node_id)
+	if not node or not node.is_paint_layer() or is_node_effectively_locked(node_id) or not _layer_workspace_is_safe(pixels, origin, size): return false
+	if not preload("res://addons/GDDraw/gddraw_text_recipe.gd").valid_recipe(recipe): return false
+	if mask and mask.get_size() != pixels.get_size(): return false
+	node.kind = LayerNode.Kind.TEXT
+	node.text_mask = mask.duplicate() if mask else null
+	node.text_recipe = recipe.duplicate(true)
+	node.image = pixels.duplicate()
+	node.origin = origin
+	node.eraser_source = pixels.duplicate()
+	_content_revision += 1
+	return true
+
+func rasterize_text_layer(node_id: String) -> bool:
+	var node = find_node(node_id)
+	if not node or not node.is_text_layer() or is_node_effectively_locked(node_id): return false
+	node.rasterize()
+	_content_revision += 1
+	return true
+
+func update_gradient_layer(node_id: String, recipe: Dictionary, mask: Image, pixels: Image, origin: Vector2i) -> bool:
+	var node = find_node(node_id)
+	if not node or not node.is_paint_layer() or is_node_effectively_locked(node_id) or not _layer_workspace_is_safe(pixels, origin, size): return false
+	if not preload("res://addons/GDDraw/gddraw_gradient.gd").valid_recipe(recipe) or not mask or mask.get_size() != pixels.get_size(): return false
+	node.kind = LayerNode.Kind.GRADIENT
+	node.gradient_recipe = recipe.duplicate(true)
+	node.gradient_mask = mask.duplicate()
+	node.image = pixels.duplicate()
+	node.origin = origin
+	node.eraser_source = pixels.duplicate()
+	_content_revision += 1
+	return true
+
+func rasterize_gradient_layer(node_id: String) -> bool:
+	var node = find_node(node_id)
+	if not node or not node.is_gradient_layer() or is_node_effectively_locked(node_id): return false
+	node.rasterize()
+	_content_revision += 1
+	return true
+
+func composite_gradient_preview(pixels: Image, origin: Vector2i, creating_layer := false) -> Image:
+	var selected = get_selected_layer()
+	if selected and selected.is_editable_layer() and not creating_layer: return composite_workspace(pixels.get_size(), origin, pixels)
+	var extra := LayerNode.new()
+	extra.image = pixels
+	extra.origin = origin
+	var output := _make_transparent_layer_image(pixels.get_size())
+	_composite_nodes(output, _nodes_with_gradient_preview(nodes, extra), "", null, Vector2i.ZERO, origin)
+	return output
+
+func _nodes_with_gradient_preview(source: Array, extra) -> Array:
+	var result: Array = []
+	for node in source:
+		if node.id == selected_layer_id: result.append(extra)
+		if node.is_group():
+			var group := LayerNode.new()
+			group.kind = LayerNode.Kind.GROUP
+			group.opacity = node.opacity
+			group.visible = node.visible
+			group.children = _nodes_with_gradient_preview(node.children, extra)
+			result.append(group)
+		else: result.append(node)
+	return result
+
+func selection_roots(ids: Array) -> Array:
+	var ordered: Array = []
+	_collect_group_selection(nodes, ids, ordered)
+	return ordered
+
+
+func can_apply_selection(ids: Array, action: String) -> bool:
+	var ordered := selection_roots(ids)
+	if ordered.is_empty() or action not in ["show", "hide", "lock", "unlock", "duplicate", "delete"]: return false
+	var removed_count := 0
+	for id in ordered:
+		var node = find_node(id)
+		if action in ["lock", "unlock"] and is_node_locked_by_ancestor(id): return false
+		if action in ["duplicate", "delete"] and (is_node_effectively_locked(id) or _node_or_descendants_locked(node)): return false
+		removed_count += _count_paint_layers_in(node)
+	return action != "delete" or removed_count < get_paint_layer_count()
+
+
+func apply_selection(ids: Array, action: String) -> Array:
+	if not can_apply_selection(ids, action): return []
+	var ordered := selection_roots(ids)
+	var result: Array = []
+	for id in ordered:
+		var node = find_node(id)
+		match action:
+			"show", "hide":
+				if node.visible != (action == "show"):
+					set_node_visible(id, action == "show")
+					result.append(id)
+			"lock", "unlock":
+				if node.locked != (action == "lock"):
+					set_node_locked(id, action == "lock")
+					result.append(id)
+			"duplicate": result.append(duplicate_node(id))
+			"delete":
+				remove_node(id)
+				result.append(id)
+	return result
+
+
+## Index refers to the destination before the selected nodes are removed.
+func selection_move_plan(ids: Array, parent_group_id: String, index: int) -> Dictionary:
+	var ordered := selection_roots(ids)
+	var destination: Array = _get_child_container(parent_group_id)
+	if ordered.is_empty() or destination == null: return {}
+	if not parent_group_id.is_empty() and is_node_effectively_locked(parent_group_id): return {}
+	var adjusted := clampi(index, 0, destination.size())
+	for id in ordered:
+		var node = find_node(id)
+		if is_node_effectively_locked(id) or _node_or_descendants_locked(node): return {}
+		if id == parent_group_id or (node.is_group() and _node_contains_id(node, parent_group_id)): return {}
+		var location := get_node_location(id)
+		if str(location.parent_group_id) == parent_group_id and int(location.index) < index: adjusted -= 1
+	return {"ids": ordered, "parent": parent_group_id, "index": maxi(0, adjusted)}
+
+
+func move_nodes(ids: Array, parent_group_id: String, index: int) -> bool:
+	var plan := selection_move_plan(ids, parent_group_id, index)
+	if plan.is_empty(): return false
+	var destination: Array = _get_child_container(parent_group_id)
+	var same_order := true
+	for i in range(plan.ids.size()):
+		var location := get_node_location(plan.ids[i])
+		if str(location.parent_group_id) != parent_group_id or int(location.index) != int(plan.index) + i:
+			same_order = false
+	if same_order: return false
+	var moved: Array = []
+	for id in plan.ids:
+		var context := _find_context(id)
+		moved.append(context.node)
+		context.container.remove_at(int(context.index))
+	for i in range(moved.size()): destination.insert(int(plan.index) + i, moved[i])
+	return ensure_invariants()
+
+
+func group_selection_plan(ids: Array) -> Dictionary:
+	var ordered: Array = []
+	_collect_group_selection(nodes, ids, ordered)
+	if ordered.is_empty(): return {}
+	var common: Array = []
+	for i in range(ordered.size()):
+		var node = find_node(ordered[i])
+		if is_node_effectively_locked(node.id) or _node_or_descendants_locked(node): return {}
+		var parents: Array = []
+		var parent: String = str(get_node_location(node.id).get("parent_group_id", ""))
+		while not parent.is_empty():
+			parents.append(parent)
+			parent = str(get_node_location(parent).get("parent_group_id", ""))
+		parents.append("")
+		if i == 0: common = parents
+		else:
+			common = common.filter(func(id): return parents.has(id))
+	if common.is_empty(): return {}
+	var destination: String = common[0]
+	var first: String = ordered[0]
+	while str(get_node_location(first).parent_group_id) != destination:
+		first = str(get_node_location(first).parent_group_id)
+	return {"ids": ordered, "parent": destination, "index": int(get_node_location(first).index)}
+
+func _collect_group_selection(source: Array, ids: Array, ordered: Array) -> void:
+	for node in source:
+		if ids.has(node.id): ordered.append(node.id)
+		elif node.is_group(): _collect_group_selection(node.children, ids, ordered)
+
+func group_nodes(ids: Array) -> String:
+	var plan := group_selection_plan(ids)
+	if plan.is_empty(): return ""
+	var previous := capture_state()
+	var group_id := add_group("", plan.parent, plan.index)
+	if group_id.is_empty(): return ""
+	for i in range(plan.ids.size()):
+		if not move_node(plan.ids[i], group_id, i):
+			restore_state(previous)
+			return ""
+	return group_id
+
 func add_group(group_name := "", parent_group_id := "", index := 0) -> String:
 	var container: Array = _get_child_container(parent_group_id)
 	if container == null:
@@ -188,6 +369,7 @@ func merge_node_down(node_id: String) -> String:
 	var merged := _make_transparent_layer_image(bounds.size)
 	_composite_nodes(merged, [upper, lower], "", null, Vector2i.ZERO, bounds.position)
 	lower.image = merged
+	lower.rasterize()
 	lower.eraser_source = merged.duplicate()
 	lower.origin = bounds.position
 	lower.visible = true
@@ -292,6 +474,7 @@ func get_selected_eraser_source_reference() -> Image:
 
 func set_selected_layer_image(next_image: Image) -> bool:
 	var layer = get_selected_layer()
+	if layer and layer.is_editable_layer(): return false
 	var normalized := _normalize_layer_image(next_image)
 	if not layer or not normalized or not _layer_workspace_is_safe(normalized, layer.origin, size) or is_node_effectively_locked(layer.id):
 		return false
@@ -303,6 +486,7 @@ func set_selected_layer_image(next_image: Image) -> bool:
 
 func adopt_selected_layer_image(next_image: Image) -> bool:
 	var layer = get_selected_layer()
+	if layer and layer.is_editable_layer(): return false
 	if (
 		not layer
 		or not next_image
@@ -337,6 +521,7 @@ func set_selected_layer_origin(next_origin: Vector2i) -> bool:
 
 func adopt_selected_layer_workspace(next_image: Image, next_origin: Vector2i) -> bool:
 	var layer = get_selected_layer()
+	if layer and layer.is_editable_layer(): return false
 	if not layer or not _layer_workspace_is_safe(next_image, next_origin, size) or is_node_effectively_locked(layer.id):
 		return false
 	if next_image.has_mipmaps() or next_image.get_format() != Image.FORMAT_RGBA8:
@@ -1003,6 +1188,10 @@ func _duplicate_node_with_new_ids(source, rename_root := false):
 	var duplicate := LayerNode.new()
 	duplicate.id = _allocate_node_id("layer" if source.is_paint_layer() else "group")
 	duplicate.kind = source.kind
+	duplicate.text_recipe = source.text_recipe.duplicate(true)
+	duplicate.text_mask = source.text_mask.duplicate() if source.text_mask else null
+	duplicate.gradient_recipe = source.gradient_recipe.duplicate(true)
+	duplicate.gradient_mask = source.gradient_mask.duplicate() if source.gradient_mask else null
 	duplicate.name = source.name + (" copy" if rename_root else "")
 	duplicate.visible = source.visible
 	duplicate.opacity = source.opacity
@@ -1030,8 +1219,16 @@ func _node_state_is_valid_for_target(node_state: Dictionary) -> bool:
 	if node_state.is_empty():
 		return false
 	var kind := int(node_state.get("kind", -1))
-	if kind == LayerNode.Kind.PAINT:
+	if kind in [LayerNode.Kind.PAINT, LayerNode.Kind.GRADIENT, LayerNode.Kind.TEXT]:
 		var layer_image: Image = node_state.get("image", null)
+		if kind == LayerNode.Kind.TEXT and not preload("res://addons/GDDraw/gddraw_text_recipe.gd").valid_recipe(node_state.get("text_recipe")): return false
+		if kind == LayerNode.Kind.TEXT:
+			var text_mask: Image = node_state.get("text_mask")
+			if text_mask and (not layer_image or text_mask.get_size() != layer_image.get_size()): return false
+		if kind == LayerNode.Kind.GRADIENT:
+			var mask: Image = node_state.get("gradient_mask")
+			if not preload("res://addons/GDDraw/gddraw_gradient.gd").valid_recipe(node_state.get("gradient_recipe")): return false
+			if not mask or not layer_image or mask.get_size() != layer_image.get_size(): return false
 		var layer_origin: Vector2i = node_state.get("origin", Vector2i.ZERO)
 		return layer_image != null and _layer_workspace_is_safe_size(layer_image.get_size(), layer_origin, size)
 	if kind != LayerNode.Kind.GROUP:
@@ -1201,6 +1398,12 @@ func _resize_node_images(node, new_size: Vector2i, keep_pixels: bool) -> void:
 			_resize_node_images(child, new_size, keep_pixels)
 		return
 	node.image = _resize_layer_image(node.image, new_size, keep_pixels)
+	if node.is_text_layer() and not keep_pixels: node.rasterize()
+	if node.is_gradient_layer():
+		if keep_pixels:
+			node.gradient_mask = _resize_layer_image(node.gradient_mask, new_size, true)
+		else:
+			node.rasterize()
 	node.eraser_source = _resize_layer_image(node.eraser_source, new_size, keep_pixels)
 	node.origin = Vector2i.ZERO
 
@@ -1225,7 +1428,22 @@ func _scale_node_images(node, new_size: Vector2i, interpolation: int) -> void:
 		maxi(1, roundi(float(node.image.get_height()) * scale.y))
 	)
 	node.image = _resample_layer_image(node.image, next_layer_size, interpolation)
+	if node.is_text_layer():
+		if node.text_mask: node.text_mask = _resample_layer_image(node.text_mask, next_layer_size, Image.INTERPOLATE_NEAREST)
+		for i in range(4):
+			node.text_recipe.box[i] = roundi(float(node.text_recipe.box[i]) * (scale.x if i % 2 == 0 else scale.y))
+		node.text_recipe.box[2] = maxi(1, int(node.text_recipe.box[2]))
+		node.text_recipe.box[3] = maxi(1, int(node.text_recipe.box[3]))
+		node.text_recipe.font_size = clampi(roundi(float(node.text_recipe.font_size) * scale.y), 1, 512)
+		node.image = preload("res://addons/GDDraw/gddraw_text_recipe.gd").render(node.text_recipe, next_layer_size, node.text_mask)
+	if node.is_gradient_layer():
+		for key in ["start", "end"]:
+			node.gradient_recipe[key][0] *= scale.x
+			node.gradient_recipe[key][1] *= scale.y
+		node.gradient_mask = _resample_layer_image(node.gradient_mask, next_layer_size, Image.INTERPOLATE_NEAREST)
+		node.image = preload("res://addons/GDDraw/gddraw_gradient.gd").render_recipe(node.gradient_recipe, next_layer_size, node.gradient_mask)
 	node.eraser_source = _resample_layer_image(node.eraser_source, next_layer_size, interpolation)
+	if node.is_text_layer(): node.eraser_source = node.image.duplicate()
 	node.origin = Vector2i(roundi(float(node.origin.x) * scale.x), roundi(float(node.origin.y) * scale.y))
 
 
@@ -1437,7 +1655,12 @@ func _normalize_layer_image(source: Image) -> Image:
 
 
 func _validate_node_images(node) -> bool:
+	if node.is_text_layer() and not preload("res://addons/GDDraw/gddraw_text_recipe.gd").valid_recipe(node.text_recipe): return false
+	if node.is_text_layer() and node.text_mask and (not node.image or node.text_mask.get_size() != node.image.get_size()): return false
 	if node.is_paint_layer():
+		if node.is_gradient_layer():
+			if not preload("res://addons/GDDraw/gddraw_gradient.gd").valid_recipe(node.gradient_recipe): return false
+			if not node.gradient_mask or not node.image or node.gradient_mask.get_size() != node.image.get_size(): return false
 		var normalized := _normalize_layer_image(node.image)
 		if not normalized:
 			return false

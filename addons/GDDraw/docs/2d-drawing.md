@@ -19,6 +19,21 @@ Drag a PNG or other supported image onto the 2D canvas or directly into the Laye
 - Oversized images remain at their original size and enter a workflow where Selection controls can position or scale them.
 - Dropping into the Layers tree honors the indicated hierarchy placement where valid.
 
+## Editable content and drawing layers
+
+Text and Gradient create editable layers by default. Set their defaults under
+**Preferences > Tools**. Select a saved Text layer to resume its canvas editor;
+select a Gradient layer to restore its handles and color-stop controls.
+
+Starting Brush, Fill, or a shape with an editable layer selected creates a paint
+layer above it in the same group. Creation and drawing are one undo step, and
+canceled or ineffective gestures leave no empty layer. Use explicit rasterization
+when you want to change the editable layer's own pixels, including with Eraser.
+
+Use [Palettes](palettes.md) to choose foreground/background colors. Save as a
+layered project to retain editable Text and Gradient content; PNG exports the
+combined visible pixels. See [Layers](layers.md) for multi-selection and grouping.
+
 ## Image operations
 
 ### Scale Image

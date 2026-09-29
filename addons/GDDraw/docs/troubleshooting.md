@@ -16,7 +16,7 @@ The pieces may use mirrored or shared UV coordinates, or several material slots 
 
 ## A 3D object cannot be imported
 
-Verify that it has supported triangle geometry, usable UV coordinates, and a compatible material path. GDDraw 0.3.0 edits albedo textures on `StandardMaterial3D` and supported single-material generated CSG geometry.
+Verify that it has supported triangle geometry, usable UV coordinates, and a compatible material path. GDDraw 0.4.0 edits albedo textures on `StandardMaterial3D` and supported single-material generated CSG geometry.
 
 Shader materials, unsupported texture channels, and unsupported generated geometry must be prepared outside GDDraw.
 
@@ -47,6 +47,42 @@ Open the Text font selector after placing supported fonts in the configured cust
 ## The interface is cramped
 
 Increase the bottom-panel height or editor width, collapse the Layers panel, or choose a single 2D or 3D view instead of Split View.
+
+## A panel is open but its content is hidden behind another tab
+
+A blue rail button means the panel is open, including an inactive tab. Select its
+tab to view it; clicking the highlighted rail button closes it. Drag tabs to reorder
+them or use the group's placement menu. **View > Reset Panel Layout** restores the
+default group. The small arrows reveal tabs that do not fit the available width.
+
+## The Gradient button disappears when I change tools
+
+Its default availability follows the Gradient tool or selected Gradient layer.
+Enable **Preferences > Tools > Gradients > Always show Gradient panel button** to
+keep it available. Selecting Gradient or starting a gesture reveals the helper.
+On ordinary layers, the panel previews current drawing colors; existing Gradient
+layers retain their own stops.
+
+## Painting on Text or Gradient adds a layer
+
+This preserves editable content. Brush, Fill, and shapes start on a new paint layer
+above it. Use **Rasterize Text Layer** or **Rasterize Gradient Layer** if you want to
+paint or erase that layer's existing pixels. Undo restores editability.
+
+## A bulk layer action or drag is unavailable
+
+Check locks on the selected items, their descendants, and the destination group.
+Deletion must leave at least one paint layer in the target. Multi-layer moves stay
+within one target, cannot create hierarchy cycles, and require the layer filter
+to be cleared. Selected parents carry their descendants once.
+
+## A palette file does not import or appear in the selector
+
+Check **Preferences > Files > Palettes** and use **Rescan Palette Folder**. HEX/TXT
+files need one six- or eight-digit color per line, with an optional leading `#`.
+GPL files use the GIMP Palette format. Import errors identify invalid lines;
+see [Palettes](palettes.md) for the accepted syntax. Save, Export, and Import refresh
+the configured folder automatically. Unsaved palette drafts are preserved during scans.
 
 ## Update installation fails
 
